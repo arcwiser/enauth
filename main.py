@@ -39,6 +39,7 @@ shutdown_event = asyncio.Event()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await clear_all_sessions_on_startup()
     await ensure_default_admin()
     cleanup_task = asyncio.create_task(_maintenance_loop())
     yield
@@ -47,6 +48,20 @@ async def lifespan(app: FastAPI):
     with contextlib.suppress(asyncio.CancelledError):
         await cleanup_task
     app_log.info("EnAuth server shutdown complete")
+
+
+async def clear_all_sessions_on_startup():
+    """Invalidate any in-flight auth and portal sessions when the server starts."""
+    import aiosqlite
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("DELETE FROM admin_sessions")
+        await db.execute("DELETE FROM auth_sessions")
+        await db.execute("DELETE FROM reseller_sessions")
+        await db.execute("DELETE FROM portal_sessions")
+        await db.execute("DELETE FROM sessions")
+        await db.commit()
+    app_log.info("Cleared existing auth sessions on startup")
 
 
 async def _maintenance_loop():
