@@ -153,9 +153,11 @@ if __name__ == "__main__":
         "log_level": "info",
     }
 
-    if ssl_cert and ssl_key:
+    if ssl_cert and ssl_key and Path(ssl_cert).exists() and Path(ssl_key).exists():
         uvicorn_kwargs["ssl_certfile"] = ssl_cert
         uvicorn_kwargs["ssl_keyfile"]  = ssl_key
         app_log.info(f"SSL enabled using: {ssl_cert}")
+    elif ssl_cert or ssl_key:
+        app_log.warning("SSL certificate or key specified but file not found. Running without SSL.")
 
     uvicorn.run(**uvicorn_kwargs)
