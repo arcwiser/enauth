@@ -6,3 +6,4 @@ __pycache__/
 *.pem
 venv/
 node_modules/
+server.log*
