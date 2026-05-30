@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EnAuth — User Panels</title>
+  <meta name="description" content="Create and manage custom links and user panels for end-user HWID resets and registrations">
+  <link rel="stylesheet" href="css/style.css">
+  <style>
+    .panel-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+      gap: 16px;
+    }
+
+    .panel-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 24px;
+      transition: all 0.2s ease;
+      position: relative;
+      overflow: hidden;
+      backdrop-filter: var(--glass);
+    }
+
+    .panel-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, var(--primary), var(--secondary));
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+
+    .panel-card:hover { 
+      border-color: var(--primary-glow); 
+      transform: translateY(-2px); 
+      box-shadow: 0 8px 32px rgba(0,0,0,0.3); 
+    }
+    
+    .panel-card:hover::before { opacity: 1; }
+
+    .panel-card-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      margin-bottom: 16px;
+      gap: 12px;
+    }
+
+    .panel-icon {
+      width: 42px;
+      height: 42px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, rgba(0, 242, 255, 0.1), rgba(112, 0, 255, 0.1));
+      border: 1px solid rgba(0,242,255,0.2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+      flex-shrink: 0;
+      color: var(--primary);
+    }
+
+    .panel-title-text {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--text-main);
+      flex: 1;
+    }
+
+    .panel-subtitle {
+      font-size: 12px;
+      color: var(--text-dim);
+      margin-top: 2px;
+    }
+
+    .link-row {
+      background: var(--bg-accent);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 14px;
+      margin-bottom: 18px;
+    }
+
+    .link-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .link-container {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .link-val {
+      flex: 1;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--primary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .copy-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-dim);
+      cursor: pointer;
+      font-size: 14px;
+      padding: 4px;
+      border-radius: var(--radius-sm);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s ease;
+    }
+
+    .copy-btn:hover {
+      color: var(--primary);
+      background: var(--bg-hover);
+    }
+
+    .panel-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-top: 1px solid var(--border);
+      padding-top: 14px;
+      font-size: 12px;
+      color: var(--text-dim);
+    }
+
+    .empty-panels {
+      grid-column: 1 / -1;
+      text-align: center;
+      padding: 80px 20px;
+      color: var(--text-dim);
+    }
+
+    .empty-panels .empty-icon { font-size: 52px; margin-bottom: 16px; opacity: 0.3; }
+    .empty-panels .empty-title { font-size: 18px; font-weight: 600; color: var(--text-main); margin-bottom: 8px; }
+    .empty-panels .empty-sub   { font-size: 13px; margin-bottom: 24px; color: var(--text-dim); }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="main">
+    <div class="topbar">
+      <div class="topbar-title">User Panels</div>
+      <button class="btn btn-primary" onclick="openCreateModal()">+ Create User Panel</button>
+    </div>
+    <div class="content">
+      <div class="card" style="background: linear-gradient(135deg, rgba(0, 242, 255, 0.05), rgba(112, 0, 255, 0.05)); margin-bottom: 24px;">
+        <h2 style="font-size: 16px; font-weight: 600; margin-bottom: 6px;">🌐 About User Panels</h2>
+        <p style="color: var(--text-dim); font-size: 13px; line-height: 1.5;">
+          User Panels allow you to generate custom client portals. Issue your customers a license key, and they can visit this portal to register their own username/password and reset their Hardware ID (HWID) instantly whenever they switch PCs.
+        </p>
+      </div>
+
+      <div class="panel-grid" id="panel-grid">
+        <div style="grid-column:1/-1;text-align:center;padding:60px;color:var(--text-dim)">
+          <span class="spinner"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Create Panel Modal -->
+<div class="modal-overlay" id="create-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">🌐 Create User Panel</div>
+      <button class="modal-close" onclick="closeModal('create-modal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Panel Name</label>
+        <input class="input" id="p-name" type="text" placeholder="e.g. CS2 Hack Portal, Loader Reset Panel" autofocus>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Associated Application</label>
+        <select class="select" id="p-app">
+          <option value="">-- Loading Apps --</option>
+        </select>
+        <span style="font-size:11px;color:var(--text-dim);margin-top:6px;display:block;">
+          The panel will validate license keys and reset HWIDs belonging to this application only.
+        </span>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('create-modal')">Cancel</button>
+      <button class="btn btn-primary" id="create-btn" onclick="createPanel()">Create Panel</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/api.js"></script>
+<script>
+  requireAuth();
+  buildSidebar("panels");
+
+  // Get current portal address dynamically
+  const PORTAL_BASE = window.location.origin + "/panel/user-portal.html";
+
+  async function load() {
+    const grid = document.getElementById("panel-grid");
+    try {
+      const panels = await API.getPanels();
+
+      if (!panels.length) {
+        grid.innerHTML = `
+          <div class="empty-panels">
+            <div class="empty-icon">🌐</div>
+            <div class="empty-title">No user panels yet</div>
+            <div class="empty-sub">Create a panel to give your clients a secure registration and HWID reset portal.</div>
+            <button class="btn btn-primary" onclick="openCreateModal()">+ Create User Panel</button>
+          </div>`;
+        return;
+      }
+
+      grid.innerHTML = panels.map(p => {
+        const fullLink = `${PORTAL_BASE}?id=${p.id}`;
+        return `
+        <div class="panel-card" id="panel-${p.id}">
+          <div class="panel-card-header">
+            <div class="panel-icon">🌐</div>
+            <div style="flex:1;min-width:0">
+              <div class="panel-title-text">${escHtml(p.name)}</div>
+              <div class="panel-subtitle">App: <strong style="color:var(--primary); font-weight:600;">${escHtml(p.app_name)}</strong></div>
+            </div>
+            <button class="btn btn-ghost btn-sm btn-icon" onclick="deletePanel('${p.id}', '${escHtml(p.name)}')" title="Delete Panel" style="color:var(--accent-red)">🗑</button>
+          </div>
+
+          <div class="link-row">
+            <div class="link-label">Client Portal Link</div>
+            <div class="link-container">
+              <span class="link-val" id="link-${p.id}">${escHtml(fullLink)}</span>
+              <button class="copy-btn" onclick="copyText('${fullLink}')" title="Copy Custom Link">⧉</button>
+            </div>
+          </div>
+
+          <div class="panel-meta">
+            <span>Created: ${fmtDate(p.created_at).split(',')[0]}</span>
+            <a href="${fullLink}" target="_blank" class="btn btn-outline btn-sm" style="padding: 4px 10px; font-size:11px;">Visit Portal ↗</a>
+          </div>
+        </div>`;
+      }).join("");
+    } catch (e) {
+      toast(e.message, "error");
+      grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--accent-red)">${e.message}</div>`;
+    }
+  }
+
+  async function openCreateModal() {
+    openModal('create-modal');
+    const select = document.getElementById("p-app");
+    select.innerHTML = '<option value="">-- Loading Apps --</option>';
+    try {
+      const apps = await API.getApps();
+      if (!apps.length) {
+        select.innerHTML = '<option value="">No applications found. Create one first!</option>';
+        return;
+      }
+      select.innerHTML = apps.map(a => `<option value="${a.id}">${escHtml(a.name)}</option>`).join("");
+    } catch (e) {
+      select.innerHTML = `<option value="">Failed to load apps: ${e.message}</option>`;
+    }
+  }
+
+  async function createPanel() {
+    const name = document.getElementById("p-name").value.trim();
+    const app_id = document.getElementById("p-app").value;
+    if (!name) { toast("Panel name is required", "error"); return; }
+    if (!app_id) { toast("Please select an application", "error"); return; }
+
+    const btn = document.getElementById("create-btn");
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
+
+    try {
+      await API.createPanel({ name, app_id });
+      closeModal("create-modal");
+      document.getElementById("p-name").value = "";
+      toast(`Panel "${name}" created successfully`, "success");
+      load();
+    } catch (e) {
+      toast(e.message, "error");
+    } finally {
+      btn.disabled = false; btn.textContent = "Create Panel";
+    }
+  }
+
+  async function deletePanel(id, name) {
+    if (!confirm(`Delete User Panel "${name}"?\n\nThis will disable access to the client portal link for your users. No licenses will be deleted.`)) return;
+    try {
+      await API.deletePanel(id);
+      toast(`Panel "${name}" deleted`, "success");
+      load();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  function escHtml(s) {
+    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+
+  // Handle keys
+  document.addEventListener("keydown", e => {
+    if (e.key === "Enter" && document.getElementById("create-modal").classList.contains("open"))
+      createPanel();
+    if (e.key === "Escape") {
+      closeModal("create-modal");
+    }
+  });
+
+  load();
+</script>
+</body>
+</html>

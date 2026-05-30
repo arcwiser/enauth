@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>EnAuth — News & Broadcasts</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="main">
+      <div class="topbar">
+        <div class="topbar-title">News & Broadcasts</div>
+      </div>
+      <div class="content">
+        <div class="toolbar">
+          <input class="input" id="news-search" placeholder="Search news..." style="max-width:240px" oninput="loadNews()">
+          <div class="toolbar-spacer"></div>
+          <button class="btn btn-outline" onclick="bulkDeleteNews()">Delete Selected</button>
+          <button class="btn btn-primary" onclick="openModal('create-modal')">+ Post News</button>
+        </div>
+
+        <div class="card" style="padding:0">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:40px"><input type="checkbox" id="news-select-all" onchange="toggleAllNews(this.checked)"></th>
+                  <th>Application</th>
+                  <th>Title</th>
+                  <th>Content</th>
+                  <th>Color</th>
+                  <th>Date</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="news-list">
+                <tr class="loading-row"><td colspan="7"><span class="spinner"></span></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- News Modal -->
+  <div class="modal-overlay" id="create-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <div class="modal-title">Post News Update</div>
+        <button class="modal-close" onclick="closeModal('create-modal')">✕</button>
+      </div>
+      <form id="news-form">
+        <div class="modal-body">
+          <div class="form-group">
+            <label class="form-label">Application</label>
+            <select class="select" id="n-app-id" required>
+              <option value="">Select Application...</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Title</label>
+            <input class="input" type="text" id="n-title" placeholder="e.g. Update 1.1 Patch Notes" required>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Content</label>
+            <textarea class="input" id="n-content" rows="4" placeholder="Broadcast message..." required></textarea>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Accent Color</label>
+            <select class="select" id="n-color">
+              <option value="white">White</option>
+              <option value="cyan">Cyan</option>
+              <option value="green">Green</option>
+              <option value="orange">Orange</option>
+              <option value="red">Red</option>
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost" onclick="closeModal('create-modal')">Cancel</button>
+          <button type="submit" class="btn btn-primary">Publish News</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="js/api.js"></script>
+  <script>
+  requireAuth();
+  buildSidebar("news");
+  const selectedNews = new Set();
+
+    async function loadApps() {
+      try {
+        const apps = await API.getApps();
+        const sel = document.getElementById("n-app-id");
+        sel.innerHTML = '<option value="">Select Application...</option>' + 
+          apps.map(a => `<option value="${a.id}">${a.name}</option>`).join("");
+      } catch (err) { toast(err.message, "error"); }
+    }
+
+    async function loadNews() {
+      try {
+        const news = await API.getNews({ search: document.getElementById("news-search").value });
+        const list = document.getElementById("news-list");
+        if (news.length === 0) {
+          list.innerHTML = '<tr><td colspan="7"><div class="empty"><div class="empty-icon">📢</div><div class="empty-text">No news posted yet</div></div></td></tr>';
+          return;
+        }
+
+        list.innerHTML = news.map(n => `
+          <tr>
+            <td><input type="checkbox" class="news-select" value="${n.id}" ${selectedNews.has(n.id) ? "checked" : ""} onchange="toggleNewsSelect('${n.id}', this.checked)"></td>
+            <td><span class="badge ${n.app_name ? 'badge-outline' : 'badge-global'}">${n.app_name || 'System Global'}</span></td>
+            <td><strong>${n.title}</strong></td>
+            <td style="color:var(--text2)">${n.content}</td>
+            <td><span class="badge" style="background:var(--${n.color}-dim);color:var(--${n.color})">${n.color}</span></td>
+            <td style="color:var(--text3);font-size:12px">${fmtDate(n.created_at)}</td>
+            <td>
+              <button class="btn btn-danger btn-sm" onclick="deleteNews('${n.id}')">Delete</button>
+            </td>
+          </tr>
+        `).join("");
+      } catch (err) {
+        toast(err.message, "error");
+      }
+    }
+
+    document.getElementById("news-form").onsubmit = async (e) => {
+      e.preventDefault();
+      const b = {
+        app_id:  document.getElementById("n-app-id").value,
+        title:   document.getElementById("n-title").value,
+        content: document.getElementById("n-content").value,
+        color:   document.getElementById("n-color").value,
+      };
+      
+      try {
+        await API.addNews(b);
+        toast("News published", "success");
+        closeModal('create-modal');
+        loadNews();
+        e.target.reset();
+      } catch (err) {
+        toast(err.message, "error");
+      }
+    };
+
+    function toggleNewsSelect(id, checked) {
+      if (checked) selectedNews.add(id);
+      else selectedNews.delete(id);
+    }
+
+    function toggleAllNews(checked) {
+      document.querySelectorAll(".news-select").forEach(cb => {
+        cb.checked = checked;
+        toggleNewsSelect(cb.value, checked);
+      });
+    }
+
+    async function deleteNews(id) {
+      console.log("Attempting to delete news:", id);
+      if (!confirm(`Delete this news post?`)) return;
+      try {
+        const res = await API.deleteNews(id);
+        console.log("Delete success:", res);
+        selectedNews.delete(id);
+        toast("News deleted", "success");
+        loadNews();
+      } catch (err) {
+        console.error("Delete failed:", err);
+        toast(err.message, "error");
+      }
+    }
+
+    async function bulkDeleteNews() {
+      const ids = [...selectedNews];
+      if (!ids.length) {
+        toast("Select one or more news posts first", "error");
+        return;
+      }
+      if (!confirm(`Delete ${ids.length} selected news post(s)?`)) return;
+      try {
+        await API.bulkDeleteNews(ids);
+        selectedNews.clear();
+        toast("Selected news deleted", "success");
+        loadNews();
+      } catch (err) {
+        toast(err.message, "error");
+      }
+    }
+
+    loadApps();
+    loadNews();
+  </script>
+</body>
+</html>

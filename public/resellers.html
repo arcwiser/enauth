@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EnAuth - Resellers</title>
+  <link rel="stylesheet" href="css/style.css">
+  <style>
+    .tabs { display:flex; gap:4px; border-bottom:1px solid var(--border); margin-bottom:20px; }
+    .tab  { padding:10px 18px; border:none; background:transparent; color:var(--text-dim);
+            cursor:pointer; font-size:14px; font-weight:500; font-family:inherit;
+            border-bottom:2px solid transparent; transition:all .2s; }
+    .tab:hover  { color:var(--text-main); }
+    .tab.active { color:var(--primary); border-bottom-color:var(--primary); }
+    .tab-panel  { display:none; }
+    .tab-panel.active { display:block; }
+    .ledger-amount-pos { color: var(--accent-green); font-weight: 600; }
+    .ledger-amount-neg { color: var(--accent-red); font-weight: 600; }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="main">
+    <div class="topbar">
+      <div class="topbar-title">Resellers</div>
+      <button class="btn btn-primary" onclick="openModal('create-modal')">+ Create Reseller</button>
+      <button class="btn btn-outline" onclick="openModal('test-login-modal')">Test Login</button>
+    </div>
+    <div class="content">
+      <div class="toolbar">
+        <input class="input" id="reseller-search" placeholder="Search resellers..." style="max-width:240px" oninput="resetPage();load()">
+        <select class="select" id="reseller-page-size" style="max-width:120px" onchange="changePageSize(this.value)">
+          <option value="10">10</option>
+          <option value="25">25</option>
+          <option value="50">50</option>
+        </select>
+        <div class="toolbar-spacer"></div>
+        <button class="btn btn-outline" onclick="bulkStatus(false)">Disable Selected</button>
+        <button class="btn btn-outline" onclick="bulkStatus(true)">Enable Selected</button>
+        <button class="btn btn-outline" onclick="bulkDelete()">Delete Selected</button>
+      </div>
+      <div class="card">
+        <div class="tabs">
+          <button class="tab active" onclick="switchTab('list', this)">Resellers</button>
+          <button class="tab" onclick="switchTab('ledger', this)">Balance Ledger</button>
+        </div>
+
+        <div class="tab-panel active" id="tab-list">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:40px"><input type="checkbox" id="select-all-resellers" onchange="toggleAll(this.checked)"></th>
+                  <th>Username</th>
+                  <th>Balance</th>
+                  <th>Status</th>
+                  <th>Allowed Levels</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="tbody">
+                <tr class="loading-row"><td colspan="6"><span class="spinner"></span></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="toolbar" style="margin-top:16px">
+            <div id="reseller-page-info" style="color:var(--text-dim);font-size:13px"></div>
+            <div class="toolbar-spacer"></div>
+            <button class="btn btn-ghost" onclick="prevPage()">← Prev</button>
+            <button class="btn btn-ghost" onclick="nextPage()">Next →</button>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="tab-ledger">
+          <div class="toolbar" style="margin-bottom:16px">
+            <select class="select" id="ledger-reseller-sel" style="max-width:220px" onchange="loadLedger()">
+              <option value="">Select a reseller…</option>
+            </select>
+            <button class="btn btn-outline" onclick="exportLedger()">Export Ledger CSV</button>
+            <div class="toolbar-spacer"></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Amount</th>
+                  <th>Reason</th>
+                  <th>Created By</th>
+                </tr>
+              </thead>
+              <tbody id="ledger-tbody">
+                <tr><td colspan="4"><div class="empty"><div class="empty-icon">📒</div><div class="empty-text">Select a reseller to view their ledger</div></div></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="create-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">Create Reseller</div>
+      <button class="modal-close" onclick="closeModal('create-modal')">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Username (optional)</label>
+        <input class="input" id="r-username" placeholder="Leave blank to auto-generate">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Password (optional)</label>
+        <input class="input" id="r-password" type="password" placeholder="Leave blank to auto-generate">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Allowed Product Levels + Pricing Points</label>
+        <div id="products-box" style="display:grid;gap:6px;max-height:200px;overflow:auto;border:1px solid var(--border);padding:10px;border-radius:8px"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('create-modal')">Cancel</button>
+      <button class="btn btn-primary" onclick="createReseller()">Create</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="creds-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">Reseller Credentials</div>
+      <button class="modal-close" onclick="closeModal('creds-modal')">×</button>
+    </div>
+    <div class="modal-body">
+      <p style="font-size:13px;color:var(--text-dim);margin-bottom:16px">Save these credentials. The password will not be shown again.</p>
+      <div class="form-group">
+        <label class="form-label">Username</label>
+        <div class="secret-display" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+          <span id="cred-user"></span>
+          <button class="copy-btn" onclick="copyText(document.getElementById('cred-user').textContent)">⧉</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Password</label>
+        <div class="secret-display" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+          <span id="cred-pass"></span>
+          <button class="copy-btn" onclick="copyText(document.getElementById('cred-pass').textContent)">⧉</button>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" onclick="closeModal('creds-modal')">I saved it</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="credit-modal">
+  <div class="modal" style="max-width:380px">
+    <div class="modal-header">
+      <div class="modal-title">Adjust Balance</div>
+      <button class="modal-close" onclick="closeModal('credit-modal')">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="credit-id">
+      <p id="credit-name" style="font-size:14px;font-weight:600;margin-bottom:16px;color:var(--text-main)"></p>
+      <div class="form-group">
+        <label class="form-label">Amount (use negative to deduct)</label>
+        <input class="input" id="credit-amount" type="number" step="0.01" placeholder="e.g. 50 or -10">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Reason (optional)</label>
+        <input class="input" id="credit-reason" type="text" placeholder="e.g. Top-up, Refund">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('credit-modal')">Cancel</button>
+      <button class="btn btn-primary" onclick="doCredit()">Apply</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="access-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">Grant Level Access</div>
+      <button class="modal-close" onclick="closeModal('access-modal')">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="access-reseller-id">
+      <div class="form-group">
+        <label class="form-label">Select Level + Pricing to Grant</label>
+        <div id="access-products-box" style="display:grid;gap:6px;max-height:260px;overflow:auto;border:1px solid var(--border);padding:10px;border-radius:8px"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('access-modal')">Cancel</button>
+      <button class="btn btn-primary" onclick="doGrantAccess()">Grant Selected</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="test-login-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">Test Reseller Login</div>
+      <button class="modal-close" onclick="closeModal('test-login-modal')">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Username</label>
+          <input class="input" id="t-user" placeholder="reseller_xxxxxxxx">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Password</label>
+          <input class="input" id="t-pass" type="password" placeholder="password">
+        </div>
+      </div>
+      <div class="form-group">
+        <button class="btn btn-primary" onclick="doTestLogin()">Sign In</button>
+      </div>
+      <div class="card" style="padding:12px;margin-top:10px">
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Result</div>
+        <pre class="mono" id="t-out" style="white-space:pre-wrap;margin:0;color:var(--text-main);font-size:11px;max-height:200px;overflow:auto"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="timeline-modal">
+  <div class="modal" style="max-width:760px">
+    <div class="modal-header">
+      <div class="modal-title" id="timeline-title">Activity Timeline</div>
+      <button class="modal-close" onclick="closeModal('timeline-modal')">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="timeline-loading" style="text-align:center;padding:18px;display:none"><span class="spinner"></span></div>
+      <div id="timeline-body" style="display:grid;gap:10px"></div>
+    </div>
+  </div>
+</div>
+
+<script src="js/api.js"></script>
+<script>
+  requireAuth();
+  buildSidebar("resellers");
+
+  let products = [];
+  let productPricing = {};
+  let allResellers = [];
+  const selectedResellers = new Set();
+  let page = 0;
+  let pageSize = 25;
+  let hasMore = false;
+  const stateKey = "enauth_resellers_filters";
+
+  function switchTab(id, btn) {
+    document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
+    document.querySelectorAll(".tab").forEach(b => b.classList.remove("active"));
+    document.getElementById("tab-" + id).classList.add("active");
+    btn.classList.add("active");
+    if (id === "ledger") populateLedgerSelect();
+  }
+
+  function loadState() {
+    try {
+      const s = JSON.parse(localStorage.getItem(stateKey) || "{}");
+      document.getElementById("reseller-search").value = s.search || "";
+      pageSize = Number(s.pageSize || 25);
+      document.getElementById("reseller-page-size").value = String(pageSize);
+    } catch {}
+  }
+
+  function saveState() {
+    localStorage.setItem(stateKey, JSON.stringify({
+      search: document.getElementById("reseller-search").value,
+      pageSize,
+    }));
+  }
+
+  function resetPage() {
+    page = 0;
+    saveState();
+  }
+
+  function changePageSize(val) {
+    pageSize = Number(val || 25);
+    page = 0;
+    saveState();
+    load();
+  }
+
+  function getSearchTerm() {
+    return document.getElementById("reseller-search").value.trim();
+  }
+
+  function toggleAll(checked) {
+    allResellers.forEach(r => {
+      if (checked) selectedResellers.add(r.id);
+      else selectedResellers.delete(r.id);
+    });
+    syncSelectionState();
+  }
+
+  function toggleOne(id, checked) {
+    if (checked) selectedResellers.add(id);
+    else selectedResellers.delete(id);
+    syncSelectionState();
+  }
+
+  function syncSelectionState() {
+    const toggle = document.getElementById("select-all-resellers");
+    if (!toggle) return;
+    toggle.checked = allResellers.length > 0 && allResellers.every(r => selectedResellers.has(r.id));
+    toggle.indeterminate = selectedResellers.size > 0 && !toggle.checked;
+  }
+
+  function prevPage() {
+    if (page <= 0) return;
+    page--;
+    saveState();
+    load();
+  }
+
+  function nextPage() {
+    if (!hasMore) return;
+    page++;
+    saveState();
+    load();
+  }
+
+  function downloadCSV(data, fields, filename) {
+    const header = fields.join(",");
+    const rows = data.map(r => fields.map(f => {
+      const val = r[f] ?? "";
+      return `"${String(val).replace(/"/g, '""')}"`;
+    }).join(","));
+    const csv = [header, ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  async function bulkDelete() {
+    const ids = [...selectedResellers];
+    if (!ids.length) { toast("Select at least one reseller", "error"); return; }
+    if (!confirm(`Delete ${ids.length} selected reseller(s)?\n\nThis will also delete any keys they generated.`)) return;
+    try {
+      await API.bulkDeleteResellers(ids);
+      selectedResellers.clear();
+      toast("Selected resellers deleted", "success");
+      await load();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function bulkStatus(isActive) {
+    const ids = [...selectedResellers];
+    if (!ids.length) { toast("Select at least one reseller", "error"); return; }
+    try {
+      await API.bulkResellerStatus(ids, isActive);
+      selectedResellers.clear();
+      toast(`Selected resellers ${isActive ? "enabled" : "disabled"}`, "success");
+      await load();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function toggleSingleStatus(id, isActive) {
+    try {
+      await API.bulkResellerStatus([id], isActive);
+      toast(`Reseller ${isActive ? "enabled" : "disabled"}`, "success");
+      await load();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function exportLedger() {
+    const resellerId = document.getElementById("ledger-reseller-sel").value;
+    if (!resellerId) { toast("Select a reseller first", "error"); return; }
+    try {
+      const rows = await API.getResellerLedger(resellerId);
+      downloadCSV(rows, ["created_at", "amount", "reason", "created_by"], "reseller_ledger.csv");
+      toast(`Exported ${rows.length} ledger entries`, "success");
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function openTimeline(resellerId, username) {
+    document.getElementById("timeline-title").textContent = `Activity Timeline - ${username}`;
+    document.getElementById("timeline-body").innerHTML = "";
+    document.getElementById("timeline-loading").style.display = "block";
+    openModal("timeline-modal");
+    try {
+      const res = await API.getActivityTimeline("reseller", resellerId, { limit: 50 });
+      const items = res.items || [];
+      document.getElementById("timeline-body").innerHTML = items.length ? items.map(renderTimelineRow).join("") : `
+        <div class="empty">
+          <div class="empty-icon">📜</div>
+          <div class="empty-text">No timeline events yet</div>
+        </div>
+      `;
+    } catch (e) {
+      document.getElementById("timeline-body").innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><div class="empty-text">${e.message}</div></div>`;
+    } finally {
+      document.getElementById("timeline-loading").style.display = "none";
+    }
+  }
+
+  function renderTimelineRow(item) {
+    const action = item.action || item.reason || item.type || "event";
+    const details = item.details || item.reason || item.amount || "—";
+    return `
+      <div style="border:1px solid var(--border);border-radius:10px;padding:12px;background:var(--bg-accent)">
+        <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">
+          <div>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+              <span class="badge">${action}</span>
+              <span style="font-size:12px;color:var(--text-dim)">${fmtDate(item.created_at || item.timestamp || "")}</span>
+            </div>
+            <div style="font-size:13px;color:var(--text-main)">${details}</div>
+          </div>
+          ${item.amount !== undefined && item.amount !== null ? `<div style="font-weight:700;color:${Number(item.amount) >= 0 ? 'var(--accent-green)' : 'var(--accent-red)'}">${Number(item.amount) >= 0 ? '+' : ''}$${Number(item.amount).toFixed(2)}</div>` : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  async function loadProducts() {
+    products = await API.getProducts().catch(() => []);
+    const renderBox = (containerId) => {
+      const box = document.getElementById(containerId);
+      if (!products.length) {
+        box.innerHTML = '<div style="color:var(--text-dim)">No products yet. Create product levels first.</div>';
+        return;
+      }
+      const chunks = [];
+      for (const p of products) {
+        const pricing = productPricing[p.id] || [];
+        chunks.push(`
+          <div style="border:1px solid var(--border);border-radius:8px;padding:8px;">
+            <label class="checkbox-row" style="margin-bottom:6px;">
+              <input type="checkbox" value="${p.id}" class="product-check-${containerId}">
+              ${p.name} - <b>${p.level}</b>
+            </label>
+            <div style="padding-left:18px;display:grid;gap:4px;">
+              ${pricing.length ? pricing.map(pp => `
+                <label class="checkbox-row">
+                  <input type="checkbox" value="${pp.id}" class="pricing-check-${containerId}" data-product="${p.id}">
+                  ${pp.days} day(s) - $${Number(pp.price).toFixed(2)}
+                </label>`).join("") : '<span style="color:var(--text-dim);font-size:12px">No pricing points yet</span>'}
+            </div>
+          </div>
+        `);
+      }
+      box.innerHTML = chunks.join("");
+    };
+
+    await Promise.all(products.map(async p => {
+      productPricing[p.id] = await API.getProductPricing(p.id).catch(() => []);
+    }));
+
+    renderBox("products-box");
+    renderBox("access-products-box");
+  }
+
+  async function load() {
+    const tbody = document.getElementById("tbody");
+    tbody.innerHTML = `<tr class="loading-row"><td colspan="6"><span class="spinner"></span></td></tr>`;
+    try {
+      const rows = await API.getResellers({
+        search: getSearchTerm(),
+        limit: pageSize + 1,
+        offset: page * pageSize,
+      });
+      hasMore = rows.length > pageSize;
+      allResellers = rows.slice(0, pageSize);
+
+      if (!allResellers.length) {
+        tbody.innerHTML = `<tr><td colspan="6"><div class="empty"><div class="empty-icon">🤝</div><div class="empty-text">No resellers found</div></div></td></tr>`;
+        document.getElementById("reseller-page-info").textContent = "No results";
+        syncSelectionState();
+        return;
+      }
+
+      const [accessResults, pricingResults] = await Promise.all([
+        Promise.all(allResellers.map(r => API.getResellerProducts(r.id).catch(() => []))),
+        Promise.all(allResellers.map(r => API.getResellerPricing(r.id).catch(() => []))),
+      ]);
+
+      tbody.innerHTML = allResellers.map((r, i) => {
+        const access = accessResults[i];
+        const pricing = pricingResults[i];
+        const levels = access.length ? access.map(a => `<span class="badge" style="background:rgba(0,242,255,0.08);color:var(--primary);margin-right:3px">${a.level}</span>`).join("") : '<span style="color:var(--text-dim)">None</span>';
+        const pricingText = pricing.length
+          ? pricing.map(p => `${p.level}: ${p.days}d/$${Number(p.price).toFixed(2)}`).join(" • ")
+          : "None";
+        return `
+          <tr>
+            <td><input type="checkbox" ${selectedResellers.has(r.id) ? "checked" : ""} onchange="toggleOne('${r.id}', this.checked)"></td>
+            <td style="font-weight:600">${r.username}</td>
+            <td style="font-weight:700;color:var(--accent-green)">$${Number(r.balance || 0).toFixed(2)}</td>
+            <td>${r.is_active ? '<span class="badge badge-active">active</span>' : '<span class="badge badge-banned">disabled</span>'}</td>
+            <td style="max-width:320px">
+              <div>${levels}</div>
+              <div style="font-size:11px;color:var(--text-dim);margin-top:4px">${pricingText}</div>
+            </td>
+            <td>
+              <div class="action-group">
+                <button class="btn btn-sm btn-outline" onclick="openCreditModal('${r.id}','${r.username}')">💰 Balance</button>
+                <button class="btn btn-sm btn-ghost" onclick="openAccessModal('${r.id}')">+ Access</button>
+                <button class="btn btn-sm btn-ghost" onclick="openTimeline('${r.id}','${r.username}')">🕒 Timeline</button>
+                <button class="btn btn-sm btn-outline" onclick="toggleSingleStatus('${r.id}', ${!r.is_active})">${r.is_active ? "Disable" : "Enable"}</button>
+                <button class="btn btn-sm btn-danger" onclick="deleteReseller('${r.id}','${r.username}')">🗑</button>
+              </div>
+            </td>
+          </tr>`;
+      }).join("");
+
+      document.getElementById("reseller-page-info").textContent = `Showing ${page * pageSize + 1}-${page * pageSize + allResellers.length}${hasMore ? "+" : ""}`;
+      syncSelectionState();
+      if (document.getElementById("tab-ledger").classList.contains("active")) {
+        populateLedgerSelect();
+      }
+    } catch (e) {
+      toast(e.message, "error");
+    }
+  }
+
+  async function createReseller() {
+    try {
+      const selected = [...document.querySelectorAll(".product-check-products-box:checked")].map(x => x.value);
+      const selectedPricing = [...document.querySelectorAll(".pricing-check-products-box:checked")].map(x => x.value);
+      const res = await API.createReseller({
+        username: document.getElementById("r-username").value.trim() || null,
+        password: document.getElementById("r-password").value || null,
+        product_ids: selected,
+        pricing_point_ids: selectedPricing,
+      });
+      closeModal("create-modal");
+      document.getElementById("r-username").value = "";
+      document.getElementById("r-password").value = "";
+      document.getElementById("cred-user").textContent = res.username;
+      document.getElementById("cred-pass").textContent = res.password;
+      openModal("creds-modal");
+      toast("Reseller created", "success");
+      await load();
+    } catch (e) {
+      toast(e.message, "error");
+    }
+  }
+
+  function openCreditModal(id, username) {
+    document.getElementById("credit-id").value = id;
+    document.getElementById("credit-name").textContent = `Adjusting balance for: ${username}`;
+    document.getElementById("credit-amount").value = "";
+    document.getElementById("credit-reason").value = "";
+    openModal("credit-modal");
+  }
+
+  async function doCredit() {
+    const id = document.getElementById("credit-id").value;
+    const amount = Number(document.getElementById("credit-amount").value);
+    const reason = document.getElementById("credit-reason").value.trim() || "Manual balance adjustment";
+    if (!Number.isFinite(amount) || amount === 0) { toast("Enter a valid non-zero amount", "error"); return; }
+    try {
+      await API.creditReseller(id, { amount, reason });
+      toast(`Balance ${amount > 0 ? "added" : "deducted"} successfully`, "success");
+      closeModal("credit-modal");
+      await load();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  function openAccessModal(resellerId) {
+    document.getElementById("access-reseller-id").value = resellerId;
+    openModal("access-modal");
+    document.querySelectorAll(".product-check-access-products-box, .pricing-check-access-products-box").forEach(el => el.checked = false);
+  }
+
+  async function doGrantAccess() {
+    const resellerId = document.getElementById("access-reseller-id").value;
+    const selectedProducts = [...document.querySelectorAll(".product-check-access-products-box:checked")].map(x => x.value);
+    const selectedPricing = [...document.querySelectorAll(".pricing-check-access-products-box:checked")].map(x => x.value);
+
+    if (!selectedProducts.length && !selectedPricing.length) {
+      toast("Select at least one level or pricing point", "error");
+      return;
+    }
+
+    try {
+      await Promise.all([
+        ...selectedProducts.map(pid => API.grantResellerProduct(resellerId, { product_id: pid }).catch(() => {})),
+        ...selectedPricing.map(ppid => API.grantResellerPricing(resellerId, { pricing_point_id: ppid }).catch(() => {})),
+      ]);
+      toast("Access granted", "success");
+      closeModal("access-modal");
+      await load();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function deleteReseller(id, username) {
+    if (!confirm(`Delete reseller "${username}"?\n\nThis will also delete ALL keys generated by this reseller.`)) return;
+    try {
+      await API.deleteReseller(id);
+      selectedResellers.delete(id);
+      toast("Reseller deleted", "success");
+      await load();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  function populateLedgerSelect() {
+    const sel = document.getElementById("ledger-reseller-sel");
+    const current = sel.value;
+    sel.innerHTML = '<option value="">Select a reseller…</option>' +
+      allResellers.map(r => `<option value="${r.id}" ${r.id === current ? "selected" : ""}>${r.username} ($${Number(r.balance || 0).toFixed(2)})</option>`).join("");
+    if (current) loadLedger();
+  }
+
+  async function loadLedger() {
+    const resellerId = document.getElementById("ledger-reseller-sel").value;
+    const tbody = document.getElementById("ledger-tbody");
+    if (!resellerId) {
+      tbody.innerHTML = `<tr><td colspan="4"><div class="empty"><div class="empty-icon">📒</div><div class="empty-text">Select a reseller to view their ledger</div></div></td></tr>`;
+      return;
+    }
+    tbody.innerHTML = `<tr class="loading-row"><td colspan="4"><span class="spinner"></span></td></tr>`;
+    try {
+      const rows = await API.getResellerLedger(resellerId);
+      if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="4"><div class="empty"><div class="empty-icon">📒</div><div class="empty-text">No transactions yet</div></div></td></tr>`;
+        return;
+      }
+      tbody.innerHTML = rows.map(r => `
+        <tr>
+          <td style="font-size:12px;color:var(--text-dim)">${fmtDate(r.created_at)}</td>
+          <td class="${r.amount >= 0 ? 'ledger-amount-pos' : 'ledger-amount-neg'}">${r.amount >= 0 ? '+' : ''}$${Number(r.amount).toFixed(2)}</td>
+          <td style="color:var(--text-main)">${r.reason || "—"}</td>
+          <td style="color:var(--text-dim);font-size:12px">${r.created_by || "—"}</td>
+        </tr>
+      `).join("");
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function doTestLogin() {
+    const out = document.getElementById("t-out");
+    out.textContent = "";
+    try {
+      const u = document.getElementById("t-user").value;
+      const p = document.getElementById("t-pass").value;
+      const login = await API.resellerLogin(u, p);
+      const prods = await API.resellerProducts(login.token);
+      out.textContent = JSON.stringify({ login, products: prods }, null, 2);
+      toast("Reseller login OK", "success");
+    } catch (e) {
+      out.textContent = e.message || String(e);
+      toast("Reseller login failed", "error");
+    }
+  }
+
+  loadState();
+  loadProducts().then(load);
+</script>
+</body>
+</html>

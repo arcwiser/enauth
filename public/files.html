@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EnAuth — App Files</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="main">
+    <div class="topbar">
+      <div class="topbar-title">Secure App Files</div>
+    </div>
+    <div class="content">
+      <div class="toolbar">
+        <input class="input" id="file-search" placeholder="Search files..." style="max-width:240px" oninput="load()">
+        <select class="select" id="filter-app" style="max-width:200px" onchange="load()"></select>
+        <div class="toolbar-spacer"></div>
+        <button class="btn btn-outline" onclick="bulkDeleteFiles()">Delete Selected</button>
+        <button class="btn btn-primary" onclick="openModal('upload-modal')">+ Upload File</button>
+      </div>
+
+      <div class="card" style="padding:0">
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th style="width:40px"><input type="checkbox" id="files-select-all" onchange="toggleAllFiles(this.checked)"></th>
+              <th>File Name</th><th>Application</th><th>Secret</th><th>Uploaded</th><th>Actions</th>
+            </tr></thead>
+            <tbody id="tbody">
+              <tr class="loading-row"><td colspan="6"><span class="spinner"></span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Upload Modal -->
+<div class="modal-overlay" id="upload-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">Upload App File</div>
+      <button class="modal-close" onclick="closeModal('upload-modal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Application</label>
+        <select class="select" id="u-app"></select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Internal Name (used in SDK)</label>
+        <input class="input" id="u-name" type="text" placeholder="e.g. config.json, main.dll">
+      </div>
+      <div class="form-group">
+        <label class="form-label">File Content (max 5MB)</label>
+        <input class="input" id="u-file" type="file">
+      </div>
+      <div class="form-group">
+        <label class="checkbox-row">
+          <input type="checkbox" id="u-secret">
+          Mark as secret (optional tagging)
+        </label>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('upload-modal')">Cancel</button>
+      <button class="btn btn-primary" id="upload-btn" onclick="doUpload()">Upload</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/api.js"></script>
+<script>
+  requireAuth();
+  buildSidebar("files");
+  const selectedFiles = new Set();
+
+  async function loadApps() {
+    const apps = await API.getApps().catch(() => []);
+    const fSel = document.getElementById("filter-app");
+    const uSel = document.getElementById("u-app");
+    fSel.innerHTML = `<option value="">All Applications</option>`;
+    uSel.innerHTML = ``;
+    apps.forEach(a => {
+      fSel.innerHTML += `<option value="${a.id}">${a.name}</option>`;
+      uSel.innerHTML += `<option value="${a.id}">${a.name}</option>`;
+    });
+  }
+
+  async function load() {
+    const tbody = document.getElementById("tbody");
+    tbody.innerHTML = `<tr class="loading-row"><td colspan="6"><span class="spinner"></span></td></tr>`;
+    try {
+      const appId = document.getElementById("filter-app").value;
+      const files = await API.searchFiles(document.getElementById("file-search").value, { app_id: appId });
+      if (!files.length) {
+        tbody.innerHTML = `<tr><td colspan="6"><div class="empty"><div class="empty-icon">📁</div><div class="empty-text">No files uploaded yet</div></div></td></tr>`;
+        return;
+      }
+      tbody.innerHTML = files.map(f => `
+        <tr>
+          <td><input type="checkbox" class="file-select" value="${f.id}" ${selectedFiles.has(f.id) ? "checked" : ""} onchange="toggleFileSelect('${f.id}', this.checked)"></td>
+          <td><span class="mono">${f.name}</span></td>
+          <td style="color:var(--text2)">${f.app_name}</td>
+          <td>${f.is_secret ? '<span class="badge badge-banned">Secret</span>' : '<span class="badge badge-active">Public</span>'}</td>
+          <td style="color:var(--text3);font-size:12px">${fmtDate(f.created_at)}</td>
+          <td>
+            <button class="btn btn-ghost btn-sm" onclick="deleteFile('${f.id}')">🗑</button>
+          </td>
+        </tr>
+      `).join("");
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  function toggleFileSelect(id, checked) {
+    if (checked) selectedFiles.add(id);
+    else selectedFiles.delete(id);
+  }
+
+  function toggleAllFiles(checked) {
+    document.querySelectorAll(".file-select").forEach(cb => {
+      cb.checked = checked;
+      toggleFileSelect(cb.value, checked);
+    });
+  }
+
+  async function doUpload() {
+    const btn = document.getElementById("upload-btn");
+    const fileInput = document.getElementById("u-file");
+    const appId = document.getElementById("u-app").value;
+    const name = document.getElementById("u-name").value.trim();
+    const isSecret = document.getElementById("u-secret").checked;
+
+    if (!appId || !name || !fileInput.files.length) {
+      toast("Please fill all fields", "error");
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append("app_id", appId);
+    formData.append("name", name);
+    formData.append("is_secret", isSecret);
+    formData.append("file", fileInput.files[0]);
+
+    btn.disabled = true;
+    btn.innerHTML = "Uploading...";
+    try {
+      await API.uploadFile(formData);
+      toast("File uploaded successfully", "success");
+      closeModal("upload-modal");
+      load();
+    } catch (e) { toast(e.message, "error"); }
+    finally {
+      btn.disabled = false;
+      btn.innerHTML = "Upload";
+    }
+  }
+
+  async function deleteFile(id) {
+    if (!confirm("Delete this file? This will break any clients trying to download it.")) return;
+    try {
+      await API.deleteFile(id);
+      selectedFiles.delete(id);
+      toast("Deleted", "success");
+      load();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function bulkDeleteFiles() {
+    const ids = [...selectedFiles];
+    if (!ids.length) {
+      toast("Select one or more files first", "error");
+      return;
+    }
+    if (!confirm(`Delete ${ids.length} selected file(s)?`)) return;
+    try {
+      await API.bulkDeleteFiles(ids);
+      selectedFiles.clear();
+      toast("Selected files deleted", "success");
+      load();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  loadApps().then(load);
+</script>
+</body>
+</html>

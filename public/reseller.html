@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EnAuth - Reseller</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="main">
+    <div class="topbar">
+      <div class="topbar-title">Reseller</div>
+      <button class="btn btn-ghost" onclick="logoutReseller()">Sign out</button>
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin:12px 0">
+      <button class="btn btn-outline" type="button" onclick="setTab('tab-products')" id="tab-btn-products">My Products</button>
+      <button class="btn btn-outline" type="button" onclick="setTab('tab-generate')" id="tab-btn-generate">Generate</button>
+      <button class="btn btn-outline" type="button" onclick="setTab('tab-keys')" id="tab-btn-keys">Keys (Manage)</button>
+    </div>
+    <div class="content">
+      <div id="tab-products">
+        <div class="card">
+        <div style="display:flex;justify-content:space-between;gap:12px;align-items:center">
+          <div>
+            <div style="font-size:12px;color:var(--text3)">Signed in as</div>
+            <div id="who" style="font-weight:700"></div>
+          </div>
+          <div>
+            <div style="font-size:12px;color:var(--text3)">Balance</div>
+            <div id="bal" style="font-weight:700"></div>
+          </div>
+        </div>
+        </div>
+
+        <div class="card" style="margin-top:14px">
+        <div style="font-weight:700;margin-bottom:10px">Allowed products</div>
+        <div id="products"></div>
+        </div>
+      </div>
+
+      <div id="tab-generate" style="display:none">
+      <div class="card" style="margin-top:0">
+        <div style="font-weight:700;margin-bottom:10px">Generate key</div>
+        <div class="form-row">
+          <div class="form-group" style="flex:2">
+            <label class="form-label">Product</label>
+            <select class="select" id="buy-product"></select>
+          </div>
+          <div class="form-group" style="flex:2">
+            <label class="form-label">Pricing</label>
+            <select class="select" id="buy-pricing"></select>
+          </div>
+          <div class="form-group" style="flex:1;display:flex;align-items:flex-end">
+            <button class="btn btn-primary" style="width:100%" onclick="buyKey()">Generate</button>
+          </div>
+        </div>
+        <div id="buy-result" style="margin-top:10px"></div>
+      </div>
+      </div>
+
+      <div id="tab-keys" style="display:none">
+      <div class="card" style="margin-top:0;padding:0">
+        <div style="padding:14px 14px 0;font-weight:700">My keys</div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th style="width:46px"><input type="checkbox" id="keys-select-all" onclick="selectAllKeys(this)"></th>
+              <th>Key</th><th>Level</th><th>Status</th><th>Expires</th><th>Actions</th>
+            </tr></thead>
+            <tbody id="keys-tbody">
+              <tr class="loading-row"><td colspan="6"><span class="spinner"></span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;padding:14px">
+          <button class="btn btn-outline" type="button" onclick="bulkBan()">Ban selected</button>
+          <button class="btn btn-outline" type="button" onclick="bulkUnban()">Unban selected</button>
+          <button class="btn btn-danger" type="button" onclick="bulkDelete()">Delete selected</button>
+        </div>
+      </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="js/api.js"></script>
+<script>
+  function requireResellerAuth() {
+    if (!getResellerToken()) window.location.href = "/panel/index.html";
+  }
+
+  function buildResellerSidebar() {
+    const el = document.getElementById("sidebar");
+    if (!el) return;
+    el.innerHTML = `
+      <div class="sidebar-logo">
+        <div class="logo-icon">E</div>
+        <div class="logo-text">ENAUTH</div>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-section">Reseller</div>
+        <a class="nav-item active" href="reseller.html"><span class="nav-icon">🧾</span> My Products</a>
+      </nav>
+      <div class="sidebar-footer">
+        <button class="sidebar-logout" onclick="logoutReseller()">⬅ Sign Out</button>
+      </div>
+    `;
+  }
+
+  function setTab(tabId) {
+    const tabs = ["tab-products","tab-generate","tab-keys"];
+    tabs.forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.style.display = (id === tabId) ? "" : "none";
+    });
+
+    ["tab-products","tab-generate","tab-keys"].forEach(x => {
+      const btn = document.getElementById("tab-btn-" + x.replace("tab-",""));
+      if (btn) btn.className = "btn btn-outline";
+    });
+    const activeBtn = document.getElementById("tab-btn-" + tabId.replace("tab-",""));
+    if (activeBtn) activeBtn.className = "btn btn-primary";
+  }
+
+  async function load() {
+    requireResellerAuth();
+    buildResellerSidebar();
+    const token = getResellerToken();
+    const data = await API.resellerProducts(token);
+    const info = JSON.parse(localStorage.getItem("enauth_reseller") || "{}");
+    document.getElementById("who").textContent = info.username || "Reseller";
+    document.getElementById("bal").textContent = `$${Number(data.balance || 0).toFixed(2)}`;
+
+    const container = document.getElementById("products");
+    if (!data.products?.length) {
+      container.innerHTML = `<div style="color:var(--text3)">No allowed products.</div>`;
+      return;
+    }
+    container.innerHTML = data.products.map(p => `
+      <div style="border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;gap:10px">
+          <div><b>${p.level}</b> <span style="color:var(--text3)">${p.name}</span></div>
+        </div>
+        <div style="margin-top:8px;color:var(--text2);font-size:12px">
+          ${p.pricing_points?.length ? p.pricing_points.map(pp => `${pp.days}d / $${Number(pp.price).toFixed(2)}`).join(" • ") : "No allowed pricing points"}
+        </div>
+      </div>
+    `).join("");
+
+    // Buy dropdowns
+    const buyProduct = document.getElementById("buy-product");
+    buyProduct.innerHTML = data.products.map(p => `<option value="${p.id}">${p.level} (${p.name})</option>`).join("");
+    buyProduct.onchange = () => refreshPricing(data.products);
+    refreshPricing(data.products);
+
+    await loadKeys();
+
+    setTab("tab-products");
+  }
+
+  function refreshPricing(products) {
+    const pid = document.getElementById("buy-product").value;
+    const prod = products.find(p => p.id === pid);
+    const sel = document.getElementById("buy-pricing");
+    const points = prod?.pricing_points || [];
+    sel.innerHTML = points.length
+      ? points.map(pp => `<option value="${pp.id}">${pp.days} day(s) - $${Number(pp.price).toFixed(2)}</option>`).join("")
+      : `<option value="">No allowed pricing points</option>`;
+  }
+
+  async function buyKey() {
+    const token = getResellerToken();
+    const product_id = document.getElementById("buy-product").value;
+    const pricing_point_id = document.getElementById("buy-pricing").value;
+    const out = document.getElementById("buy-result");
+    out.innerHTML = "";
+    if (!pricing_point_id) return toast("Select a pricing option", "error");
+    try {
+      const res = await API.resellerBuyKey(token, { product_id, pricing_point_id });
+      out.innerHTML = `
+        <div class="secret-display" style="display:flex;justify-content:space-between;gap:10px;align-items:center">
+          <span class="mono">${res.license_key}</span>
+          <button class="copy-btn" onclick="copyText('${res.license_key}')">⧉</button>
+        </div>
+        <div style="margin-top:8px;color:var(--text3);font-size:12px">Expires: ${res.expires_at}</div>
+      `;
+      toast("Key generated", "success");
+      await load();
+    } catch (e) {
+      toast(e.message, "error");
+    }
+  }
+
+  async function loadKeys() {
+    const token = getResellerToken();
+    const tbody = document.getElementById("keys-tbody");
+    const selectAll = document.getElementById("keys-select-all");
+    if (selectAll) selectAll.checked = false;
+    tbody.innerHTML = `<tr class="loading-row"><td colspan="6"><span class="spinner"></span></td></tr>`;
+    try {
+      const res = await API.resellerKeys(token);
+      const keys = res.keys || [];
+      if (!keys.length) {
+        tbody.innerHTML = `<tr><td colspan="6"><div class="empty"><div class="empty-icon">🔑</div><div class="empty-text">No keys yet</div></div></td></tr>`;
+        return;
+      }
+      tbody.innerHTML = keys.map(k => `
+        <tr>
+          <td style="width:46px"><input type="checkbox" class="key-check" value="${k.id}"></td>
+          <td><span class="mono">${k.key}</span> <button class="copy-btn" onclick="copyText('${k.key}')">⧉</button></td>
+          <td>${k.product_level || "—"}</td>
+          <td>${statusBadge(k.status)}</td>
+          <td style="color:var(--text2)">${k.expires_at ? fmtDate(k.expires_at) : "—"}</td>
+          <td>
+            <div class="action-group">
+              ${k.status === "banned"
+                ? `<button class="btn btn-success btn-sm" onclick="unbanKey('${k.id}')">Unban</button>`
+                : `<button class="btn btn-danger btn-sm" onclick="banKey('${k.id}')">Ban</button>`}
+              <button class="btn btn-ghost btn-sm" onclick="deleteKey('${k.id}')">🗑</button>
+            </div>
+          </td>
+        </tr>
+      `).join("");
+    } catch (e) {
+      toast(e.message, "error");
+    }
+  }
+
+  function selectAllKeys(chk) {
+    const boxes = [...document.querySelectorAll(".key-check")];
+    boxes.forEach(b => b.checked = chk.checked);
+  }
+
+  function selectedKeyIds() {
+    return [...document.querySelectorAll(".key-check:checked")].map(b => b.value);
+  }
+
+  async function bulkBan() {
+    const ids = selectedKeyIds();
+    if (!ids.length) return toast("Select at least 1 key", "error");
+    if (!confirm(`Ban ${ids.length} selected key(s)?`)) return;
+    try {
+      await API.resellerBulkBan(getResellerToken(), ids);
+      toast("Bulk ban done", "warning");
+      await loadKeys();
+    } catch (e) {
+      toast(e.message, "error");
+    }
+  }
+
+  async function bulkUnban() {
+    const ids = selectedKeyIds();
+    if (!ids.length) return toast("Select at least 1 key", "error");
+    if (!confirm(`Unban ${ids.length} selected key(s)?`)) return;
+    try {
+      await API.resellerBulkUnban(getResellerToken(), ids);
+      toast("Bulk unban done", "success");
+      await loadKeys();
+    } catch (e) {
+      toast(e.message, "error");
+    }
+  }
+
+  async function bulkDelete() {
+    const ids = selectedKeyIds();
+    if (!ids.length) return toast("Select at least 1 key", "error");
+    if (!confirm(`Delete ${ids.length} selected key(s)? This is permanent.`)) return;
+    try {
+      await API.resellerBulkDelete(getResellerToken(), ids);
+      toast("Bulk delete done", "success");
+      await loadKeys();
+    } catch (e) {
+      toast(e.message, "error");
+    }
+  }
+
+  async function banKey(id) {
+    if (!confirm("Ban this key? Active session will be killed.")) return;
+    try { await API.resellerBanKey(getResellerToken(), id); toast("Key banned", "warning"); await loadKeys(); }
+    catch (e) { toast(e.message, "error"); }
+  }
+
+  async function unbanKey(id) {
+    try { await API.resellerUnbanKey(getResellerToken(), id); toast("Key unbanned", "success"); await loadKeys(); }
+    catch (e) { toast(e.message, "error"); }
+  }
+
+  async function deleteKey(id) {
+    if (!confirm("Delete this key permanently?")) return;
+    try { await API.resellerDeleteKey(getResellerToken(), id); toast("Key deleted", "success"); await loadKeys(); }
+    catch (e) { toast(e.message, "error"); }
+  }
+
+  function logoutReseller() {
+    localStorage.removeItem("enauth_reseller_token");
+    localStorage.removeItem("enauth_reseller");
+    window.location.href = "/panel/index.html";
+  }
+
+  load().catch(e => { toast(e.message, "error"); });
+</script>
+</body>
+</html>
+

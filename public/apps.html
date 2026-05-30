@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EnAuth — Applications</title>
+  <meta name="description" content="Create and manage EnAuth applications">
+  <link rel="stylesheet" href="css/style.css">
+  <style>
+    .app-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      gap: 16px;
+    }
+
+    .app-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 20px;
+      transition: all .2s;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .app-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, var(--cyan), var(--purple));
+      opacity: 0;
+      transition: opacity .2s;
+    }
+
+    .app-card:hover { border-color: var(--border2); transform: translateY(-2px); box-shadow: 0 8px 32px rgba(0,0,0,0.3); }
+    .app-card:hover::before { opacity: 1; }
+
+    .app-card-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      margin-bottom: 14px;
+      gap: 10px;
+    }
+
+    .app-icon {
+      width: 42px;
+      height: 42px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, var(--cyan-dim), var(--purple-dim));
+      border: 1px solid rgba(0,212,255,0.2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+      flex-shrink: 0;
+    }
+
+    .app-name {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text);
+      flex: 1;
+    }
+
+    .app-version {
+      font-size: 11px;
+      color: var(--text3);
+      margin-top: 3px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .app-stat-row {
+      display: flex;
+      gap: 14px;
+      margin: 14px 0;
+      padding: 12px 0;
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .app-stat {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      flex: 1;
+    }
+
+    .app-stat-val { font-size: 20px; font-weight: 700; color: var(--text); }
+    .app-stat-lbl { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: .5px; margin-top: 2px; }
+
+    .secret-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 8px 12px;
+      margin-bottom: 14px;
+    }
+
+    .secret-val {
+      flex: 1;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--cyan);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .id-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+
+    .id-label { font-size: 11px; color: var(--text3); white-space: nowrap; }
+    .id-val {
+      flex: 1;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--text2);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .app-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    .empty-apps {
+      grid-column: 1 / -1;
+      text-align: center;
+      padding: 80px 20px;
+      color: var(--text3);
+    }
+
+    .empty-apps .empty-icon { font-size: 52px; margin-bottom: 16px; opacity: 0.3; }
+    .empty-apps .empty-title { font-size: 18px; font-weight: 600; color: var(--text2); margin-bottom: 8px; }
+    .empty-apps .empty-sub   { font-size: 13px; margin-bottom: 24px; }
+
+    /* Edit version inline */
+    .version-edit {
+      display: none;
+      align-items: center;
+      gap: 6px;
+      margin-top: 4px;
+    }
+    .version-edit.show { display: flex; }
+    .version-edit input { width: 90px; font-family: monospace; }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="main">
+    <div class="topbar">
+      <div class="topbar-title">Applications</div>
+      <button class="btn btn-primary" onclick="openModal('create-modal')">+ New Application</button>
+    </div>
+    <div class="content">
+      <div class="toolbar">
+        <input class="input" id="app-search" placeholder="Search apps..." style="max-width:260px" oninput="load()">
+        <div class="toolbar-spacer"></div>
+        <button class="btn btn-outline" onclick="bulkDeleteApps()">Delete Selected</button>
+      </div>
+      <div class="app-grid" id="app-grid">
+        <div style="grid-column:1/-1;text-align:center;padding:60px;color:var(--text3)">
+          <span class="spinner"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Create App Modal -->
+<div class="modal-overlay" id="create-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">📦 Create New Application</div>
+      <button class="modal-close" onclick="closeModal('create-modal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Application Name</label>
+        <input class="input" id="c-name" type="text" placeholder="e.g. My Loader, MyProduct v2" autofocus>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Version</label>
+        <input class="input" id="c-ver" type="text" value="1.0.0" placeholder="1.0.0">
+        <span style="font-size:11px;color:var(--text3);margin-top:4px">
+          Clients must send this exact version or be rejected.
+        </span>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('create-modal')">Cancel</button>
+      <button class="btn btn-primary" id="create-btn" onclick="createApp()">Create App</button>
+    </div>
+  </div>
+</div>
+
+<!-- Secret Modal (shown after create or regen) -->
+<div class="modal-overlay" id="secret-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">🔐 App Secret Key</div>
+      <button class="modal-close" onclick="closeModal('secret-modal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="background:var(--orange-dim);border:1px solid rgba(245,158,11,.25);border-radius:var(--radius);padding:12px 14px;color:var(--orange);font-size:13px;margin-bottom:16px">
+        ⚠️ Save this secret now — it will not be shown again after you close this dialog.
+      </div>
+      <div style="margin-bottom:6px">
+        <div class="form-label" style="margin-bottom:6px">App ID (send with every request)</div>
+        <div class="secret-display" id="modal-app-id" style="color:var(--text2)"></div>
+        <button class="btn btn-ghost btn-sm" style="margin-top:6px;width:100%" onclick="copyText(document.getElementById('modal-app-id').textContent)">⧉ Copy App ID</button>
+      </div>
+      <div>
+        <div class="form-label" style="margin-bottom:6px">Secret Key (used to encrypt all requests)</div>
+        <div class="secret-display" id="modal-secret"></div>
+        <button class="btn btn-ghost btn-sm" style="margin-top:6px;width:100%" onclick="copyText(document.getElementById('modal-secret').textContent)">⧉ Copy Secret</button>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" onclick="closeModal('secret-modal')">I saved it — close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Edit version modal -->
+<div class="modal-overlay" id="edit-modal">
+  <div class="modal" style="max-width:380px">
+    <div class="modal-header">
+      <div class="modal-title">Edit Application</div>
+      <button class="modal-close" onclick="closeModal('edit-modal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="edit-id">
+      <div class="form-group">
+        <label class="form-label">App Name</label>
+        <input class="input" id="edit-name" type="text">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Version</label>
+        <input class="input" id="edit-ver" type="text">
+        <span style="font-size:11px;color:var(--text3);margin-top:4px">
+          Changing this will immediately reject all clients sending the old version.
+        </span>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('edit-modal')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveEdit()">Save Changes</button>
+    </div>
+  </div>
+</div>
+
+<!-- Activity Timeline Modal -->
+<div class="modal-overlay" id="timeline-modal">
+  <div class="modal" style="max-width:760px">
+    <div class="modal-header">
+      <div class="modal-title" id="timeline-title">Activity Timeline</div>
+      <button class="modal-close" onclick="closeModal('timeline-modal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="timeline-loading" style="text-align:center;padding:18px;display:none"><span class="spinner"></span></div>
+      <div id="timeline-body" style="display:grid;gap:10px"></div>
+    </div>
+  </div>
+</div>
+
+<script src="js/api.js"></script>
+<script>
+  requireAuth();
+  buildSidebar("apps");
+  const selectedApps = new Set();
+
+  async function load() {
+    const grid = document.getElementById("app-grid");
+    try {
+      const apps = await API.getApps({ search: document.getElementById("app-search").value });
+
+      if (!apps.length) {
+        grid.innerHTML = `
+          <div class="empty-apps">
+            <div class="empty-icon">📦</div>
+            <div class="empty-title">No applications yet</div>
+            <div class="empty-sub">Create your first app to start issuing licenses.</div>
+            <button class="btn btn-primary" onclick="openModal('create-modal')">+ Create First App</button>
+          </div>`;
+        return;
+      }
+
+      grid.innerHTML = apps.map(a => `
+        <div class="app-card" id="app-${a.id}">
+          <div class="app-card-header">
+            <div class="app-icon">📦</div>
+            <div style="flex:1;min-width:0">
+              <div class="app-name">${escHtml(a.name)}</div>
+              <div class="app-version">v${escHtml(a.version)}</div>
+            </div>
+            <div style="display:flex;gap:6px;align-items:center">
+              <label class="checkbox-row" style="margin:0 8px 0 0;font-size:12px">
+                <input type="checkbox" class="app-select" value="${a.id}" onchange="toggleAppSelect('${a.id}', this.checked)" ${selectedApps.has(a.id) ? "checked" : ""}>
+                Select
+              </label>
+              <button class="btn btn-ghost btn-sm btn-icon" title="Edit" onclick='openEdit(${JSON.stringify(a)})'>✏️</button>
+            </div>
+          </div>
+
+          <div class="id-row">
+            <span class="id-label">App ID</span>
+            <span class="id-val" title="${a.id}">${a.id}</span>
+            <button class="copy-btn" onclick="copyText('${a.id}')" title="Copy App ID">⧉</button>
+          </div>
+
+          <div class="secret-row">
+            <span class="secret-val" id="sec-${a.id}" data-val="${a.secret_key}">${maskSecret(a.secret_key)}</span>
+            <button class="copy-btn" title="Toggle reveal" onclick="toggleSecret('${a.id}')">👁</button>
+            <button class="copy-btn" title="Copy secret" onclick="copyText(document.getElementById('sec-${a.id}').dataset.val)">⧉</button>
+          </div>
+
+          <div class="app-stat-row">
+            <div class="app-stat">
+              <div class="app-stat-val">${a.license_count}</div>
+              <div class="app-stat-lbl">Licenses</div>
+            </div>
+            <div class="app-stat">
+              <div class="app-stat-val" style="color:var(--text3);font-size:12px;font-family:monospace">${fmtDate(a.created_at).split(',')[0]}</div>
+              <div class="app-stat-lbl">Created</div>
+            </div>
+          </div>
+
+          <div class="app-actions">
+            <button class="btn btn-warning btn-sm" style="flex:1" onclick="regenSecret('${a.id}')">🔄 Regen Secret</button>
+            <button class="btn btn-ghost btn-sm" style="flex:1" onclick="openTimeline('${a.id}', ${JSON.stringify(a.name)})">🕒 Timeline</button>
+            <a class="btn btn-ghost btn-sm" href="licenses.html" style="flex:1;justify-content:center">🔑 Licenses</a>
+            <button class="btn btn-danger btn-sm btn-icon" onclick="deleteApp('${a.id}', '${escHtml(a.name)}')" title="Delete App">🗑</button>
+          </div>
+        </div>`).join("");
+    } catch (e) {
+      toast(e.message, "error");
+      grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--red)">${e.message}</div>`;
+    }
+  }
+
+  function toggleAppSelect(id, checked) {
+    if (checked) selectedApps.add(id);
+    else selectedApps.delete(id);
+  }
+
+  // ── Create ──
+  async function createApp() {
+    const name = document.getElementById("c-name").value.trim();
+    const ver  = document.getElementById("c-ver").value.trim();
+    if (!name) { toast("App name is required", "error"); return; }
+    if (!ver)  { toast("Version is required", "error"); return; }
+
+    const btn = document.getElementById("create-btn");
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
+
+    try {
+      const res = await API.createApp({ name, version: ver });
+      closeModal("create-modal");
+      document.getElementById("c-name").value = "";
+      document.getElementById("c-ver").value  = "1.0.0";
+
+      // Show secret
+      document.getElementById("modal-app-id").textContent = res.id;
+      document.getElementById("modal-secret").textContent  = res.secret_key;
+      openModal("secret-modal");
+
+      toast(`App "${name}" created`, "success");
+      load();
+    } catch (e) {
+      toast(e.message, "error");
+    } finally {
+      btn.disabled = false; btn.textContent = "Create App";
+    }
+  }
+
+  // ── Edit ──
+  function openEdit(app) {
+    document.getElementById("edit-id").value   = app.id;
+    document.getElementById("edit-name").value = app.name;
+    document.getElementById("edit-ver").value  = app.version;
+    openModal("edit-modal");
+  }
+
+  async function saveEdit() {
+    const id   = document.getElementById("edit-id").value;
+    const name = document.getElementById("edit-name").value.trim();
+    const ver  = document.getElementById("edit-ver").value.trim();
+    if (!name || !ver) { toast("Name and version required", "error"); return; }
+    try {
+      await API.updateApp(id, { name, version: ver });
+      closeModal("edit-modal");
+      toast("App updated", "success");
+      load();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  // ── Regen secret ──
+  async function regenSecret(id) {
+    if (!confirm("Regenerate secret?\n\nAll clients using the old secret will stop working immediately!")) return;
+    try {
+      const res = await API.regenSecret(id);
+      // Also need the app id to show in modal
+      document.getElementById("modal-app-id").textContent = id;
+      document.getElementById("modal-secret").textContent  = res.secret_key;
+      openModal("secret-modal");
+      toast("Secret regenerated — update your client code!", "warning");
+      load();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  // ── Delete ──
+  async function deleteApp(id, name) {
+    if (!confirm(`Delete "${name}"?\n\nAll licenses, sessions and HWIDs for this app will be permanently deleted.`)) return;
+    try {
+      await API.deleteApp(id);
+      toast(`"${name}" deleted`, "success");
+      selectedApps.delete(id);
+      load();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function bulkDeleteApps() {
+    const ids = [...selectedApps];
+    if (!ids.length) {
+      toast("Select one or more apps first", "error");
+      return;
+    }
+    if (!confirm(`Delete ${ids.length} selected app(s)? This cannot be undone.`)) return;
+    try {
+      await API.bulkDeleteApps(ids);
+      selectedApps.clear();
+      toast("Selected apps deleted", "success");
+      load();
+    } catch (e) {
+      toast(e.message, "error");
+    }
+  }
+
+  // ── Secret reveal toggle ──
+  function maskSecret(s) {
+    return s.slice(0, 8) + "••••••••••••••••••••••••••••••••••••••••••••••••" + s.slice(-4);
+  }
+
+  function toggleSecret(id) {
+    const el = document.getElementById("sec-" + id);
+    const full = el.dataset.val;
+    el.textContent = el.textContent.includes("•") ? full : maskSecret(full);
+  }
+
+  // ── HTML escape ──
+  function escHtml(s) {
+    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+
+  async function openTimeline(appId, appName) {
+    document.getElementById("timeline-title").textContent = `Activity Timeline - ${appName}`;
+    document.getElementById("timeline-body").innerHTML = "";
+    document.getElementById("timeline-loading").style.display = "block";
+    openModal("timeline-modal");
+    try {
+      const res = await API.getActivityTimeline("app", appId, { limit: 50 });
+      const items = res.items || [];
+      document.getElementById("timeline-body").innerHTML = items.length ? items.map(renderTimelineRow).join("") : `
+        <div class="empty">
+          <div class="empty-icon">📜</div>
+          <div class="empty-text">No timeline events yet</div>
+        </div>
+      `;
+    } catch (e) {
+      document.getElementById("timeline-body").innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><div class="empty-text">${escHtml(e.message)}</div></div>`;
+    } finally {
+      document.getElementById("timeline-loading").style.display = "none";
+    }
+  }
+
+  function renderTimelineRow(item) {
+    const action = item.action || item.reason || item.type || "event";
+    const details = item.details || item.reason || item.amount || "—";
+    return `
+      <div style="border:1px solid var(--border);border-radius:10px;padding:12px;background:var(--bg-accent)">
+        <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">
+          <div>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+              <span class="badge">${escHtml(action)}</span>
+              <span style="font-size:12px;color:var(--text-dim)">${fmtDate(item.created_at || item.timestamp || "")}</span>
+            </div>
+            <div style="font-size:13px;color:var(--text-main)">${escHtml(details)}</div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Allow Enter in create form
+  document.addEventListener("keydown", e => {
+    if (e.key === "Enter" && document.getElementById("create-modal").classList.contains("open"))
+      createApp();
+    if (e.key === "Enter" && document.getElementById("edit-modal").classList.contains("open"))
+      saveEdit();
+    if (e.key === "Escape") {
+      ["create-modal","secret-modal","edit-modal"].forEach(closeModal);
+    }
+  });
+
+  load();
+</script>
+</body>
+</html>

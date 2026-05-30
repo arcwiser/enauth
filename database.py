@@ -1,0 +1,329 @@
+import aiosqlite
+import os
+
+DB_PATH = os.getenv("DB_PATH", "enauth.db")
+
+SCHEMA = """
+PRAGMA journal_mode=WAL;
+PRAGMA foreign_keys=ON;
+
+CREATE TABLE IF NOT EXISTS applications (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    secret_key  TEXT NOT NULL UNIQUE,
+    version     TEXT NOT NULL DEFAULT '1.0.0',
+    owner_user_id TEXT REFERENCES auth_users(id) ON DELETE SET NULL,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS licenses (
+    id           TEXT PRIMARY KEY,
+    key          TEXT NOT NULL UNIQUE,
+    app_id       TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    status       TEXT NOT NULL DEFAULT 'active',
+    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at   DATETIME,
+    max_hwids    INTEGER NOT NULL DEFAULT 1,
+    notes        TEXT,
+    metadata     TEXT,
+    hwid_reset_at DATETIME,
+    last_ip      TEXT,
+    login_strikes INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS license_products (
+    id          TEXT PRIMARY KEY,
+    license_id  TEXT NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+    product_id  TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(license_id, product_id)
+);
+
+CREATE TABLE IF NOT EXISTS hwids (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    license_id  TEXT NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+    hwid_hash   TEXT NOT NULL,
+    first_seen  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_seen   DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(license_id, hwid_hash)
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id              TEXT PRIMARY KEY,
+    token           TEXT NOT NULL UNIQUE,
+    license_id      TEXT NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+    hwid            TEXT NOT NULL,
+    ip              TEXT NOT NULL,
+    app_id          TEXT NOT NULL,
+    started_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_heartbeat  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at      DATETIME NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS admin_users (
+    id            TEXT PRIMARY KEY,
+    username      TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    email         TEXT,
+    role          TEXT NOT NULL DEFAULT 'admin',
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS admin_sessions (
+    id         TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+    token      TEXT NOT NULL UNIQUE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS logs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    license_key TEXT,
+    app_id      TEXT,
+    action      TEXT NOT NULL,
+    ip          TEXT,
+    hwid        TEXT,
+    details     TEXT,
+    timestamp   DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_licenses_key        ON licenses(key);
+CREATE INDEX IF NOT EXISTS idx_licenses_app        ON licenses(app_id);
+CREATE INDEX IF NOT EXISTS idx_license_products_license ON license_products(license_id);
+CREATE INDEX IF NOT EXISTS idx_license_products_product ON license_products(product_id);
+CREATE INDEX IF NOT EXISTS idx_hwids_license       ON hwids(license_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_token      ON sessions(token);
+CREATE INDEX IF NOT EXISTS idx_sessions_license    ON sessions(license_id);
+CREATE INDEX IF NOT EXISTS idx_logs_timestamp      ON logs(timestamp);
+CREATE INDEX IF NOT EXISTS idx_logs_license        ON logs(license_key);
+CREATE INDEX IF NOT EXISTS idx_admin_sess_token    ON admin_sessions(token);
+
+CREATE TABLE IF NOT EXISTS banned_hwids (
+    hwid        TEXT NOT NULL,
+    app_id      TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    reason      TEXT,
+    banned_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(hwid, app_id)
+);
+
+CREATE TABLE IF NOT EXISTS variables (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    value       TEXT NOT NULL,
+    is_secret   BOOLEAN DEFAULT 0,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS news (
+    id          TEXT PRIMARY KEY,
+    app_id      TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    title       TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    color       TEXT DEFAULT 'white',
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS security_flags (
+    hwid        TEXT PRIMARY KEY,
+    strikes     INTEGER DEFAULT 0,
+    last_seen   DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS app_files (
+    id          TEXT PRIMARY KEY,
+    app_id      TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    content     BLOB NOT NULL,
+    file_sha256 TEXT,
+    is_secret   BOOLEAN DEFAULT 0,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(app_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS auth_users (
+    id            TEXT PRIMARY KEY,
+    username      TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'user',
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    id         TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
+    token      TEXT NOT NULL UNIQUE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS products (
+    id          TEXT PRIMARY KEY,
+    app_id       TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    level       TEXT NOT NULL,
+    is_active   INTEGER NOT NULL DEFAULT 1,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(app_id, level)
+);
+
+CREATE TABLE IF NOT EXISTS product_pricing_points (
+    id            TEXT PRIMARY KEY,
+    product_id    TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    days          INTEGER NOT NULL,
+    price         REAL NOT NULL,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS resellers (
+    id            TEXT PRIMARY KEY,
+    username      TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    owner_user_id TEXT REFERENCES auth_users(id) ON DELETE CASCADE,
+    balance       REAL NOT NULL DEFAULT 0,
+    is_active     INTEGER NOT NULL DEFAULT 1,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS reseller_sessions (
+    id          TEXT PRIMARY KEY,
+    reseller_id TEXT NOT NULL REFERENCES resellers(id) ON DELETE CASCADE,
+    token       TEXT NOT NULL UNIQUE,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at  DATETIME NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS reseller_product_access (
+    id            TEXT PRIMARY KEY,
+    reseller_id   TEXT NOT NULL REFERENCES resellers(id) ON DELETE CASCADE,
+    product_id    TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(reseller_id, product_id)
+);
+
+CREATE TABLE IF NOT EXISTS reseller_pricing_access (
+    id               TEXT PRIMARY KEY,
+    reseller_id      TEXT NOT NULL REFERENCES resellers(id) ON DELETE CASCADE,
+    pricing_point_id TEXT NOT NULL REFERENCES product_pricing_points(id) ON DELETE CASCADE,
+    created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(reseller_id, pricing_point_id)
+);
+
+CREATE TABLE IF NOT EXISTS reseller_balance_ledger (
+    id            TEXT PRIMARY KEY,
+    reseller_id   TEXT NOT NULL REFERENCES resellers(id) ON DELETE CASCADE,
+    amount        REAL NOT NULL,
+    reason        TEXT NOT NULL,
+    created_by    TEXT,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS key_orders (
+    id                 TEXT PRIMARY KEY,
+    reseller_id        TEXT NOT NULL REFERENCES resellers(id) ON DELETE CASCADE,
+    license_id         TEXT NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+    product_id         TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    pricing_point_id   TEXT NOT NULL REFERENCES product_pricing_points(id) ON DELETE CASCADE,
+    amount_paid        REAL NOT NULL,
+    created_at         DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_users_username       ON auth_users(username);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_token       ON auth_sessions(token);
+CREATE INDEX IF NOT EXISTS idx_products_app              ON products(app_id);
+CREATE INDEX IF NOT EXISTS idx_products_level            ON products(level);
+CREATE INDEX IF NOT EXISTS idx_pricing_product           ON product_pricing_points(product_id);
+CREATE INDEX IF NOT EXISTS idx_resellers_username        ON resellers(username);
+CREATE INDEX IF NOT EXISTS idx_reseller_sessions_token   ON reseller_sessions(token);
+CREATE INDEX IF NOT EXISTS idx_reseller_access_reseller  ON reseller_product_access(reseller_id);
+CREATE INDEX IF NOT EXISTS idx_reseller_access_product   ON reseller_product_access(product_id);
+CREATE INDEX IF NOT EXISTS idx_reseller_price_reseller   ON reseller_pricing_access(reseller_id);
+CREATE INDEX IF NOT EXISTS idx_reseller_price_point      ON reseller_pricing_access(pricing_point_id);
+CREATE INDEX IF NOT EXISTS idx_orders_reseller           ON key_orders(reseller_id);
+CREATE INDEX IF NOT EXISTS idx_orders_license            ON key_orders(license_id);
+
+CREATE TABLE IF NOT EXISTS panels (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    app_id      TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS portal_sessions (
+    id         TEXT PRIMARY KEY,
+    license_id TEXT NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+    token      TEXT NOT NULL UNIQUE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL
+);
+
+"""
+
+
+async def get_db():
+    db = await aiosqlite.connect(DB_PATH)
+    db.row_factory = aiosqlite.Row
+    await db.execute("PRAGMA foreign_keys=ON")
+    try:
+        yield db
+    finally:
+        await db.close()
+
+
+async def init_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executescript(SCHEMA)
+        async with db.execute("PRAGMA table_info(applications)") as cur:
+            app_cols = [r[1] for r in await cur.fetchall()]
+        if "owner_user_id" not in app_cols:
+            await db.execute("ALTER TABLE applications ADD COLUMN owner_user_id TEXT REFERENCES auth_users(id) ON DELETE SET NULL")
+
+        async with db.execute("PRAGMA table_info(resellers)") as cur:
+            reseller_cols = [r[1] for r in await cur.fetchall()]
+        if "owner_user_id" not in reseller_cols:
+            await db.execute("ALTER TABLE resellers ADD COLUMN owner_user_id TEXT REFERENCES auth_users(id) ON DELETE CASCADE")
+
+        async with db.execute("PRAGMA table_info(licenses)") as cur:
+            lic_cols = [r[1] for r in await cur.fetchall()]
+        if "metadata" not in lic_cols:
+            await db.execute("ALTER TABLE licenses ADD COLUMN metadata TEXT")
+
+        if "last_ip" not in lic_cols:
+            await db.execute("ALTER TABLE licenses ADD COLUMN last_ip TEXT")
+        if "login_strikes" not in lic_cols:
+            await db.execute("ALTER TABLE licenses ADD COLUMN login_strikes INTEGER DEFAULT 0")
+        if "client_username" not in lic_cols:
+            await db.execute("ALTER TABLE licenses ADD COLUMN client_username TEXT")
+        if "client_password_hash" not in lic_cols:
+            await db.execute("ALTER TABLE licenses ADD COLUMN client_password_hash TEXT")
+
+        async with db.execute("PRAGMA table_info(app_files)") as cur:
+            file_cols = [r[1] for r in await cur.fetchall()]
+        if "file_sha256" not in file_cols:
+            await db.execute("ALTER TABLE app_files ADD COLUMN file_sha256 TEXT")
+
+        async with db.execute("PRAGMA table_info(news)") as cur:
+            news_cols = [r[1] for r in await cur.fetchall()]
+        if "app_id" not in news_cols:
+            # We need to add app_id. Since it's NOT NULL, we'll have to handle existing data.
+            # For simplicity, we'll allow it to be NULL temporarily or default to a dummy.
+            await db.execute("ALTER TABLE news ADD COLUMN app_id TEXT REFERENCES applications(id) ON DELETE CASCADE")
+
+        async with db.execute("PRAGMA table_info(banned_hwids)") as cur:
+            ban_cols = [r[1] for r in await cur.fetchall()]
+        if "app_id" not in ban_cols:
+            await db.execute("ALTER TABLE banned_hwids ADD COLUMN app_id TEXT REFERENCES applications(id) ON DELETE CASCADE")
+            # Note: PRIMARY KEY change in SQLite requires table recreation, 
+            # but for now we'll just add the column to avoid crashing.
+
+
+        async with db.execute("PRAGMA table_info(admin_users)") as cur:
+            admin_cols = [r[1] for r in await cur.fetchall()]
+        if "two_factor_enabled" not in admin_cols:
+            await db.execute("ALTER TABLE admin_users ADD COLUMN two_factor_enabled INTEGER DEFAULT 0")
+        if "two_factor_secret" not in admin_cols:
+            await db.execute("ALTER TABLE admin_users ADD COLUMN two_factor_secret TEXT")
+
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_apps_owner ON applications(owner_user_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_resellers_owner ON resellers(owner_user_id)")
+        await db.commit()

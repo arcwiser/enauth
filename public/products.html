@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EnAuth - Levels & Pricing</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="main">
+    <div class="topbar">
+      <div class="topbar-title">Levels & Pricing</div>
+      <button class="btn btn-primary" onclick="openModal('create-level-modal')">+ Create Level</button>
+    </div>
+    <div class="content">
+      <div class="card" id="list" style="padding:0">
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th>App</th><th>Level</th><th>Name</th><th>Pricing Points</th><th>Actions</th>
+            </tr></thead>
+            <tbody id="tbody">
+              <tr class="loading-row"><td colspan="5"><span class="spinner"></span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="create-level-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">Create Level</div>
+      <button class="modal-close" onclick="closeModal('create-level-modal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">App</label>
+        <select class="select" id="cl-app"></select>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Level (slug)</label>
+          <input class="input" id="cl-level" placeholder="valorant / roblox / cs2">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Display Name</label>
+          <input class="input" id="cl-name" placeholder="Valorant Loader">
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('create-level-modal')">Cancel</button>
+      <button class="btn btn-primary" onclick="createLevel()">Create</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/api.js"></script>
+<script>
+  requireAuth();
+  buildSidebar("products");
+
+  let apps = [];
+  let products = [];
+
+  async function loadApps() {
+    apps = await API.getApps().catch(() => []);
+    const sel = document.getElementById("cl-app");
+    sel.innerHTML = apps.map(a => `<option value="${a.id}">${a.name}</option>`).join("");
+  }
+
+  async function createLevel() {
+    const app_id = document.getElementById("cl-app").value;
+    const level = document.getElementById("cl-level").value.trim();
+    const name = document.getElementById("cl-name").value.trim();
+    if (!app_id) return toast("Select app", "error");
+    if (!level || !name) return toast("Level and name required", "error");
+    try {
+      await API.createProduct({ app_id, level, name });
+      toast("Level created", "success");
+      closeModal("create-level-modal");
+      document.getElementById("cl-level").value = "";
+      document.getElementById("cl-name").value = "";
+      await load();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function addPricing(productId) {
+    const days = Number(prompt("Days (e.g. 1, 7, 30):", "1"));
+    if (!Number.isFinite(days) || days <= 0) return;
+    const price = Number(prompt("Price (e.g. 5):", "5"));
+    if (!Number.isFinite(price) || price <= 0) return;
+    try {
+      await API.addProductPricing(productId, { days, price });
+      toast("Pricing point added", "success");
+      await load();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function deletePricing(productId, pricingId) {
+    if (!confirm("Delete this pricing point?")) return;
+    try {
+      await API.deleteProductPricing(productId, pricingId);
+      toast("Pricing point deleted", "success");
+      await load();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function deleteLevel(productId, level) {
+    if (!confirm(`Delete level "${level}"?\n\nThis deletes its pricing points too.`)) return;
+    try {
+      await API.deleteProduct(productId);
+      toast("Level deleted", "success");
+      await load();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function load() {
+    const tbody = document.getElementById("tbody");
+    tbody.innerHTML = `<tr class="loading-row"><td colspan="5"><span class="spinner"></span></td></tr>`;
+    try {
+      products = await API.getProducts();
+      if (!products.length) {
+        tbody.innerHTML = `<tr><td colspan="5"><div class="empty"><div class="empty-icon">🧩</div><div class="empty-text">No levels yet</div></div></td></tr>`;
+        return;
+      }
+      // Fetch all pricing in parallel instead of sequentially
+      const pricingResults = await Promise.all(products.map(p => API.getProductPricing(p.id).catch(() => [])));
+      const rows = products.map((p, i) => {
+        const pricing = pricingResults[i];
+        const pricingHtml = pricing.length ? pricing.map(pp => `
+          <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+            <span class="mono" style="font-size:12px">${pp.days}d — $${Number(pp.price).toFixed(2)}</span>
+            <button class="btn btn-ghost btn-sm" onclick="deletePricing('${p.id}','${pp.id}')">🗑</button>
+          </div>
+        `).join("") : `<span style="color:var(--text-dim)">None</span>`;
+
+        return `
+          <tr>
+            <td>${p.app_name}</td>
+            <td><b>${p.level}</b></td>
+            <td>${p.name}</td>
+            <td style="max-width:320px">${pricingHtml}</td>
+            <td>
+              <div class="action-group">
+                <button class="btn btn-sm btn-outline" onclick="addPricing('${p.id}')">+ Pricing</button>
+                <button class="btn btn-sm btn-danger" onclick="deleteLevel('${p.id}','${p.level}')">Delete</button>
+              </div>
+            </td>
+          </tr>
+        `;
+      });
+      tbody.innerHTML = rows.join("");
+    } catch (e) {
+      toast(e.message, "error");
+    }
+  }
+
+  loadApps().then(load);
+</script>
+</body>
+</html>
+

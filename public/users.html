@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>EnAuth — Admin Users</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="main">
+      <div class="topbar">
+        <div class="topbar-title">Admin Management</div>
+      </div>
+      <div class="content">
+        <div class="toolbar">
+          <input class="input" id="user-search" placeholder="Search users..." style="max-width:240px" oninput="loadUsers()">
+          <div class="toolbar-spacer"></div>
+          <button class="btn btn-outline" onclick="bulkDeleteUsers()">Delete Selected</button>
+          <button class="btn btn-primary" id="btn-create-user" onclick="openModal('create-modal')" style="display:none">+ Create Admin</button>
+        </div>
+
+        <div class="card" style="padding:0">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:40px"><input type="checkbox" id="users-select-all" onchange="toggleAllUsers(this.checked)"></th>
+                  <th>Username</th>
+                  <th>Role</th>
+                  <th>Email</th>
+                  <th>Created</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="users-list">
+                <tr class="loading-row"><td colspan="6"><span class="spinner"></span></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- User Modal -->
+  <div class="modal-overlay" id="create-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <div class="modal-title" id="modal-title">Create Admin User</div>
+        <button class="modal-close" onclick="closeModal('create-modal')">✕</button>
+      </div>
+      <form id="user-form">
+        <div class="modal-body">
+          <input type="hidden" id="u-id">
+          <div class="form-group">
+            <label class="form-label">Username</label>
+            <input class="input" type="text" id="u-username" required>
+          </div>
+          <div class="form-group">
+            <label class="form-label" id="lbl-pass">Password</label>
+            <input class="input" type="password" id="u-password">
+            <small id="pass-hint" style="display:none;color:var(--text3)">Leave blank to keep current password</small>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Role</label>
+            <select class="select" id="u-role">
+              <option value="admin">Admin</option>
+              <option value="owner">Owner</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Email (optional)</label>
+            <input class="input" type="email" id="u-email">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost" onclick="closeModal('create-modal')">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save User</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Activity Timeline Modal -->
+  <div class="modal-overlay" id="timeline-modal">
+    <div class="modal" style="max-width:760px">
+      <div class="modal-header">
+        <div class="modal-title" id="timeline-title">Activity Timeline</div>
+        <button class="modal-close" onclick="closeModal('timeline-modal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="timeline-loading" style="text-align:center;padding:18px;display:none"><span class="spinner"></span></div>
+        <div id="timeline-body" style="display:grid;gap:10px"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/api.js"></script>
+  <script>
+  requireOwner();
+  buildSidebar("users");
+  const selectedUsers = new Set();
+
+    const currentUser = getUser();
+    if (currentUser.role === 'owner') {
+      document.getElementById('btn-create-user').style.display = 'block';
+    }
+
+    async function loadUsers() {
+      try {
+        const users = await API.getUsers({ search: document.getElementById("user-search").value });
+        const list = document.getElementById("users-list");
+        
+        list.innerHTML = users.map(u => `
+          <tr>
+            <td><input type="checkbox" class="user-select" value="${u.id}" ${selectedUsers.has(u.id) ? "checked" : ""} onchange="toggleUserSelect('${u.id}', this.checked)"></td>
+            <td><strong>${u.username}</strong></td>
+            <td>${roleBadge(u.role)}</td>
+            <td>${u.email || "—"}</td>
+            <td>${fmtDate(u.created_at)}</td>
+            <td>
+              <div class="action-group">
+                <button class="btn btn-ghost btn-sm" onclick="editUser(${JSON.stringify(u).replace(/"/g, '&quot;')})">Edit</button>
+                <button class="btn btn-ghost btn-sm" onclick="openTimeline('${u.id}', '${u.username}')">Timeline</button>
+                ${(currentUser.role === 'owner' && u.id !== currentUser.id) ? `<button class="btn btn-danger btn-sm" onclick="deleteUser('${u.id}')">Delete</button>` : ''}
+              </div>
+            </td>
+          </tr>
+        `).join("");
+      } catch (err) {
+        toast(err.message, "error");
+        if (err.message.includes("403")) {
+          document.getElementById("users-list").innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--red)">Permission Denied: Only owners can manage users.</td></tr>';
+        }
+      }
+    }
+
+    function toggleUserSelect(id, checked) {
+      if (checked) selectedUsers.add(id);
+      else selectedUsers.delete(id);
+    }
+
+    function toggleAllUsers(checked) {
+      document.querySelectorAll(".user-select").forEach(cb => {
+        cb.checked = checked;
+        toggleUserSelect(cb.value, checked);
+      });
+    }
+
+    function escapeHtml(text) {
+      return String(text ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    async function openTimeline(userId, username) {
+      document.getElementById("timeline-title").textContent = `Activity Timeline - ${username}`;
+      document.getElementById("timeline-body").innerHTML = "";
+      document.getElementById("timeline-loading").style.display = "block";
+      openModal("timeline-modal");
+      try {
+        const res = await API.getActivityTimeline("user", userId, { limit: 50 });
+        const items = res.items || [];
+        document.getElementById("timeline-body").innerHTML = items.length ? items.map(renderTimelineRow).join("") : `
+          <div class="empty">
+            <div class="empty-icon">📜</div>
+            <div class="empty-text">No timeline events yet</div>
+          </div>
+        `;
+      } catch (e) {
+        document.getElementById("timeline-body").innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><div class="empty-text">${escapeHtml(e.message)}</div></div>`;
+      } finally {
+        document.getElementById("timeline-loading").style.display = "none";
+      }
+    }
+
+    function renderTimelineRow(item) {
+      const action = item.action || item.reason || item.type || "event";
+      const details = item.details || item.reason || item.amount || "—";
+      return `
+        <div style="border:1px solid var(--border);border-radius:10px;padding:12px;background:var(--bg-accent)">
+          <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">
+            <div>
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+                <span class="badge">${escapeHtml(action)}</span>
+                <span style="font-size:12px;color:var(--text-dim)">${fmtDate(item.created_at || item.timestamp || "")}</span>
+              </div>
+              <div style="font-size:13px;color:var(--text-main)">${escapeHtml(details)}</div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function editUser(u) {
+      document.getElementById("modal-title").textContent = "Edit User";
+      document.getElementById("u-id").value = u.id;
+      document.getElementById("u-username").value = u.username;
+      document.getElementById("u-username").disabled = true;
+      document.getElementById("u-role").value = u.role;
+      document.getElementById("u-email").value = u.email || "";
+      document.getElementById("u-password").required = false;
+      document.getElementById("pass-hint").style.display = "block";
+      openModal("create-modal");
+    }
+
+    document.getElementById("user-form").onsubmit = async (e) => {
+      e.preventDefault();
+      const id = document.getElementById("u-id").value;
+      const b = {
+        role: document.getElementById("u-role").value,
+        email: document.getElementById("u-email").value,
+      };
+      const pass = document.getElementById("u-password").value;
+      if (pass) b.password = pass;
+
+      try {
+        if (id) {
+          await API.updateUser(id, b);
+          toast("User updated", "success");
+        } else {
+          b.username = document.getElementById("u-username").value;
+          b.password = pass;
+          if (!b.password) throw new Error("Password is required for new users");
+          await API.createUser(b);
+          toast("User created", "success");
+        }
+        closeModal("create-modal");
+        loadUsers();
+        resetForm();
+      } catch (err) {
+        toast(err.message, "error");
+      }
+    };
+
+    function resetForm() {
+      document.getElementById("user-form").reset();
+      document.getElementById("u-id").value = "";
+      document.getElementById("u-username").disabled = false;
+      document.getElementById("modal-title").textContent = "Create Admin User";
+      document.getElementById("pass-hint").style.display = "none";
+      document.getElementById("u-password").required = true;
+    }
+
+    async function deleteUser(id) {
+      if (!confirm(`Permanently delete this admin user?`)) return;
+      try {
+        await API.deleteUser(id);
+        selectedUsers.delete(id);
+        toast("User deleted", "success");
+        loadUsers();
+      } catch (err) {
+        toast(err.message, "error");
+      }
+    }
+
+    async function bulkDeleteUsers() {
+      const ids = [...selectedUsers];
+      if (!ids.length) {
+        toast("Select one or more users first", "error");
+        return;
+      }
+      if (!confirm(`Delete ${ids.length} selected user(s)?`)) return;
+      try {
+        await API.bulkDeleteUsers(ids);
+        selectedUsers.clear();
+        toast("Selected users deleted", "success");
+        loadUsers();
+      } catch (err) {
+        toast(err.message, "error");
+      }
+    }
+
+    loadUsers();
+  </script>
+</body>
+</html>

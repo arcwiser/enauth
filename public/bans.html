@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>EnAuth — Banned HWIDs</title>
+  <link rel="stylesheet" href="css/style.css">
+  <style>
+    .tabs { display:flex; gap:4px; border-bottom:1px solid var(--border); margin-bottom:20px; }
+    .tab  { padding:10px 18px; border:none; background:transparent; color:var(--text-dim);
+            cursor:pointer; font-size:14px; font-weight:500; font-family:inherit;
+            border-bottom:2px solid transparent; transition:all .2s; }
+    .tab:hover  { color:var(--text-main); }
+    .tab.active { color:var(--primary); border-bottom-color:var(--primary); }
+    .tab-panel  { display:none; }
+    .tab-panel.active { display:block; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="main">
+      <div class="topbar">
+        <div class="topbar-title">Ban Management</div>
+      </div>
+      <div class="content">
+        <div class="card">
+          <div class="tabs">
+            <button class="tab active" onclick="switchTab('hwids', this)">Banned HWIDs</button>
+            <button class="tab" onclick="switchTab('bulk', this)">Bulk Ban</button>
+          </div>
+
+          <!-- Banned HWIDs Tab -->
+          <div class="tab-panel active" id="tab-hwids">
+            <div class="toolbar" style="margin-bottom:16px">
+              <input class="input" id="search" placeholder="🔍 Search HWID or reason…" style="max-width:300px" oninput="load()">
+              <select class="select" id="filter-app" style="max-width:200px" onchange="load()">
+                <option value="">All Applications</option>
+              </select>
+              <div class="toolbar-spacer"></div>
+              <button class="btn btn-primary" onclick="openModal('ban-modal')">+ Ban HWID Manually</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Application</th>
+                    <th>Hardware ID (HWID)</th>
+                    <th>Reason / Note</th>
+                    <th>Banned At</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="bans-list">
+                  <tr class="loading-row"><td colspan="5"><span class="spinner"></span></td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div id="ban-count" style="font-size:12px;color:var(--text-dim);margin-top:10px;text-align:right"></div>
+          </div>
+
+          <!-- Bulk Ban Tab -->
+          <div class="tab-panel" id="tab-bulk">
+            <div style="max-width:600px">
+              <p style="font-size:13px;color:var(--text-dim);margin-bottom:16px;line-height:1.5">
+                Paste a list of HWID hashes (one per line) to ban them all at once for a specific application.
+              </p>
+              <div class="form-group">
+                <label class="form-label">Application</label>
+                <select class="select" id="bulk-app-id">
+                  <option value="">Select Application...</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label">HWID List (one per line)</label>
+                <textarea class="input" id="bulk-hwids" rows="8" placeholder="abc123def456...&#10;xyz789uvw012...&#10;..." style="font-family:monospace;font-size:12px;resize:vertical"></textarea>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Reason</label>
+                <input class="input" id="bulk-reason" type="text" placeholder="e.g. Mass ban — chargeback wave">
+              </div>
+              <button class="btn btn-danger" onclick="doBulkBan()">🚫 Ban All Listed HWIDs</button>
+              <div id="bulk-result" style="margin-top:12px;font-size:13px;color:var(--accent-green)"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Manual Ban Modal -->
+  <div class="modal-overlay" id="ban-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <div class="modal-title">Manual HWID Ban</div>
+        <button class="modal-close" onclick="closeModal('ban-modal')">✕</button>
+      </div>
+      <form id="ban-form">
+        <div class="modal-body">
+          <div class="form-group">
+            <label class="form-label">Application</label>
+            <select class="select" id="b-app-id" required>
+              <option value="">Select Application...</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Hardware ID</label>
+            <input class="input mono" type="text" id="b-hwid" placeholder="SHA-256 hash or system identifier" required>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Note / Reason</label>
+            <input class="input" type="text" id="b-note" placeholder="e.g. Chargeback, Token logging">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost" onclick="closeModal('ban-modal')">Cancel</button>
+          <button type="submit" class="btn btn-danger">🚫 Ban HWID</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="js/api.js"></script>
+  <script>
+    requireAuth();
+    buildSidebar("bans");
+
+    let allApps = [];
+
+    function switchTab(id, btn) {
+      document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
+      document.querySelectorAll(".tab").forEach(b => b.classList.remove("active"));
+      document.getElementById("tab-" + id).classList.add("active");
+      btn.classList.add("active");
+    }
+
+    async function loadApps() {
+      try {
+        allApps = await API.getApps();
+        const selectors = ["b-app-id", "bulk-app-id", "filter-app"];
+        selectors.forEach(selId => {
+          const sel = document.getElementById(selId);
+          if (!sel) return;
+          const isFilter = selId === "filter-app";
+          sel.innerHTML = (isFilter ? '<option value="">All Applications</option>' : '<option value="">Select Application...</option>') +
+            allApps.map(a => `<option value="${a.id}">${a.name}</option>`).join("");
+        });
+      } catch (err) { toast(err.message, "error"); }
+    }
+
+    async function load() {
+      try {
+        const query = document.getElementById("search").value.toLowerCase();
+        const appFilter = document.getElementById("filter-app").value;
+        const bans = await API.getBannedHwids();
+        const list = document.getElementById("bans-list");
+
+        let filtered = bans;
+        if (query) filtered = filtered.filter(b => b.hwid.toLowerCase().includes(query) || (b.reason || "").toLowerCase().includes(query));
+        if (appFilter) filtered = filtered.filter(b => b.app_id === appFilter);
+
+        document.getElementById("ban-count").textContent = `${filtered.length} banned HWID${filtered.length !== 1 ? "s" : ""}`;
+
+        if (!filtered.length) {
+          list.innerHTML = '<tr><td colspan="5"><div class="empty"><div class="empty-icon">🚫</div><div class="empty-text">No banned HWIDs found</div></div></td></tr>';
+          return;
+        }
+
+        list.innerHTML = filtered.map(b => `
+          <tr>
+            <td><span class="badge badge-outline" style="background:rgba(0,242,255,0.05);color:var(--primary);border:1px solid rgba(0,242,255,0.2)">${b.app_name || 'Unknown'}</span></td>
+            <td>
+              <span class="mono" style="font-size:11px">${b.hwid}</span>
+              <button class="copy-btn" onclick="copyText('${b.hwid}')" title="Copy HWID">⧉</button>
+            </td>
+            <td style="color:var(--text-dim)">${b.reason || "—"}</td>
+            <td style="color:var(--text-muted);font-size:12px">${fmtDate(b.banned_at)}</td>
+            <td>
+              <button class="btn btn-success btn-sm" onclick="unbanHWID('${b.app_id}', '${b.hwid}')">Unban</button>
+            </td>
+          </tr>
+        `).join("");
+      } catch (e) { toast(e.message, "error"); }
+    }
+
+    document.getElementById("ban-form").onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        await API.banHwid({
+          hwid: document.getElementById("b-hwid").value.trim(),
+          app_id: document.getElementById("b-app-id").value,
+          reason: document.getElementById("b-note").value
+        });
+        toast("HWID banned successfully", "warning");
+        closeModal("ban-modal");
+        e.target.reset();
+        load();
+      } catch (e) { toast(e.message, "error"); }
+    };
+
+    async function unbanHWID(appId, hwid) {
+      if (!confirm(`Unban HWID: ${hwid}?`)) return;
+      try {
+        await API.unbanHwid(appId, hwid);
+        toast("HWID unbanned", "success");
+        load();
+      } catch (e) { toast(e.message, "error"); }
+    }
+
+    async function doBulkBan() {
+      const appId = document.getElementById("bulk-app-id").value;
+      const raw = document.getElementById("bulk-hwids").value;
+      const reason = document.getElementById("bulk-reason").value.trim() || "Bulk ban";
+      const result = document.getElementById("bulk-result");
+
+      if (!appId) { toast("Select an application", "error"); return; }
+      const hwids = raw.split("\n").map(h => h.trim()).filter(h => h.length > 0);
+      if (!hwids.length) { toast("Enter at least one HWID", "error"); return; }
+
+      if (!confirm(`Ban ${hwids.length} HWID(s) for this application?`)) return;
+
+      result.textContent = "Banning...";
+      result.style.color = "var(--text-dim)";
+
+      let success = 0, failed = 0;
+      await Promise.all(hwids.map(async hwid => {
+        try {
+          await API.banHwid({ hwid, app_id: appId, reason });
+          success++;
+        } catch { failed++; }
+      }));
+
+      result.textContent = `✅ Banned ${success} HWID(s)${failed > 0 ? `, ${failed} failed (may already be banned)` : ""}`;
+      result.style.color = "var(--accent-green)";
+      toast(`Bulk ban complete: ${success} banned`, "warning");
+      load();
+    }
+
+    loadApps().then(load);
+  </script>
+</body>
+</html>

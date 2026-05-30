@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EnAuth — Login / Sign Up</title>
+  <meta name="description" content="EnAuth authentication">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="login-page">
+  <div class="login-box">
+    <div class="login-logo">
+      <div class="logo-icon">E</div>
+      <div class="logo-text">ENAUTH</div>
+    </div>
+    <p class="login-subtitle" id="login-subtitle">Admin/User Sign In</p>
+
+    <div class="login-error" id="login-error"></div>
+
+    <form id="login-form" autocomplete="off">
+      <div id="credentials-fields">
+        <div class="form-group">
+          <label class="form-label" for="username">Username</label>
+          <input class="input" id="username" type="text" placeholder="Enter username" required autofocus>
+        </div>
+        <div class="form-group" style="margin-bottom:20px">
+          <label class="form-label" for="password">Password</label>
+          <input class="input" id="password" type="password" placeholder="Enter password" required>
+        </div>
+        <button class="btn btn-primary" type="submit" id="login-btn">Sign In</button>
+        <div id="signup-requirements" style="display:none; font-size:12px; color:var(--text3); margin-top:10px; line-height:1.4">
+          Password requirements:
+          <ul style="margin:5px 0 0 15px; padding:0">
+            <li>At least 10 characters</li>
+            <li>At least one letter</li>
+            <li>At least one number</li>
+            <li>At least one special character</li>
+          </ul>
+        </div>
+        <button class="btn btn-secondary" type="button" id="mode-btn" style="width:100%; margin-top:10px;">Need an account? Sign Up</button>
+        <button class="btn btn-ghost" type="button" id="reseller-btn" style="width:100%; margin-top:10px;">Reseller Sign In</button>
+      </div>
+
+      <!-- Two-Factor Authentication Input -->
+      <div id="twofactor-fields" style="display:none">
+        <div class="form-group" style="margin-bottom:20px">
+          <label class="form-label" style="text-align:center; display:block">Google Authenticator Passcode</label>
+          <input class="input mono" id="twofactor-code" type="text" placeholder="000000" pattern="[0-9]*" inputmode="numeric" maxlength="6" style="font-size:24px; text-align:center; letter-spacing:8px; padding:10px 0" autocomplete="one-time-code">
+          <p style="font-size:11px; color:var(--text3); text-align:center; margin-top:8px">Enter the 6-digit verification code from your authenticator app.</p>
+        </div>
+        <button class="btn btn-primary" type="button" id="twofactor-btn" style="width:100%; justify-content:center;" onclick="submit2FA()">Verify & Authenticate</button>
+        <button class="btn btn-ghost" type="button" style="width:100%; margin-top:10px;" onclick="cancel2FA()">Back to Sign In</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script src="js/api.js"></script>
+<script>
+  if (getToken()) window.location.href = "dashboard.html";
+  if (getResellerToken()) window.location.href = "reseller.html";
+  let isSignupMode = false;
+  let isResellerMode = false;
+  let currentTempToken = null;
+  let currentUsername = null;
+
+  function applyMode() {
+    const subtitle = document.getElementById("login-subtitle");
+    const loginBtn = document.getElementById("login-btn");
+    const modeBtn = document.getElementById("mode-btn");
+    const resellerBtn = document.getElementById("reseller-btn");
+    const err = document.getElementById("login-error");
+    err.style.display = "none";
+    if (isResellerMode) {
+      subtitle.textContent = "Reseller Sign In";
+      loginBtn.textContent = "Sign In";
+      modeBtn.style.display = "none";
+      resellerBtn.textContent = "Back to Admin/User";
+      return;
+    }
+
+    modeBtn.style.display = "";
+    resellerBtn.textContent = "Reseller Sign In";
+
+    if (isSignupMode) {
+      subtitle.textContent = "Create Auth User Account";
+      loginBtn.textContent = "Sign Up";
+      modeBtn.textContent = "Have an account? Sign In";
+      document.getElementById("signup-requirements").style.display = "block";
+    } else {
+      subtitle.textContent = "Admin/User Sign In";
+      loginBtn.textContent = "Sign In";
+      modeBtn.textContent = "Need an account? Sign Up";
+      document.getElementById("signup-requirements").style.display = "none";
+    }
+  }
+
+  function show2FAPrompt() {
+    document.getElementById("login-subtitle").textContent = "Two-Factor Verification";
+    document.getElementById("credentials-fields").style.display = "none";
+    document.getElementById("twofactor-fields").style.display = "block";
+    document.getElementById("twofactor-code").value = "";
+    document.getElementById("twofactor-code").focus();
+  }
+
+  function cancel2FA() {
+    currentTempToken = null;
+    currentUsername = null;
+    document.getElementById("credentials-fields").style.display = "block";
+    document.getElementById("twofactor-fields").style.display = "none";
+    applyMode();
+  }
+
+  async function submit2FA() {
+    const err = document.getElementById("login-error");
+    const code = document.getElementById("twofactor-code").value.trim();
+    const btn = document.getElementById("twofactor-btn");
+    if (code.length !== 6) {
+      err.textContent = "Please enter a 6-digit code";
+      err.style.display = "block";
+      return;
+    }
+
+    err.style.display = "none";
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Verifying code…';
+
+    try {
+      const res = await API.twoFactorVerify(currentTempToken, code);
+      localStorage.setItem("enauth_token", res.token);
+      const meData = await API.me().catch(() => ({}));
+      localStorage.setItem("enauth_user", JSON.stringify({ id: meData.id, username: res.username, role: res.role }));
+      window.location.href = "dashboard.html";
+    } catch (ex) {
+      err.textContent = ex.message || "Verification failed";
+      err.style.display = "block";
+      btn.disabled = false;
+      btn.textContent = "Verify & Authenticate";
+    }
+  }
+
+  document.getElementById("mode-btn").addEventListener("click", () => {
+    isSignupMode = !isSignupMode;
+    isResellerMode = false;
+    applyMode();
+  });
+
+  document.getElementById("reseller-btn").addEventListener("click", () => {
+    isResellerMode = !isResellerMode;
+    isSignupMode = false;
+    applyMode();
+  });
+
+  document.getElementById("login-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (currentTempToken) {
+      submit2FA();
+      return;
+    }
+    const err = document.getElementById("login-error");
+    const btn = document.getElementById("login-btn");
+    err.style.display = "none";
+    btn.disabled = true;
+    btn.innerHTML = isSignupMode
+      ? '<span class="spinner"></span> Creating account…'
+      : '<span class="spinner"></span> Signing in…';
+
+    try {
+      const username = document.getElementById("username").value;
+      const password = document.getElementById("password").value;
+      if (isResellerMode) {
+        const res = await API.resellerLogin(username, password);
+        localStorage.setItem("enauth_reseller_token", res.token);
+        localStorage.setItem("enauth_reseller", JSON.stringify({ username: res.username, reseller_id: res.reseller_id }));
+        window.location.href = "reseller.html";
+      } else if (isSignupMode) {
+        await API.signup(username, password);
+        // Auto-login after signup
+        const res = await API.signin(username, password);
+        if (res.two_factor_required) {
+          currentTempToken = res.temp_token;
+          currentUsername = res.username;
+          show2FAPrompt();
+          return;
+        }
+        localStorage.setItem("enauth_token", res.token);
+        const meData = await API.me().catch(() => ({}));
+        localStorage.setItem("enauth_user", JSON.stringify({ id: meData.id, username: res.username, role: res.role }));
+        window.location.href = "dashboard.html";
+      } else {
+        const res = await API.signin(username, password);
+        if (res.two_factor_required) {
+          currentTempToken = res.temp_token;
+          currentUsername = res.username;
+          show2FAPrompt();
+          return;
+        }
+        localStorage.setItem("enauth_token", res.token);
+        const meData = await API.me().catch(() => ({}));
+        localStorage.setItem("enauth_user", JSON.stringify({ id: meData.id, username: res.username, role: res.role }));
+        window.location.href = "dashboard.html";
+      }
+    } catch (ex) {
+      err.textContent  = ex.message || "Login failed";
+      err.style.display = "block";
+      err.style.color = "";
+    } finally {
+      btn.disabled = false;
+      if (!currentTempToken) applyMode();
+    }
+  });
+</script>
+</body>
+</html>

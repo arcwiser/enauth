@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EnAuth — Active Sessions</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="main">
+    <div class="topbar">
+      <div class="topbar-title">Active Sessions</div>
+      <button class="btn btn-danger btn-sm" onclick="killAll()">Kill All Sessions</button>
+    </div>
+    <div class="content">
+      <div class="toolbar">
+        <input class="input" id="search" placeholder="Search key, HWID, IP..." style="max-width:260px" oninput="resetPage();load()">
+        <select class="select" id="filter-app" style="max-width:220px" onchange="resetPage();load()">
+          <option value="">All Apps</option>
+        </select>
+        <select class="select" id="page-size" style="max-width:120px" onchange="changePageSize(this.value)">
+          <option value="10">10</option>
+          <option value="25">25</option>
+          <option value="50">50</option>
+        </select>
+        <div class="toolbar-spacer"></div>
+        <button class="btn btn-outline" onclick="bulkKill()">Kill Selected</button>
+      </div>
+
+      <div class="card" style="padding:0">
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th style="width:40px"><input type="checkbox" id="select-all" onchange="toggleAll(this.checked)"></th>
+              <th>License Key</th><th>App</th><th>IP Address</th>
+              <th>HWID</th><th>Started</th><th>Last Heartbeat</th><th>Expires</th><th>Action</th>
+            </tr></thead>
+            <tbody id="tbody">
+              <tr class="loading-row"><td colspan="9"><span class="spinner"></span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="toolbar" style="margin-top:16px">
+        <div id="page-info" style="color:var(--text-dim);font-size:13px"></div>
+        <div class="toolbar-spacer"></div>
+        <button class="btn btn-ghost" onclick="prevPage()">← Prev</button>
+        <button class="btn btn-ghost" onclick="nextPage()">Next →</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="js/api.js"></script>
+<script>
+  requireAuth();
+  buildSidebar("sessions");
+
+  const stateKey = "enauth_sessions_filters";
+  let page = 0;
+  let pageSize = 25;
+  let hasMore = false;
+  const selected = new Set();
+
+  function saveState() {
+    localStorage.setItem(stateKey, JSON.stringify({
+      search: document.getElementById("search").value,
+      app_id: document.getElementById("filter-app").value,
+      pageSize,
+    }));
+  }
+
+  function loadState() {
+    try {
+      const s = JSON.parse(localStorage.getItem(stateKey) || "{}");
+      document.getElementById("search").value = s.search || "";
+      document.getElementById("filter-app").value = s.app_id || "";
+      pageSize = Number(s.pageSize || 25);
+      document.getElementById("page-size").value = String(pageSize);
+    } catch {}
+  }
+
+  function resetPage() {
+    page = 0;
+    saveState();
+  }
+
+  function changePageSize(val) {
+    pageSize = Number(val || 25);
+    page = 0;
+    saveState();
+    load();
+  }
+
+  async function loadApps() {
+    const apps = await API.getApps({ limit: 200 }).catch(() => []);
+    const sel = document.getElementById("filter-app");
+    sel.innerHTML = '<option value="">All Apps</option>' + apps.map(a => `<option value="${a.id}">${a.name}</option>`).join("");
+  }
+
+  async function load() {
+    saveState();
+    const tbody = document.getElementById("tbody");
+    tbody.innerHTML = `<tr class="loading-row"><td colspan="9"><span class="spinner"></span></td></tr>`;
+    try {
+      const rows = await API.getSessions({
+        search: document.getElementById("search").value,
+        app_id: document.getElementById("filter-app").value,
+        limit: pageSize + 1,
+        offset: page * pageSize,
+      });
+      hasMore = rows.length > pageSize;
+      const shown = rows.slice(0, pageSize);
+      document.getElementById("page-info").textContent = `Page ${page + 1}${shown.length ? ` · ${shown.length} rows` : ""}`;
+
+      if (!shown.length) {
+        tbody.innerHTML = `<tr><td colspan="9"><div class="empty"><div class="empty-icon">🔗</div><div class="empty-text">No active sessions</div></div></td></tr>`;
+        return;
+      }
+      tbody.innerHTML = shown.map(r => `
+        <tr>
+          <td><input type="checkbox" class="session-select" value="${r.id}" ${selected.has(r.id) ? "checked" : ""} onchange="toggleOne('${r.id}', this.checked)"></td>
+          <td><span class="mono">${r.license_key}</span></td>
+          <td style="color:var(--text2)">${r.app_name}</td>
+          <td class="mono">${r.ip}</td>
+          <td class="mono" style="color:var(--text3);font-size:11px" title="${r.hwid}">${r.hwid.slice(0,16)}…</td>
+          <td style="font-size:12px;color:var(--text2)">${fmtDate(r.started_at)}</td>
+          <td style="font-size:12px;color:var(--text2)">${relTime(r.last_heartbeat)}</td>
+          <td style="font-size:12px;color:var(--text2)">${fmtDate(r.expires_at)}</td>
+          <td><button class="btn btn-danger btn-sm" onclick="kill('${r.id}')">Kill</button></td>
+        </tr>`).join("");
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  function toggleOne(id, checked) {
+    if (checked) selected.add(id);
+    else selected.delete(id);
+  }
+
+  function toggleAll(checked) {
+    document.querySelectorAll(".session-select").forEach(cb => {
+      cb.checked = checked;
+      toggleOne(cb.value, checked);
+    });
+  }
+
+  async function kill(id) {
+    try {
+      await API.killSession(id);
+      selected.delete(id);
+      toast("Session killed", "warning");
+      load();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function bulkKill() {
+    const ids = [...selected];
+    if (!ids.length) { toast("Select one or more sessions first", "error"); return; }
+    if (!confirm(`Kill ${ids.length} selected session(s)?`)) return;
+    try {
+      await API.bulkKillSessions(ids);
+      selected.clear();
+      toast("Selected sessions killed", "warning");
+      load();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function killAll() {
+    if (!confirm("Kill ALL active sessions?")) return;
+    try { await API.killAllSessions(); selected.clear(); toast("All sessions cleared", "warning"); load(); }
+    catch (e) { toast(e.message, "error"); }
+  }
+
+  function prevPage() {
+    if (page > 0) {
+      page--;
+      load();
+    }
+  }
+
+  function nextPage() {
+    if (hasMore) {
+      page++;
+      load();
+    }
+  }
+
+  loadState();
+  loadApps().then(load);
+  setInterval(load, 15000);
+</script>
+</body>
+</html>

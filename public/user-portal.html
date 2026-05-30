@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>User Portal — Registration & HWID Reset</title>
+  <link rel="stylesheet" href="css/style.css">
+  <style>
+    body {
+      background: radial-gradient(circle at center, #0c121d 0%, #05070a 100%);
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .portal-box {
+      width: 100%;
+      max-width: 480px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 40px;
+      backdrop-filter: var(--glass);
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+      animation: fadeIn 0.5s ease-out;
+      position: relative;
+    }
+
+    .portal-logo {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 28px;
+    }
+
+    .portal-logo .logo-icon {
+      width: 54px;
+      height: 54px;
+      font-size: 26px;
+    }
+
+    .portal-app-title {
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      background: linear-gradient(to right, #fff, var(--primary));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      text-align: center;
+    }
+
+    .portal-subtitle {
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 13px;
+      margin-top: 4px;
+    }
+
+    .tab-header {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 24px;
+      gap: 16px;
+    }
+
+    .tab-btn {
+      flex: 1;
+      background: transparent;
+      border: none;
+      color: var(--text-dim);
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      padding: 12px;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: all 0.2s ease;
+    }
+
+    .tab-btn.active {
+      color: var(--primary);
+      border-bottom-color: var(--primary);
+    }
+
+    .portal-error {
+      background: rgba(255, 62, 62, 0.1);
+      color: var(--accent-red);
+      padding: 14px;
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      border: 1px solid rgba(255, 62, 62, 0.2);
+      margin-bottom: 20px;
+      display: none;
+      line-height: 1.4;
+    }
+
+    .portal-success {
+      background: rgba(0, 255, 136, 0.1);
+      color: var(--accent-green);
+      padding: 14px;
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      border: 1px solid rgba(0, 255, 136, 0.2);
+      margin-bottom: 20px;
+      display: none;
+      line-height: 1.4;
+    }
+
+    /* Portal Dashboard / Logged In State */
+    .dashboard-wrap {
+      display: none;
+      animation: fadeIn 0.4s ease-out;
+    }
+
+    .user-welcome {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--text-main);
+      margin-bottom: 16px;
+    }
+
+    .license-info-card {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 20px;
+      margin-bottom: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+    }
+
+    .info-lbl {
+      color: var(--text-dim);
+      font-weight: 500;
+    }
+
+    .info-val {
+      color: var(--text-main);
+      font-weight: 600;
+    }
+
+    .reset-btn-wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .btn-reset-hwid {
+      width: 100%;
+      padding: 14px;
+      font-size: 14px;
+      font-weight: 700;
+      background: linear-gradient(135deg, var(--primary), var(--secondary));
+      color: white;
+      border: none;
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      box-shadow: 0 4px 20px rgba(0, 242, 255, 0.2);
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+    }
+
+    .btn-reset-hwid:hover:not(:disabled) {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 26px rgba(0, 242, 255, 0.35);
+      filter: brightness(1.1);
+    }
+
+    .btn-reset-hwid:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .reset-warning {
+      font-size: 11px;
+      color: var(--text-dim);
+      text-align: center;
+      line-height: 1.4;
+    }
+
+    .signout-btn {
+      width: 100%;
+      margin-top: 16px;
+      justify-content: center;
+    }
+  </style>
+</head>
+<body>
+<div class="portal-box">
+  <div class="portal-logo">
+    <div class="logo-icon">E</div>
+    <div class="portal-app-title" id="app-title">Loading Portal...</div>
+    <div class="portal-subtitle" id="portal-sub">Connecting to EnAuth...</div>
+  </div>
+
+  <div class="portal-error" id="error-box"></div>
+  <div class="portal-success" id="success-box"></div>
+
+  <!-- Form state (Login & Registration) -->
+  <div id="forms-wrap" style="display: none;">
+    <div class="tab-header">
+      <button class="tab-btn active" id="tab-login" onclick="switchTab('login')">Sign In</button>
+      <button class="tab-btn" id="tab-register" onclick="switchTab('register')">Register Key</button>
+    </div>
+
+    <!-- Login Form -->
+    <form id="login-form">
+      <div class="form-group">
+        <label class="form-label" for="l-user">Username</label>
+        <input class="input" id="l-user" type="text" placeholder="Enter your registered username" required autocomplete="username">
+      </div>
+      <div class="form-group" style="margin-bottom: 24px;">
+        <label class="form-label" for="l-pass">Password</label>
+        <input class="input" id="l-pass" type="password" placeholder="Enter your password" required autocomplete="current-password">
+      </div>
+      <button class="btn btn-primary" type="submit" id="btn-login-submit" style="width:100%; justify-content:center;">Sign In</button>
+    </form>
+
+    <!-- Register Form -->
+    <form id="register-form" style="display: none;">
+      <div class="form-group">
+        <label class="form-label" for="r-key">License / Product Key</label>
+        <input class="input mono" id="r-key" type="text" placeholder="XXXX-XXXX-XXXX-XXXX" required style="text-transform: uppercase;">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="r-user">Desired Username</label>
+        <input class="input" id="r-user" type="text" placeholder="Choose a username" required autocomplete="username">
+      </div>
+      <div class="form-group" style="margin-bottom: 24px;">
+        <label class="form-label" for="r-pass">Desired Password</label>
+        <input class="input" id="r-pass" type="password" placeholder="Choose a password" required autocomplete="new-password">
+        <div style="font-size: 10px; color: var(--text-dim); margin-top: 6px; line-height: 1.3;">
+          Must be at least 10 chars and include a letter, number, and special char.
+        </div>
+      </div>
+      <button class="btn btn-primary" type="submit" id="btn-register-submit" style="width:100%; justify-content:center;">Register Account</button>
+    </form>
+  </div>
+
+  <!-- Dashboard / Logged In state -->
+  <div class="dashboard-wrap" id="dashboard-wrap">
+    <div class="user-welcome">Hello, <span id="portal-username" style="color: var(--primary);">User</span>!</div>
+    
+    <div class="license-info-card">
+      <div class="info-row">
+        <span class="info-lbl">Application</span>
+        <span class="info-val" id="d-app">—</span>
+      </div>
+      <div class="info-row">
+        <span class="info-lbl">License Key</span>
+        <span class="info-val mono" id="d-key">—</span>
+      </div>
+      <div class="info-row">
+        <span class="info-lbl">Status</span>
+        <span class="info-val" id="d-status">—</span>
+      </div>
+      <div class="info-row">
+        <span class="info-lbl">Expiry Date</span>
+        <span class="info-val" id="d-expiry">—</span>
+      </div>
+      <div class="info-row">
+        <span class="info-lbl">Hardware IDs</span>
+        <span class="info-val" id="d-hwid">—</span>
+      </div>
+      <div class="info-row">
+        <span class="info-lbl">Last Reset</span>
+        <span class="info-val" id="d-reset">—</span>
+      </div>
+    </div>
+
+    <div class="reset-btn-wrap">
+      <button class="btn-reset-hwid" id="btn-reset-action" onclick="resetHardwareId()">
+        🔄 Reset Hardware ID (HWID)
+      </button>
+      <div class="reset-warning">
+        ⚠️ Resetting your Hardware ID deletes all locked devices from this license key.
+      </div>
+    </div>
+
+    <!-- Portal Downloads Section -->
+    <div style="margin-top: 28px; border-top: 1px solid var(--border); padding-top: 24px">
+      <div class="user-welcome" style="font-size: 15px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px">
+        📦 Available Downloads
+      </div>
+      <div id="downloads-list" style="display:flex; flex-direction:column; gap:10px">
+        <div style="font-size:12px; color:var(--text-dim); text-align:center; padding:12px">No downloads available.</div>
+      </div>
+    </div>
+
+    <button class="btn btn-outline signout-btn" onclick="portalSignout()" style="margin-top:24px">Sign Out</button>
+  </div>
+</div>
+
+<script src="js/api.js"></script>
+<script>
+  // Parse panel ID from query string
+  const urlParams = new URLSearchParams(window.location.search);
+  const panelId = urlParams.get("id");
+
+  let currentTab = "login";
+  let sessionToken = localStorage.getItem(`portal_token_${panelId}`);
+
+  async function init() {
+    const errorBox = document.getElementById("error-box");
+    const formsWrap = document.getElementById("forms-wrap");
+    
+    if (!panelId) {
+      document.getElementById("app-title").textContent = "Invalid Link";
+      document.getElementById("portal-sub").textContent = "No panel ID provided.";
+      showError("This portal link is invalid or incomplete. Please check the URL provided by your administrator.");
+      return;
+    }
+
+    try {
+      // 1. Fetch Panel and Application details
+      const panel = await API.portalGetPanel(panelId);
+      document.getElementById("app-title").textContent = panel.app_name;
+      document.getElementById("portal-sub").textContent = `${panel.panel_name} Portal`;
+
+      // 2. Check if we already have a session
+      if (sessionToken) {
+        await loadDashboard();
+      } else {
+        formsWrap.style.display = "block";
+      }
+    } catch (e) {
+      document.getElementById("app-title").textContent = "Error";
+      document.getElementById("portal-sub").textContent = "Failed to load portal";
+      showError(`Failed to load portal configuration: ${e.message}`);
+    }
+  }
+
+  function switchTab(tab) {
+    currentTab = tab;
+    hideAlerts();
+    
+    const tabLogin = document.getElementById("tab-login");
+    const tabRegister = document.getElementById("tab-register");
+    const formLogin = document.getElementById("login-form");
+    const formRegister = document.getElementById("register-form");
+
+    if (tab === "login") {
+      tabLogin.classList.add("active");
+      tabRegister.classList.remove("active");
+      formLogin.style.display = "block";
+      formRegister.style.display = "none";
+    } else {
+      tabLogin.classList.remove("active");
+      tabRegister.classList.add("active");
+      formLogin.style.display = "none";
+      formRegister.style.display = "block";
+    }
+  }
+
+  // ─── Sign In Form Submit ───
+  document.getElementById("login-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    hideAlerts();
+    const btn = document.getElementById("btn-login-submit");
+    const user = document.getElementById("l-user").value.trim();
+    const pass = document.getElementById("l-pass").value;
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Signing in...';
+
+    try {
+      const res = await API.portalLogin({ panel_id: panelId, username: user, password: pass });
+      localStorage.setItem(`portal_token_${panelId}`, res.token);
+      sessionToken = res.token;
+      
+      // Clear inputs
+      document.getElementById("l-user").value = "";
+      document.getElementById("l-pass").value = "";
+
+      showSuccess("Login successful!");
+      setTimeout(async () => {
+        await loadDashboard();
+      }, 1000);
+    } catch (ex) {
+      showError(ex.message || "Failed to log in.");
+      btn.disabled = false;
+      btn.textContent = "Sign In";
+    }
+  });
+
+  // ─── Register Form Submit ───
+  document.getElementById("register-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    hideAlerts();
+    const btn = document.getElementById("btn-register-submit");
+    const key = document.getElementById("r-key").value.trim().toUpperCase();
+    const user = document.getElementById("r-user").value.trim();
+    const pass = document.getElementById("r-pass").value;
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Registering key...';
+
+    try {
+      await API.portalRegister({ panel_id: panelId, username: user, password: pass, license_key: key });
+      showSuccess("Account registered successfully! You can now sign in using your new credentials.");
+      
+      // Auto switch to login tab and fill username
+      setTimeout(() => {
+        switchTab("login");
+        document.getElementById("l-user").value = user;
+        document.getElementById("l-pass").focus();
+        btn.disabled = false;
+        btn.textContent = "Register Account";
+      }, 2000);
+    } catch (ex) {
+      showError(ex.message || "Failed to register key.");
+      btn.disabled = false;
+      btn.textContent = "Register Account";
+    }
+  });
+
+  // ─── Load Dashboard ───
+  async function loadDashboard() {
+    hideAlerts();
+    document.getElementById("forms-wrap").style.display = "none";
+    const dash = document.getElementById("dashboard-wrap");
+    
+    try {
+      const lic = await API.portalGetLicense(sessionToken);
+      
+      document.getElementById("portal-username").textContent = lic.client_username;
+      document.getElementById("d-app").textContent = lic.app_name;
+      
+      // Mask key beautifully
+      const rawKey = lic.key;
+      const masked = rawKey.slice(0, 5) + "-••••-••••-" + rawKey.slice(-4);
+      document.getElementById("d-key").textContent = masked;
+      document.getElementById("d-key").title = "Double click to copy";
+      
+      // Double click to copy raw key
+      document.getElementById("d-key").ondblclick = () => copyText(rawKey);
+
+      document.getElementById("d-status").innerHTML = statusBadge(lic.status);
+      document.getElementById("d-expiry").textContent = fmtDate(lic.expires_at) || "Lifetime";
+      document.getElementById("d-hwid").textContent = `${lic.hwid_count} / ${lic.max_hwids}`;
+      document.getElementById("d-reset").textContent = fmtDate(lic.hwid_reset_at) || "Never";
+
+      dash.style.display = "block";
+
+      // Load additional dynamic features
+      updateHwidCooldown(lic.hwid_reset_at);
+      loadDownloads();
+    } catch (e) {
+      localStorage.removeItem(`portal_token_${panelId}`);
+      sessionToken = null;
+      document.getElementById("forms-wrap").style.display = "block";
+      showError("Your session has expired. Please sign in again.");
+    }
+  }
+
+  // ─── HWID Reset ───
+  async function resetHardwareId() {
+    const btn = document.getElementById("btn-reset-action");
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Resetting Hardware ID...';
+    hideAlerts();
+
+    try {
+      await API.portalResetHwid(sessionToken);
+      showSuccess("Hardware ID successfully reset! You can now open the software on your new PC.");
+      
+      // Reload license details
+      const lic = await API.portalGetLicense(sessionToken);
+      document.getElementById("d-hwid").textContent = `${lic.hwid_count} / ${lic.max_hwids}`;
+      document.getElementById("d-reset").textContent = fmtDate(lic.hwid_reset_at) || "Never";
+      updateHwidCooldown(lic.hwid_reset_at);
+    } catch (e) {
+      showError(e.message || "Failed to reset Hardware ID.");
+      try {
+        const lic = await API.portalGetLicense(sessionToken);
+        updateHwidCooldown(lic.hwid_reset_at);
+      } catch (ex) {}
+    }
+  }
+
+  function portalSignout() {
+    if (cooldownTimerInterval) {
+      clearInterval(cooldownTimerInterval);
+      cooldownTimerInterval = null;
+    }
+    localStorage.removeItem(`portal_token_${panelId}`);
+    sessionToken = null;
+    document.getElementById("dashboard-wrap").style.display = "none";
+    document.getElementById("forms-wrap").style.display = "block";
+    hideAlerts();
+  }
+
+  // ─── Real-Time Cooldown Countdown & File Downloads ───
+  let cooldownTimerInterval = null;
+
+  function updateHwidCooldown(lastResetStr) {
+    if (cooldownTimerInterval) {
+      clearInterval(cooldownTimerInterval);
+      cooldownTimerInterval = null;
+    }
+    const btn = document.getElementById("btn-reset-action");
+    const warning = document.querySelector(".reset-warning");
+
+    if (!lastResetStr) {
+      btn.disabled = false;
+      btn.innerHTML = "🔄 Reset Hardware ID (HWID)";
+      warning.style.color = "var(--text-dim)";
+      warning.textContent = "⚠️ Resetting your Hardware ID deletes all locked devices from this license key.";
+      return;
+    }
+
+    // Convert ISO string to proper date object
+    const dateStr = lastResetStr.includes("Z") ? lastResetStr : lastResetStr.replace(" ", "T") + "Z";
+    const lastReset = new Date(dateStr);
+    const cooldownDuration = 24 * 60 * 60 * 1000; // 24 hours
+
+    function tick() {
+      const now = new Date();
+      const elapsed = now - lastReset;
+      const remaining = cooldownDuration - elapsed;
+
+      if (remaining <= 0) {
+        btn.disabled = false;
+        btn.innerHTML = "🔄 Reset Hardware ID (HWID)";
+        warning.style.color = "var(--text-dim)";
+        warning.textContent = "⚠️ Resetting your Hardware ID deletes all locked devices from this license key.";
+        if (cooldownTimerInterval) {
+          clearInterval(cooldownTimerInterval);
+          cooldownTimerInterval = null;
+        }
+      } else {
+        btn.disabled = true;
+        const hours = Math.floor(remaining / (3600 * 1000));
+        const mins = Math.floor((remaining % (3600 * 1000)) / (60 * 1000));
+        const secs = Math.floor((remaining % (60 * 1000)) / 1000);
+        btn.innerHTML = `⏳ HWID Reset on Cooldown (${hours}h ${mins}m ${secs}s)`;
+        warning.style.color = "var(--accent-red)";
+        warning.textContent = `🚫 Cooldown active: You must wait ${hours}h ${mins}m before resetting again.`;
+      }
+    }
+
+    tick();
+    cooldownTimerInterval = setInterval(tick, 1000);
+  }
+
+  async function loadDownloads() {
+    const list = document.getElementById("downloads-list");
+    list.innerHTML = '<div style="font-size:12px; color:var(--text-dim); text-align:center; padding:12px"><span class="spinner"></span> Loading downloads...</div>';
+
+    try {
+      const files = await API.portalGetFiles(sessionToken);
+      if (!files || files.length === 0) {
+        list.innerHTML = '<div style="font-size:12px; color:var(--text-dim); text-align:center; padding:12px">No downloads available.</div>';
+        return;
+      }
+
+      list.innerHTML = files.map(file => `
+        <div style="background:rgba(255, 255, 255, 0.01); border:1px solid var(--border); border-radius:var(--radius-md); padding:14px; display:flex; justify-content:space-between; align-items:center; transition: all 0.2s">
+          <div style="display:flex; flex-direction:column; gap:4px; text-align: left">
+            <span style="font-size:13px; font-weight:600; color:var(--text-main)">${file.name}</span>
+            <span style="font-size:11px; color:var(--text-dim)">Uploaded ${fmtDate(file.created_at)}</span>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="downloadFile('${file.id}', '${file.name}')" style="padding:6px 14px; font-size:12px; height:auto; display:flex; align-items:center; gap:6px">
+            📥 Download
+          </button>
+        </div>
+      `).join("");
+    } catch(e) {
+      list.innerHTML = `<div style="font-size:12px; color:var(--accent-red); text-align:center; padding:12px">Failed to load downloads: ${e.message}</div>`;
+    }
+  }
+
+  function downloadFile(fileId, fileName) {
+    toast(`Starting download for ${fileName}...`, "info");
+    
+    fetch(`/api/admin/portal/files/${fileId}/download`, {
+      headers: { "Authorization": `Bearer ${sessionToken}` }
+    })
+    .then(async res => {
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || "Download failed");
+      }
+      return res.blob();
+    })
+    .then(blob => {
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      toast("Download completed successfully!", "success");
+    })
+    .catch(e => {
+      showError(`Download failed: ${e.message}`);
+    });
+  }
+
+  // ─── Helpers ───
+  function showError(msg) {
+    const box = document.getElementById("error-box");
+    box.textContent = msg;
+    box.style.display = "block";
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function showSuccess(msg) {
+    const box = document.getElementById("success-box");
+    box.textContent = msg;
+    box.style.display = "block";
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function hideAlerts() {
+    document.getElementById("error-box").style.display = "none";
+    document.getElementById("success-box").style.display = "none";
+  }
+
+  init();
+</script>
+</body>
+</html>

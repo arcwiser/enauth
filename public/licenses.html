@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EnAuth — Licenses</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="main">
+    <div class="topbar">
+      <div class="topbar-title">License Management</div>
+    </div>
+    <div class="content">
+      <!-- Toolbar -->
+      <div class="toolbar">
+        <input class="input" id="search" placeholder="🔍 Search key, notes, metadata…" style="max-width:220px" oninput="load()">
+        <select class="select" id="filter-status" style="max-width:130px" onchange="load()">
+          <option value="">All Status</option>
+          <option value="active">Active</option>
+          <option value="banned">Banned</option>
+          <option value="expired">Expired</option>
+        </select>
+        <select class="select" id="filter-app" style="max-width:170px" onchange="loadApps().then(load)">
+          <option value="">All Apps</option>
+        </select>
+        <select class="select" id="filter-product" style="max-width:150px" onchange="load()">
+          <option value="">All Levels</option>
+        </select>
+        <select class="select" id="filter-expired" style="max-width:130px" onchange="load()">
+          <option value="">All Expiry</option>
+          <option value="false">Active Only</option>
+          <option value="true">Expired Only</option>
+        </select>
+        <div class="toolbar-spacer"></div>
+        <button class="btn btn-outline" onclick="bulkAction('ban')">Ban Selected</button>
+        <button class="btn btn-outline" onclick="bulkAction('unban')">Unban Selected</button>
+        <button class="btn btn-outline" onclick="bulkAction('delete')">Delete Selected</button>
+        <button class="btn btn-outline" style="margin-right:8px" onclick="openExtendModal()">➕ Extend All</button>
+        <button class="btn btn-primary" onclick="openModal('create-modal')">+ Create License</button>
+      </div>
+
+      <!-- Table -->
+      <div class="card" style="padding:0">
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th style="width:40px"><input type="checkbox" id="licenses-select-all" onchange="toggleAllLicenses(this.checked)"></th>
+              <th>License Key</th><th>App</th><th>Levels</th><th>Status</th>
+              <th>Expires</th><th>HWIDs</th><th>Created</th><th>Actions</th>
+            </tr></thead>
+            <tbody id="tbody">
+              <tr class="loading-row"><td colspan="9"><span class="spinner"></span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Extend Modal -->
+<div class="modal-overlay" id="extend-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">Extend License(s)</div>
+      <button class="modal-close" onclick="closeModal('extend-modal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Extend Duration</label>
+        <div style="display:flex; gap:10px;">
+          <input class="input" id="e-value" type="number" value="30" min="1" step="any" style="flex:2">
+          <select class="select" id="e-unit" style="flex:1">
+            <option value="days">Days</option>
+            <option value="hours">Hours</option>
+          </select>
+        </div>
+        <p style="font-size:12px;color:var(--text3);margin-top:8px">Note: This only affects licenses that have an expiration date (non-lifetime).</p>
+      </div>
+      <input type="hidden" id="e-id">
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('extend-modal')">Cancel</button>
+      <button class="btn btn-primary" onclick="doExtend()">Extend Now</button>
+    </div>
+  </div>
+</div>
+
+<!-- HWID Modal -->
+<div class="modal-overlay" id="hwid-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">Tracked HWIDs</div>
+      <button class="modal-close" onclick="closeModal('hwid-modal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="hwid-list-container">
+        <!-- HWIDs will be loaded here -->
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" onclick="closeModal('hwid-modal')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Create Modal -->
+<div class="modal-overlay" id="create-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">Create License(s)</div>
+      <button class="modal-close" onclick="closeModal('create-modal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Application</label>
+        <select class="select" id="c-app" onchange="refreshLevelOptions()"></select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Level</label>
+        <div style="display:flex; gap:8px;">
+          <div id="c-levels" style="flex:1; border:1px solid var(--border); border-radius:8px; padding:10px; max-height:170px; overflow:auto;"></div>
+          <button class="btn btn-outline" type="button" onclick="makeLevel()">+ Make Level</button>
+          <button class="btn btn-danger" type="button" onclick="deleteLevel()">Delete Level</button>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Max HWIDs</label>
+          <input class="input" id="c-hwids" type="number" value="1" min="1" max="100">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Quantity</label>
+          <input class="input" id="c-count" type="number" value="1" min="1" max="100">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Prefix (optional)</label>
+          <input class="input" id="c-prefix" type="text" placeholder="e.g. VIP" maxlength="10">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="checkbox-row">
+          <input type="checkbox" id="c-lifetime" checked onchange="toggleExpiry()">
+          Lifetime license (no expiry)
+        </label>
+      </div>
+      <div class="form-group" id="expiry-group" style="display:none">
+        <label class="form-label">Expires After</label>
+        <div style="display:flex; gap:10px;">
+          <input class="input" id="c-expiry-value" type="number" value="30" min="1" step="any" style="flex:2">
+          <select class="select" id="c-expiry-unit" style="flex:1">
+            <option value="days">Days</option>
+            <option value="hours">Hours</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Notes (optional)</label>
+          <input class="input" id="c-notes" type="text" placeholder="Internal notes...">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Metadata (optional)</label>
+          <input class="input" id="c-metadata" type="text" placeholder="JSON or custom string...">
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('create-modal')">Cancel</button>
+      <button class="btn btn-primary" onclick="createLicense()">Generate</button>
+    </div>
+  </div>
+</div>
+
+<!-- Result Modal -->
+<div class="modal-overlay" id="result-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">✅ License(s) Created</div>
+      <button class="modal-close" onclick="closeModal('result-modal')">✕</button>
+    </div>
+    <div class="modal-body" id="result-body"></div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" onclick="closeModal('result-modal');load()">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- Activity Timeline Modal -->
+<div class="modal-overlay" id="timeline-modal">
+  <div class="modal" style="max-width:760px">
+    <div class="modal-header">
+      <div class="modal-title" id="timeline-title">Activity Timeline</div>
+      <button class="modal-close" onclick="closeModal('timeline-modal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="timeline-loading" style="text-align:center;padding:18px;display:none"><span class="spinner"></span></div>
+      <div id="timeline-body" style="display:grid;gap:10px"></div>
+    </div>
+  </div>
+</div>
+
+<script src="js/api.js?v=2"></script>
+<script>
+  requireAuth();
+  buildSidebar("licenses");
+
+  let apps = [];
+  let products = [];
+  const selectedLicenses = new Set();
+
+  async function loadApps() {
+    apps = await API.getApps().catch(() => []);
+    products = await API.getProducts().catch(() => []);
+    const sel1 = document.getElementById("filter-app");
+    const sel2 = document.getElementById("c-app");
+    sel1.innerHTML = `<option value="">All Apps</option>`;
+    sel2.innerHTML = ``;
+    apps.forEach(a => {
+      sel1.innerHTML += `<option value="${a.id}">${a.name}</option>`;
+      sel2.innerHTML += `<option value="${a.id}">${a.name}</option>`;
+    });
+
+    const filterAppId = sel1.value;
+    const prodSel = document.getElementById("filter-product");
+    prodSel.innerHTML = `<option value="">All Levels</option>`;
+    products.filter(p => !filterAppId || p.app_id === filterAppId).forEach(p => {
+      prodSel.innerHTML += `<option value="${p.id}">${p.level} (${p.name})</option>`;
+    });
+
+    refreshLevelOptions();
+  }
+
+  function refreshLevelOptions() {
+    const appId = document.getElementById("c-app").value;
+    const box = document.getElementById("c-levels");
+    const levels = products.filter(p => p.app_id === appId && p.is_active);
+    if (!levels.length) {
+      box.innerHTML = `<div style="color:var(--text3)">No levels yet</div>`;
+      return;
+    }
+    box.innerHTML = levels.map(p => `
+      <label class="checkbox-row" style="margin-bottom:6px;">
+        <input type="checkbox" class="level-check" value="${p.id}">
+        ${p.level} <span style="color:var(--text3)">(${p.name})</span>
+      </label>
+    `).join("");
+  }
+
+  async function makeLevel() {
+    const appId = document.getElementById("c-app").value;
+    if (!appId) { toast("Select an app first", "error"); return; }
+    const level = prompt("Enter new level name (example: valorant / roblox / cs2):", "");
+    if (!level) return;
+    const name = prompt("Enter product display name for this level:", level);
+    if (!name) return;
+    try {
+      await API.createProduct({ app_id: appId, level: level.trim(), name: name.trim() });
+      products = await API.getProducts().catch(() => []);
+      refreshLevelOptions();
+      toast("Level created", "success");
+    } catch (e) {
+      toast(e.message, "error");
+    }
+  }
+
+  async function deleteLevel() {
+    const appId = document.getElementById("c-app").value;
+    if (!appId) { toast("Select an app first", "error"); return; }
+    const level = prompt("Type the level name to delete (example: valorant):");
+    if (!level) return;
+    const target = products.find(p => p.app_id === appId && p.level.toLowerCase() === level.trim().toLowerCase());
+    if (!target) { toast("Level not found", "error"); return; }
+    if (!confirm(`Delete level "${target.level}"?\n\nThis will remove the level and its pricing points.`)) return;
+    try {
+      await API.deleteProduct(target.id);
+      products = await API.getProducts().catch(() => []);
+      refreshLevelOptions();
+      toast("Level deleted", "success");
+    } catch (e) {
+      toast(e.message, "error");
+    }
+  }
+
+  function levelChips(prods) {
+    if (!prods || !prods.length)
+      return `<span style="color:var(--text3)">— Any —</span>`;
+    return prods.map(p => `
+      <span class="badge" style="background:var(--bg2);color:var(--text2);margin-right:4px;font-size:11px"
+            title="product_id: ${p.product_id}">${p.level}</span>
+    `).join("");
+  }
+
+  async function load() {
+    const tbody = document.getElementById("tbody");
+    tbody.innerHTML = `<tr class="loading-row"><td colspan="9"><span class="spinner"></span></td></tr>`;
+    try {
+      const rows = await API.getLicenses({
+        search: document.getElementById("search").value,
+        status: document.getElementById("filter-status").value,
+        app_id: document.getElementById("filter-app").value,
+        product_id: document.getElementById("filter-product").value,
+        expired: document.getElementById("filter-expired").value === "" ? null : document.getElementById("filter-expired").value === "true",
+        limit:  200,
+      });
+      if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="9"><div class="empty"><div class="empty-icon">🔑</div><div class="empty-text">No licenses found</div></div></td></tr>`;
+        return;
+      }
+      tbody.innerHTML = rows.map(r => `
+        <tr id="row-${r.id}">
+          <td><input type="checkbox" class="license-select" value="${r.id}" ${selectedLicenses.has(r.id) ? "checked" : ""} onchange="toggleLicenseSelect('${r.id}', this.checked)"></td>
+          <td>
+            <div class="key-cell">
+              <span class="key-text mono">${r.key}</span>
+              <button class="copy-btn" onclick="copyText('${r.key}')" title="Copy">⧉</button>
+            </div>
+            ${r.notes ? `<div style="font-size:11px;color:var(--text3);margin-top:2px">📝 ${r.notes}</div>` : ""}
+            ${r.metadata ? `<div style="font-size:11px;color:var(--blue);margin-top:1px">🏷️ ${r.metadata}</div>` : ""}
+          </td>
+          <td style="color:var(--text2)">${r.app_name}</td>
+          <td>${levelChips(r.products)}</td>
+          <td>${statusBadge(r.status)}</td>
+          <td style="color:var(--text2)">${r.expires_at ? fmtDate(r.expires_at) : '<span style="color:var(--green)">Lifetime</span>'}</td>
+          <td>
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="font-weight:600">${r.hwid_count} / ${r.max_hwids}</span>
+              <button class="btn btn-ghost btn-sm" style="padding:2px 6px" onclick="viewHwids('${r.id}')" title="Track HWIDs">🔍</button>
+            </div>
+          </td>
+          <td style="color:var(--text3);font-size:12px">${fmtDate(r.created_at)}</td>
+          <td>
+            <div class="action-group">
+              ${r.status === 'active'
+                ? `<button class="btn btn-danger btn-sm" onclick="banLic('${r.id}')">Ban</button>`
+                : `<button class="btn btn-success btn-sm" onclick="unbanLic('${r.id}')">Unban</button>`}
+              ${r.expires_at ? `<button class="btn btn-outline btn-sm" onclick="openExtendModal('${r.id}')">Extend</button>` : ''}
+              <button class="btn btn-warning btn-sm" onclick="resetHwid('${r.id}')">Reset HWID</button>
+              <button class="btn btn-ghost btn-sm" onclick="openTimeline('${r.id}', '${r.key}')">Timeline</button>
+              <button class="btn btn-ghost btn-sm" onclick="deleteLic('${r.id}')">🗑</button>
+            </div>
+          </td>
+        </tr>`).join("");
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  function toggleLicenseSelect(id, checked) {
+    if (checked) selectedLicenses.add(id);
+    else selectedLicenses.delete(id);
+  }
+
+  function toggleAllLicenses(checked) {
+    document.querySelectorAll(".license-select").forEach(cb => {
+      cb.checked = checked;
+      toggleLicenseSelect(cb.value, checked);
+    });
+  }
+
+  async function openTimeline(licenseId, licenseKey) {
+    document.getElementById("timeline-title").textContent = `Activity Timeline - ${licenseKey}`;
+    document.getElementById("timeline-body").innerHTML = "";
+    document.getElementById("timeline-loading").style.display = "block";
+    openModal("timeline-modal");
+    try {
+      const res = await API.getActivityTimeline("license", licenseId, { limit: 50 });
+      const items = res.items || [];
+      document.getElementById("timeline-body").innerHTML = items.length ? items.map(renderTimelineRow).join("") : `
+        <div class="empty">
+          <div class="empty-icon">📜</div>
+          <div class="empty-text">No timeline events yet</div>
+        </div>
+      `;
+    } catch (e) {
+      document.getElementById("timeline-body").innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><div class="empty-text">${escapeHtml(e.message)}</div></div>`;
+    } finally {
+      document.getElementById("timeline-loading").style.display = "none";
+    }
+  }
+
+  function renderTimelineRow(item) {
+    const action = item.action || item.reason || item.type || "event";
+    const details = item.details || item.reason || item.amount || "—";
+    return `
+      <div style="border:1px solid var(--border);border-radius:10px;padding:12px;background:var(--bg-accent)">
+        <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">
+          <div>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+              <span class="badge">${escapeHtml(action)}</span>
+              <span style="font-size:12px;color:var(--text-dim)">${fmtDate(item.created_at || item.timestamp || "")}</span>
+            </div>
+            <div style="font-size:13px;color:var(--text-main)">${escapeHtml(details)}</div>
+          </div>
+          ${item.amount !== undefined && item.amount !== null ? `<div style="font-weight:700;color:${Number(item.amount) >= 0 ? 'var(--accent-green)' : 'var(--accent-red)'}">${Number(item.amount) >= 0 ? '+' : ''}$${Number(item.amount).toFixed(2)}</div>` : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  async function viewHwids(id) {
+    const container = document.getElementById("hwid-list-container");
+    container.innerHTML = `<div style="padding:20px;text-align:center"><span class="spinner"></span></div>`;
+    openModal("hwid-modal");
+    try {
+      const lic = await API.getLicense(id);
+      if (!lic.hwids || !lic.hwids.length) {
+        container.innerHTML = `<div style="padding:20px;text-align:center;color:var(--text3)">No hardware IDs linked to this license yet.</div>`;
+        return;
+      }
+      container.innerHTML = `
+        <div style="font-size:13px;color:var(--text3);margin-bottom:12px">Last reset: ${lic.hwid_reset_at ? fmtDate(lic.hwid_reset_at) : "Never"}</div>
+        <table class="hwid-table" style="width:100%;font-size:13px">
+          <thead><tr><th>HWID Hash</th><th>First Seen</th><th>Last Seen</th></tr></thead>
+          <tbody>
+            ${lic.hwids.map(h => `
+              <tr>
+                <td class="mono" style="font-size:11px">${h.hwid_hash}</td>
+                <td style="white-space:nowrap">${fmtDate(h.first_seen)}</td>
+                <td style="white-space:nowrap">${fmtDate(h.last_seen)}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      `;
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  function openExtendModal(id = null) {
+    document.getElementById("e-id").value = id || "";
+    document.getElementById("e-value").value = 30;
+    document.getElementById("e-unit").value = "days";
+    openModal("extend-modal");
+  }
+
+  async function doExtend() {
+    const id = document.getElementById("e-id").value;
+    const val = +document.getElementById("e-value").value;
+    const unit = document.getElementById("e-unit").value;
+    const payload = { license_id: id || null };
+    if (unit === "hours") {
+      payload.hours = val;
+    } else {
+      payload.days = val;
+    }
+    try {
+      await API.extendLicense(payload);
+      toast(id ? "License extended" : "All eligible licenses extended", "success");
+      closeModal("extend-modal");
+      load();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function createLicense() {
+    try {
+      const selectedLevels = [...document.querySelectorAll(".level-check:checked")].map(x => x.value);
+      if (!selectedLevels.length) { toast("Select at least 1 level before generating keys", "error"); return; }
+      
+      const isLifetime = document.getElementById("c-lifetime").checked;
+      const expiryValue = +document.getElementById("c-expiry-value").value;
+      const expiryUnit = document.getElementById("c-expiry-unit").value;
+      
+      const payload = {
+        app_id:      document.getElementById("c-app").value,
+        product_ids: selectedLevels,
+        max_hwids:   +document.getElementById("c-hwids").value,
+        count:       +document.getElementById("c-count").value,
+        prefix:      document.getElementById("c-prefix").value || null,
+        notes:       document.getElementById("c-notes").value || null,
+        metadata:    document.getElementById("c-metadata").value || null,
+      };
+      
+      if (!isLifetime) {
+        if (expiryUnit === "hours") {
+          payload.expires_hours = expiryValue;
+        } else {
+          payload.expires_days = expiryValue;
+        }
+      }
+
+      const res = await API.createLicense(payload);
+      closeModal("create-modal");
+      const body = document.getElementById("result-body");
+      const prodList = (res.products || []).map(p => `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;
+                    border:1px solid var(--border);border-radius:6px;margin-bottom:4px;font-size:12px">
+          <div>
+            <span class="badge" style="background:var(--bg2);color:var(--text2)">${p.level}</span>
+            <span style="color:var(--text3);margin-left:6px">${p.name}</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span class="mono" style="color:var(--text3)">${p.id}</span>
+            <button class="copy-btn" onclick="copyText('${p.id}')" title="Copy product_id">⧉</button>
+          </div>
+        </div>`).join("");
+      const header = (res.products && res.products.length)
+        ? `<div style="margin-bottom:10px">
+             <div style="font-size:13px;color:var(--text2);margin-bottom:6px">
+               These keys are locked to the levels below. Pass the matching
+               <code>product_id</code> in your loader's <code>Login()</code> call:
+             </div>
+             ${prodList}
+           </div>`
+        : "";
+      body.innerHTML = header + res.created.map(c => `
+        <div class="secret-display" style="margin-bottom:8px;display:flex;align-items:center;justify-content:space-between">
+          <span class="mono">${c.key}</span>
+          <button class="copy-btn" onclick="copyText('${c.key}')">⧉ Copy</button>
+        </div>`).join("");
+      openModal("result-modal");
+      toast(`Created ${res.created.length} license(s)`, "success");
+    } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function banLic(id) {
+    if (!confirm("Ban this license? Active session will be killed and HWIDs will be globally locked.")) return;
+    try { await API.banLicense(id); toast("License banned & HWIDs locked", "warning"); load(); }
+    catch (e) { toast(e.message, "error"); }
+  }
+
+  async function unbanLic(id) {
+    try { await API.unbanLicense(id); toast("License unbanned", "success"); load(); }
+    catch (e) { toast(e.message, "error"); }
+  }
+
+  async function resetHwid(id) {
+    if (!confirm("Reset all HWIDs for this license?")) return;
+    try { await API.resetHwid(id); toast("HWIDs reset", "success"); load(); }
+    catch (e) { toast(e.message, "error"); }
+  }
+
+  async function deleteLic(id) {
+    if (!confirm("Permanently delete this license?")) return;
+    try { await API.deleteLicense(id); selectedLicenses.delete(id); toast("Deleted", "success"); load(); }
+    catch (e) { toast(e.message, "error"); }
+  }
+
+  async function bulkAction(action) {
+    const ids = [...selectedLicenses];
+    if (!ids.length) {
+      toast("Select one or more licenses first", "error");
+      return;
+    }
+    const label = action === "delete" ? "delete" : action;
+    if (!confirm(`${label.toUpperCase()} ${ids.length} selected license(s)?`)) return;
+    try {
+      if (action === "ban") await API.bulkBanLicenses(ids);
+      else if (action === "unban") await API.bulkUnbanLicenses(ids);
+      else await API.bulkDeleteLicenses(ids);
+      selectedLicenses.clear();
+      toast("Bulk action complete", "success");
+      load();
+    } catch (e) {
+      toast(e.message, "error");
+    }
+  }
+
+  function toggleExpiry() {
+    document.getElementById("expiry-group").style.display =
+      document.getElementById("c-lifetime").checked ? "none" : "block";
+  }
+
+  loadApps().then(load);
+</script>
+</body>
+</html>
