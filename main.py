@@ -4,7 +4,6 @@ import secrets
 import string
 import asyncio
 import contextlib
-import signal
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -34,8 +33,6 @@ from utils.logger import app_log
 
 # ─── Lifespan ────────────────────────────────────────────────────────────────
 
-shutdown_event = asyncio.Event()
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -43,7 +40,6 @@ async def lifespan(app: FastAPI):
     await ensure_default_admin()
     cleanup_task = asyncio.create_task(_maintenance_loop())
     yield
-    shutdown_event.set()
     cleanup_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await cleanup_task
@@ -137,22 +133,11 @@ async def ensure_default_admin():
             app_log.info(f"Default admin account created - Username: {username}, Password: {password}")
 
 
-# ─── Entry point ─────────────────────────────────────────────────────────────
-
-def handle_signal(signum, frame):
-    """Handle shutdown signals gracefully."""
-    app_log.info(f"Received signal {signum}, initiating graceful shutdown...")
-    shutdown_event.set()
-
 if __name__ == "__main__":
     import uvicorn
     host  = os.getenv("HOST", "0.0.0.0")
     port  = int(os.getenv("PORT", "8080"))
     debug = os.getenv("DEBUG", "false").lower() == "true"
-
-    # Register signal handlers for graceful shutdown
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
 
     app_log.info(f"EnAuth Server starting on https://{host}:{port}")
     app_log.info(f"Admin panel -> https://localhost:{port}/panel/")

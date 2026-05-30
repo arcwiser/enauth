@@ -1,23 +1,37 @@
 // ─── API Base ─────────────────────────────────────────────────────────────────
-const BASE = "";
+const BASE = (() => {
+  const origin = window.location.origin || "";
+  if (origin && origin !== "null") return "";
+  return localStorage.getItem("enauth_base_url") || "http://127.0.0.1:8080";
+})();
 
 function getToken() { return localStorage.getItem("enauth_token"); }
-function getUser()  { return JSON.parse(localStorage.getItem("enauth_user") || "{}"); }
+function getUser()  {
+  const raw = localStorage.getItem("enauth_user");
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    localStorage.removeItem("enauth_user");
+    console.warn("Discarded corrupt enauth_user state", err);
+    return {};
+  }
+}
 function getResellerToken() { return localStorage.getItem("enauth_reseller_token"); }
 function getTheme() { 
   const user = getUser();
   return user.theme || localStorage.getItem("enauth_theme") || "dark";
 }
-async function setTheme(theme) {
+async function setTheme(theme, syncServer = true) {
   const next = theme === "light" ? "light" : "dark";
   localStorage.setItem("enauth_theme", next);
   document.documentElement.setAttribute("data-theme", next);
-  // Sync with server
+  // Sync with server only when we already have a valid logged-in user.
+  if (!syncServer || !getToken()) return;
   try {
     const u = getUser();
-    if (u.id) {
+    if (u.id && typeof API !== "undefined" && API.updateUser) {
       await API.updateUser(u.id, { theme: next });
-      // Update local user data
       localStorage.setItem("enauth_user", JSON.stringify({ ...u, theme: next }));
     }
   } catch (err) {
@@ -27,7 +41,7 @@ async function setTheme(theme) {
 function toggleTheme() {
   setTheme(getTheme() === "dark" ? "light" : "dark");
 }
-setTheme(getTheme());
+setTheme(getTheme(), false);
 
 function requireAuth() {
   if (!getToken()) { window.location.href = "/panel/index.html"; }

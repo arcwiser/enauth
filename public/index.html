@@ -3,9 +3,68 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>EnAuth — Login / Sign Up</title>
+  <title>EnAuth - Login / Sign Up</title>
   <meta name="description" content="EnAuth authentication">
   <link rel="stylesheet" href="css/style.css">
+  <style>
+    body {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      background:
+        radial-gradient(circle at top, rgba(0, 242, 255, 0.14), transparent 30%),
+        linear-gradient(180deg, #06080d, #0b1017 60%, #05070a 100%);
+    }
+    .login-box { width: 100%; max-width: 470px; }
+    .auth-tabs { display: flex; gap: 10px; margin-bottom: 18px; }
+    .auth-tab {
+      flex: 1;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.03);
+      color: var(--text-dim);
+      padding: 12px 14px;
+      border-radius: var(--radius-md);
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .auth-tab.active {
+      color: #fff;
+      border-color: var(--primary);
+      background: linear-gradient(135deg, rgba(0,242,255,0.18), rgba(112,0,255,0.12));
+    }
+    .panel-note {
+      margin-top: 10px;
+      font-size: 12px;
+      line-height: 1.45;
+      color: var(--text-dim);
+    }
+    .auth-error, .auth-success {
+      display: none;
+      border-radius: var(--radius-sm);
+      padding: 12px 14px;
+      margin-bottom: 16px;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    .auth-error {
+      color: var(--accent-red);
+      border: 1px solid rgba(255, 62, 62, 0.2);
+      background: rgba(255, 62, 62, 0.08);
+    }
+    .auth-success {
+      color: var(--accent-green);
+      border: 1px solid rgba(0, 255, 136, 0.2);
+      background: rgba(0, 255, 136, 0.08);
+    }
+    .helper-row {
+      display: flex;
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .helper-row .btn { flex: 1; justify-content: center; }
+  </style>
 </head>
 <body>
 <div class="login-page">
@@ -16,7 +75,13 @@
     </div>
     <p class="login-subtitle" id="login-subtitle">Admin/User Sign In</p>
 
-    <div class="login-error" id="login-error"></div>
+    <div class="auth-error" id="login-error"></div>
+    <div class="auth-success" id="login-success"></div>
+
+    <div class="auth-tabs">
+      <button class="auth-tab active" id="tab-signin" type="button">Sign In</button>
+      <button class="auth-tab" id="tab-signup" type="button">Sign Up</button>
+    </div>
 
     <form id="login-form" autocomplete="off">
       <div id="credentials-fields">
@@ -24,307 +89,225 @@
           <label class="form-label" for="username">Username</label>
           <input class="input" id="username" type="text" placeholder="Enter username" required autofocus>
         </div>
-        <div class="form-group" style="margin-bottom:20px">
+        <div class="form-group" style="margin-bottom:18px">
           <label class="form-label" for="password">Password</label>
           <input class="input" id="password" type="password" placeholder="Enter password" required>
         </div>
-        <button class="btn btn-primary" type="submit" id="login-btn">Sign In</button>
-        <div id="signup-requirements" style="display:none; font-size:12px; color:var(--text3); margin-top:10px; line-height:1.4">
+        <button class="btn btn-primary" type="submit" id="login-btn" style="width:100%; justify-content:center;">Sign In</button>
+        <div id="signup-requirements" class="panel-note" style="display:none;">
           Password requirements:
-          <ul style="margin:5px 0 0 15px; padding:0">
+          <ul style="margin:8px 0 0 16px; padding:0">
             <li>At least 10 characters</li>
             <li>At least one letter</li>
             <li>At least one number</li>
             <li>At least one special character</li>
           </ul>
         </div>
-        <button class="btn btn-secondary" type="button" id="mode-btn" style="width:100%; margin-top:10px;">Need an account? Sign Up</button>
-        <button class="btn btn-ghost" type="button" id="reseller-btn" style="width:100%; margin-top:10px;">Reseller Sign In</button>
-        <button class="btn btn-ghost" type="button" id="forgot-btn" style="width:100%; margin-top:10px; font-size:12px;">Forgot Password?</button>
+        <div class="helper-row">
+          <button class="btn btn-secondary" type="button" id="reseller-btn">Reseller Sign In</button>
+        </div>
       </div>
 
-      <!-- Two-Factor Authentication Input -->
-      <div id="twofactor-fields" style="display:none">
+      <div id="twofactor-fields" style="display:none;">
         <div class="form-group" style="margin-bottom:20px">
           <label class="form-label" style="text-align:center; display:block">Google Authenticator Passcode</label>
           <input class="input mono" id="twofactor-code" type="text" placeholder="000000" pattern="[0-9]*" inputmode="numeric" maxlength="6" style="font-size:24px; text-align:center; letter-spacing:8px; padding:10px 0" autocomplete="one-time-code">
-          <p style="font-size:11px; color:var(--text3); text-align:center; margin-top:8px">Enter the 6-digit verification code from your authenticator app.</p>
+          <p class="panel-note" style="text-align:center;">Enter the 6-digit code from your authenticator app.</p>
         </div>
-        <button class="btn btn-primary" type="button" id="twofactor-btn" style="width:100%; justify-content:center;" onclick="submit2FA()">Verify & Authenticate</button>
-        <button class="btn btn-ghost" type="button" style="width:100%; margin-top:10px;" onclick="cancel2FA()">Back to Sign In</button>
-      </div>
-
-      <!-- Password Reset Request -->
-      <div id="reset-request-fields" style="display:none">
-        <div class="form-group" style="margin-bottom:20px">
-          <label class="form-label" for="reset-username">Username</label>
-          <input class="input" id="reset-username" type="text" placeholder="Enter your username" required autofocus>
-        </div>
-        <button class="btn btn-primary" type="button" id="reset-request-btn" style="width:100%;">Send Reset Token</button>
-        <button class="btn btn-ghost" type="button" style="width:100%; margin-top:10px;" onclick="cancelReset()">Back to Sign In</button>
-      </div>
-
-      <!-- Password Reset Verify -->
-      <div id="reset-verify-fields" style="display:none">
-        <div class="form-group" style="margin-bottom:15px">
-          <label class="form-label" for="reset-token">Reset Token</label>
-          <input class="input mono" id="reset-token" type="text" placeholder="Enter the reset token" required autofocus>
-        </div>
-        <div class="form-group" style="margin-bottom:20px">
-          <label class="form-label" for="reset-new-password">New Password</label>
-          <input class="input" id="reset-new-password" type="password" placeholder="Enter new password" required>
-        </div>
-        <button class="btn btn-primary" type="button" id="reset-verify-btn" style="width:100%;">Reset Password</button>
-        <button class="btn btn-ghost" type="button" style="width:100%; margin-top:10px;" onclick="cancelReset()">Back to Sign In</button>
+        <button class="btn btn-primary" type="button" id="twofactor-btn" style="width:100%; justify-content:center;">Verify & Authenticate</button>
+        <button class="btn btn-ghost" type="button" id="back-btn" style="width:100%; margin-top:10px;">Back to Sign In</button>
       </div>
     </form>
   </div>
 </div>
 
-<script src="js/api.js"></script>
 <script>
-  if (getToken()) window.location.href = "dashboard.html";
-  if (getResellerToken()) window.location.href = "reseller.html";
-  let isSignupMode = false;
-  let isResellerMode = false;
-  let currentTempToken = null;
-  let currentUsername = null;
+  const API_BASE = (() => {
+    const origin = window.location.origin || "";
+    if (origin && origin !== "null") return origin;
+    return localStorage.getItem("enauth_base_url") || "http://127.0.0.1:8080";
+  })();
+
+  const state = { mode: "signin", tempToken: null };
+
+  function $id(id) { return document.getElementById(id); }
+  function showError(message) {
+    const box = $id("login-error");
+    box.textContent = message;
+    box.style.display = "block";
+    $id("login-success").style.display = "none";
+  }
+  function showSuccess(message) {
+    const box = $id("login-success");
+    box.textContent = message;
+    box.style.display = "block";
+    $id("login-error").style.display = "none";
+  }
+  function clearAlerts() {
+    $id("login-error").style.display = "none";
+    $id("login-success").style.display = "none";
+  }
+  function setBusy(button, busy, text) {
+    button.disabled = busy;
+    button.innerHTML = busy ? '<span class="spinner"></span> ' + text : text;
+  }
+  function saveUser(user) {
+    localStorage.setItem("enauth_user", JSON.stringify(user));
+  }
+  function getToken() {
+    return localStorage.getItem("enauth_token");
+  }
+  function getResellerToken() {
+    return localStorage.getItem("enauth_reseller_token");
+  }
+  async function requestJson(path, body = null, method = "POST", token = null) {
+    const options = {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { "Authorization": `Bearer ${token}` } : {}),
+      },
+    };
+    if (body !== null && method !== "GET" && method !== "HEAD") {
+      options.body = JSON.stringify(body);
+    }
+    const res = await fetch(API_BASE + path, options);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || data.message || `HTTP ${res.status}`);
+    return data;
+  }
+  async function authMe(token) {
+    return requestJson("/api/admin/auth/me", null, "GET", token);
+  }
+  async function authSignup(username, password) {
+    return requestJson("/api/admin/auth/signup", { username, password });
+  }
+  async function authSignin(username, password) {
+    return requestJson("/api/admin/auth/signin", { username, password });
+  }
+  async function authVerify2FA(temp_token, code) {
+    return requestJson("/api/admin/auth/2fa/verify", { temp_token, code });
+  }
 
   function applyMode() {
-    const subtitle = document.getElementById("login-subtitle");
-    const loginBtn = document.getElementById("login-btn");
-    const modeBtn = document.getElementById("mode-btn");
-    const resellerBtn = document.getElementById("reseller-btn");
-    const err = document.getElementById("login-error");
-    err.style.display = "none";
-    if (isResellerMode) {
-      subtitle.textContent = "Reseller Sign In";
-      loginBtn.textContent = "Sign In";
-      modeBtn.style.display = "none";
-      resellerBtn.textContent = "Back to Admin/User";
-      return;
-    }
-
-    modeBtn.style.display = "";
-    resellerBtn.textContent = "Reseller Sign In";
-
-    if (isSignupMode) {
-      subtitle.textContent = "Create Auth User Account";
-      loginBtn.textContent = "Sign Up";
-      modeBtn.textContent = "Have an account? Sign In";
-      document.getElementById("signup-requirements").style.display = "block";
-    } else {
-      subtitle.textContent = "Admin/User Sign In";
-      loginBtn.textContent = "Sign In";
-      modeBtn.textContent = "Need an account? Sign Up";
-      document.getElementById("signup-requirements").style.display = "none";
-    }
+    clearAlerts();
+    $id("tab-signin").classList.toggle("active", state.mode === "signin");
+    $id("tab-signup").classList.toggle("active", state.mode === "signup");
+    $id("login-subtitle").textContent = state.mode === "signup" ? "Create Auth User Account" : "Admin/User Sign In";
+    $id("login-btn").textContent = state.mode === "signup" ? "Sign Up" : "Sign In";
+    $id("signup-requirements").style.display = state.mode === "signup" ? "block" : "none";
   }
 
-  function show2FAPrompt() {
-    document.getElementById("login-subtitle").textContent = "Two-Factor Verification";
-    document.getElementById("credentials-fields").style.display = "none";
-    document.getElementById("twofactor-fields").style.display = "block";
-    document.getElementById("twofactor-code").value = "";
-    document.getElementById("twofactor-code").focus();
+  function show2FA() {
+    $id("login-subtitle").textContent = "Two-Factor Verification";
+    $id("credentials-fields").style.display = "none";
+    $id("twofactor-fields").style.display = "block";
+    $id("twofactor-code").value = "";
+    $id("twofactor-code").focus();
   }
 
-  function cancel2FA() {
-    currentTempToken = null;
-    currentUsername = null;
-    document.getElementById("credentials-fields").style.display = "block";
-    document.getElementById("twofactor-fields").style.display = "none";
+  function hide2FA() {
+    state.tempToken = null;
+    $id("credentials-fields").style.display = "block";
+    $id("twofactor-fields").style.display = "none";
     applyMode();
   }
 
-  function showResetRequest() {
-    document.getElementById("login-subtitle").textContent = "Reset Password";
-    document.getElementById("credentials-fields").style.display = "none";
-    document.getElementById("reset-request-fields").style.display = "block";
-    document.getElementById("reset-username").value = "";
-    document.getElementById("reset-username").focus();
-  }
-
-  function showResetVerify() {
-    document.getElementById("login-subtitle").textContent = "Enter Reset Token";
-    document.getElementById("reset-request-fields").style.display = "none";
-    document.getElementById("reset-verify-fields").style.display = "block";
-    document.getElementById("reset-token").value = "";
-    document.getElementById("reset-new-password").value = "";
-    document.getElementById("reset-token").focus();
-  }
-
-  function cancelReset() {
-    document.getElementById("reset-request-fields").style.display = "none";
-    document.getElementById("reset-verify-fields").style.display = "none";
-    document.getElementById("credentials-fields").style.display = "block";
-    applyMode();
-  }
-
-  async function requestPasswordReset() {
-    const err = document.getElementById("login-error");
-    const username = document.getElementById("reset-username").value.trim();
-    const btn = document.getElementById("reset-request-btn");
-
-    if (!username) {
-      err.textContent = "Please enter your username";
-      err.style.display = "block";
+  async function handleSubmit(event) {
+    event.preventDefault();
+    clearAlerts();
+    const button = $id("login-btn");
+    const username = $id("username").value.trim();
+    const password = $id("password").value;
+    if (!username || !password) {
+      showError("Please enter both username and password.");
       return;
     }
 
-    err.style.display = "none";
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span> Sending...';
-
+    setBusy(button, true, state.mode === "signup" ? "Creating account..." : "Signing in...");
     try {
-      const res = await API.requestPasswordReset(username);
-      if (res.token) {
-        alert(`Your reset token is: ${res.token}\n\nIn production, this would be sent via email.`);
+      if (state.mode === "signup") {
+        await authSignup(username, password);
+        showSuccess("Account created. Signing you in...");
       }
-      showResetVerify();
-    } catch (ex) {
-      err.textContent = ex.message || "Request failed";
-      err.style.display = "block";
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "Send Reset Token";
-    }
-  }
 
-  async function verifyPasswordReset() {
-    const err = document.getElementById("login-error");
-    const token = document.getElementById("reset-token").value.trim();
-    const newPassword = document.getElementById("reset-new-password").value;
-    const btn = document.getElementById("reset-verify-btn");
+      const res = await authSignin(username, password);
+      if (res.two_factor_required) {
+        state.tempToken = res.temp_token;
+        show2FA();
+        return;
+      }
 
-    if (!token || !newPassword) {
-      err.textContent = "Please fill in all fields";
-      err.style.display = "block";
-      return;
-    }
-
-    err.style.display = "none";
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span> Resetting...';
-
-    try {
-      await API.verifyPasswordReset(token, newPassword);
-      alert("Password reset successfully! Please sign in with your new password.");
-      cancelReset();
-    } catch (ex) {
-      err.textContent = ex.message || "Reset failed";
-      err.style.display = "block";
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "Reset Password";
-    }
-  }
-
-  async function submit2FA() {
-    const err = document.getElementById("login-error");
-    const code = document.getElementById("twofactor-code").value.trim();
-    const btn = document.getElementById("twofactor-btn");
-    if (code.length !== 6) {
-      err.textContent = "Please enter a 6-digit code";
-      err.style.display = "block";
-      return;
-    }
-
-    err.style.display = "none";
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span> Verifying code…';
-
-    try {
-      const res = await API.twoFactorVerify(currentTempToken, code);
       localStorage.setItem("enauth_token", res.token);
-      const meData = await API.me().catch(() => ({}));
-      localStorage.setItem("enauth_user", JSON.stringify({ id: meData.id, username: res.username, role: res.role }));
+      const me = await authMe(res.token).catch(() => ({}));
+      saveUser({ id: me.id, username: res.username, role: res.role || "user" });
       window.location.href = "dashboard.html";
-    } catch (ex) {
-      err.textContent = ex.message || "Verification failed";
-      err.style.display = "block";
-      btn.disabled = false;
-      btn.textContent = "Verify & Authenticate";
+    } catch (err) {
+      showError(err.message || "Login failed");
+    } finally {
+      setBusy(button, false, state.mode === "signup" ? "Sign Up" : "Sign In");
+      if (!state.tempToken) applyMode();
     }
   }
 
-  document.getElementById("mode-btn").addEventListener("click", () => {
-    isSignupMode = !isSignupMode;
-    isResellerMode = false;
-    applyMode();
-  });
-
-  document.getElementById("reseller-btn").addEventListener("click", () => {
-    isResellerMode = !isResellerMode;
-    isSignupMode = false;
-    applyMode();
-  });
-
-  document.getElementById("forgot-btn").addEventListener("click", () => {
-    showResetRequest();
-  });
-
-  document.getElementById("reset-request-btn").addEventListener("click", requestPasswordReset);
-  document.getElementById("reset-verify-btn").addEventListener("click", verifyPasswordReset);
-
-  document.getElementById("login-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    if (currentTempToken) {
-      submit2FA();
+  async function handle2FA() {
+    const button = $id("twofactor-btn");
+    const code = $id("twofactor-code").value.trim();
+    if (code.length !== 6) {
+      showError("Please enter a 6-digit code.");
       return;
     }
-    const err = document.getElementById("login-error");
-    const btn = document.getElementById("login-btn");
-    err.style.display = "none";
-    btn.disabled = true;
-    btn.innerHTML = isSignupMode
-      ? '<span class="spinner"></span> Creating account…'
-      : '<span class="spinner"></span> Signing in…';
 
+    clearAlerts();
+    setBusy(button, true, "Verifying...");
     try {
-      const username = document.getElementById("username").value;
-      const password = document.getElementById("password").value;
-      if (isResellerMode) {
-        const res = await API.resellerLogin(username, password);
-        localStorage.setItem("enauth_reseller_token", res.token);
-        localStorage.setItem("enauth_reseller", JSON.stringify({ username: res.username, reseller_id: res.reseller_id }));
-        window.location.href = "reseller.html";
-      } else if (isSignupMode) {
-        await API.signup(username, password);
-        // Auto-login after signup
-        const res = await API.signin(username, password);
-        if (res.two_factor_required) {
-          currentTempToken = res.temp_token;
-          currentUsername = res.username;
-          show2FAPrompt();
-          return;
-        }
-        localStorage.setItem("enauth_token", res.token);
-        const meData = await API.me().catch(() => ({}));
-        localStorage.setItem("enauth_user", JSON.stringify({ id: meData.id, username: res.username, role: res.role }));
-        window.location.href = "dashboard.html";
-      } else {
-        const res = await API.signin(username, password);
-        if (res.two_factor_required) {
-          currentTempToken = res.temp_token;
-          currentUsername = res.username;
-          show2FAPrompt();
-          return;
-        }
-        localStorage.setItem("enauth_token", res.token);
-        const meData = await API.me().catch(() => ({}));
-        localStorage.setItem("enauth_user", JSON.stringify({ id: meData.id, username: res.username, role: res.role }));
-        window.location.href = "dashboard.html";
-      }
-    } catch (ex) {
-      err.textContent  = ex.message || "Login failed";
-      err.style.display = "block";
-      err.style.color = "";
-    } finally {
-      btn.disabled = false;
-      if (!currentTempToken) applyMode();
+      const res = await authVerify2FA(state.tempToken, code);
+      localStorage.setItem("enauth_token", res.token);
+      const me = await authMe(res.token).catch(() => ({}));
+      saveUser({ id: me.id, username: res.username, role: res.role || "user" });
+      window.location.href = "dashboard.html";
+    } catch (err) {
+      showError(err.message || "Verification failed");
+      setBusy(button, false, "Verify & Authenticate");
     }
-  });
+  }
+
+  async function init() {
+    if (getToken()) {
+      try {
+        await authMe(getToken());
+        window.location.href = "dashboard.html";
+        return;
+      } catch {
+        localStorage.removeItem("enauth_token");
+        localStorage.removeItem("enauth_user");
+      }
+    }
+
+    if (getResellerToken()) {
+      window.location.href = "reseller.html";
+      return;
+    }
+
+    $id("tab-signin").addEventListener("click", () => {
+      state.mode = "signin";
+      applyMode();
+    });
+    $id("tab-signup").addEventListener("click", () => {
+      state.mode = "signup";
+      applyMode();
+    });
+    $id("login-form").addEventListener("submit", handleSubmit);
+    $id("twofactor-btn").addEventListener("click", handle2FA);
+    $id("back-btn").addEventListener("click", hide2FA);
+    $id("reseller-btn").addEventListener("click", () => {
+      window.location.href = "reseller.html";
+    });
+
+    applyMode();
+  }
+
+  init();
 </script>
 </body>
 </html>

@@ -134,16 +134,20 @@ async def require_api_key(x_api_key: Optional[str] = Header(None),
     if not x_api_key:
         raise HTTPException(401, "Missing API key")
 
-    key_hash = hash_password(x_api_key)
-
     async with db.execute(
         """SELECT ak.*, au.username, au.role
            FROM api_keys ak
            JOIN admin_users au ON ak.user_id = au.id
-           WHERE ak.key_hash = ? AND ak.is_active = 1""",
-        (key_hash,)
+           WHERE ak.is_active = 1
+           ORDER BY ak.created_at DESC""",
     ) as cur:
-        key = await cur.fetchone()
+        keys = await cur.fetchall()
+
+    key = None
+    for row in keys:
+        if verify_password(x_api_key, row["key_hash"]):
+            key = row
+            break
 
     if not key:
         raise HTTPException(401, "Invalid API key")

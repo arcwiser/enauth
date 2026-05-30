@@ -18,9 +18,12 @@ set "SSL_KEY="
 echo [DEBUG] Looking for listeners on port %PORT%...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$port = %PORT%; " ^
-  "$pids = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique; " ^
-  "if (-not $pids) { Write-Host ('[DEBUG] No listeners found on port ' + $port) } else { " ^
-  "  foreach ($pid in $pids) { Write-Host ('[DEBUG] Stopping process ' + $pid + ' on port ' + $port + '...'); Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue } " ^
+  "$listenerPids = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique; " ^
+  "if (-not $listenerPids) { Write-Host ('[DEBUG] No listeners found on port ' + $port) } else { " ^
+  "  foreach ($listenerPid in $listenerPids) { " ^
+  "    Write-Host ('[DEBUG] Stopping process ' + $listenerPid + ' on port ' + $port + '...'); " ^
+  "    Stop-Process -Id $listenerPid -Force -ErrorAction SilentlyContinue " ^
+  "  } " ^
   "}"
 
 echo [DEBUG] Python launcher:
@@ -31,7 +34,17 @@ echo [DEBUG] Checking whether port %PORT% is still busy...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$port = %PORT%; " ^
   "$conns = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue; " ^
-  "if ($conns) { $conns | ForEach-Object { Write-Host ('[DEBUG] Still listening: PID=' + $_.OwningProcess + ' Local=' + $_.LocalAddress + ':' + $_.LocalPort) } } else { Write-Host ('[DEBUG] Port ' + $port + ' is free') }"
+  "if ($conns) { " ^
+  "  $conns | ForEach-Object { Write-Host ('[DEBUG] Still listening: PID=' + $_.OwningProcess + ' Local=' + $_.LocalAddress + ':' + $_.LocalPort) }; " ^
+  "  exit 1 " ^
+  "} else { Write-Host ('[DEBUG] Port ' + $port + ' is free') }"
+
+if errorlevel 1 (
+  echo [ERROR] Port %PORT% is still busy after cleanup. Stop the process shown above, then rerun.
+  popd
+  pause
+  exit /b 1
+)
 
 echo.
 echo ======================================
@@ -41,9 +54,9 @@ echo.
 echo   Admin panel -^> http://127.0.0.1:%PORT%/panel/
 echo.
 
-echo [DEBUG] Launching server...
-py -3.12 main.py
-echo [DEBUG] Server exited with code !errorlevel!
+echo [DEBUG] Launching server in a new window...
+start "EnAuth Server" cmd /k "cd /d ""%~dp0"" && py -3.12 main.py"
+echo [DEBUG] Server window launched.
 
 popd
 pause
