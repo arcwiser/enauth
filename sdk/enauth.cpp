@@ -548,13 +548,13 @@ void Client::SecurityCheck() {
         RegCloseKey(hKey);
     }
 
-    // 3. Module checks
+    // 3. module checks
     if (GetModuleHandleA(OBFUSCATE("VBoxGuest.sys").c_str()) || 
         GetModuleHandleA(OBFUSCATE("vmmouse.sys").c_str()) ||
         GetModuleHandleA(OBFUSCATE("vmusbmouse.sys").c_str()) ||
         GetModuleHandleA(OBFUSCATE("vboxguest.sys").c_str())) exit(0);
     
-    // Check for specific windows
+    // check for open windows
     std::string x64 = OBFUSCATE("The x64dbg");
     std::string ce = OBFUSCATE("Cheat Engine");
     if (FindWindowA(NULL, x64.c_str()) || FindWindowA(NULL, ce.c_str())) exit(0);
