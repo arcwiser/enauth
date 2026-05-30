@@ -76,6 +76,54 @@ def get_ip(request: Request) -> str:
     return fwd.split(",")[0].strip() if fwd else (request.client.host or "unknown")
 
 
+def generate_device_fingerprint(request: Request, hwid: str) -> str:
+    """Generate a device fingerprint from request data and HWID."""
+    user_agent = request.headers.get("User-Agent", "")
+    ip = get_ip(request)
+    fingerprint_data = f"{hwid}:{user_agent}:{ip}"
+    return hashlib.sha256(fingerprint_data.encode()).hexdigest()
+
+
+async def check_fingerprint_consistency(db: aiosqlite.Connection, user_id: str, fingerprint: str, ip: str, user_agent: str) -> bool:
+    """Check if the fingerprint is consistent with previous logins."""
+    # Check if this fingerprint has been seen before for this user
+    async with db.execute(
+        """SELECT id, is_suspicious FROM device_fingerprints
+           WHERE user_id = ? AND fingerprint = ?""",
+        (user_id, fingerprint)
+    ) as cur:
+        existing = await cur.fetchone()
+    
+    if existing:
+        # Fingerprint seen before, update last_seen
+        await db.execute(
+            """UPDATE device_fingerprints
+               SET last_seen = CURRENT_TIMESTAMP, ip_address = ?, user_agent = ?
+               WHERE id = ?""",
+            (ip, user_agent, existing["id"])
+        )
+        return True
+    
+    # New fingerprint - check if it's suspicious (too many different fingerprints)
+    async with db.execute(
+        """SELECT COUNT(*) as count FROM device_fingerprints
+           WHERE user_id = ? AND last_seen > datetime('now', '-7 days')""",
+        (user_id,)
+    ) as cur:
+        recent_count = (await cur.fetchone())["count"]
+    
+    is_suspicious = recent_count >= 5  # More than 5 different devices in 7 days is suspicious
+    
+    # Store the new fingerprint
+    await db.execute(
+        """INSERT INTO device_fingerprints (id, user_id, fingerprint, user_agent, ip_address, is_suspicious)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (generate_uid(), user_id, fingerprint, user_agent, ip, 1 if is_suspicious else 0)
+    )
+    
+    return not is_suspicious
+
+
 def enc_resp(data: dict, secret: str, app_id: str = "") -> JSONResponse:
     ts  = int(time.time())
     enc = encrypt_payload(data, secret)
@@ -306,6 +354,16 @@ async def client_login(request: Request, req: EncryptedRequest,
             "UPDATE hwids SET last_seen = ? WHERE license_id = ? AND hwid_hash = ?",
             (utcnow(), lic["id"], hwid),
         )
+
+    # ── Device fingerprint consistency check ──
+    fingerprint = generate_device_fingerprint(request, hwid)
+    user_agent = request.headers.get("User-Agent", "")
+    # Use license ID as user identifier for fingerprint tracking
+    fingerprint_ok = await check_fingerprint_consistency(db, lic["id"], fingerprint, ip, user_agent)
+    if not fingerprint_ok:
+        await log_action(db, "suspicious_fingerprint", license_key=license_key, app_id=app["id"],
+                         ip=ip, hwid=hwid, details="New device fingerprint detected (multiple devices in short period)")
+        # Don't block login, just log it for security monitoring
 
     # ── Kill any existing session for this license ──
     await db.execute("DELETE FROM sessions WHERE license_id = ?", (lic["id"],))

@@ -40,6 +40,7 @@
         </div>
         <button class="btn btn-secondary" type="button" id="mode-btn" style="width:100%; margin-top:10px;">Need an account? Sign Up</button>
         <button class="btn btn-ghost" type="button" id="reseller-btn" style="width:100%; margin-top:10px;">Reseller Sign In</button>
+        <button class="btn btn-ghost" type="button" id="forgot-btn" style="width:100%; margin-top:10px; font-size:12px;">Forgot Password?</button>
       </div>
 
       <!-- Two-Factor Authentication Input -->
@@ -51,6 +52,30 @@
         </div>
         <button class="btn btn-primary" type="button" id="twofactor-btn" style="width:100%; justify-content:center;" onclick="submit2FA()">Verify & Authenticate</button>
         <button class="btn btn-ghost" type="button" style="width:100%; margin-top:10px;" onclick="cancel2FA()">Back to Sign In</button>
+      </div>
+
+      <!-- Password Reset Request -->
+      <div id="reset-request-fields" style="display:none">
+        <div class="form-group" style="margin-bottom:20px">
+          <label class="form-label" for="reset-username">Username</label>
+          <input class="input" id="reset-username" type="text" placeholder="Enter your username" required autofocus>
+        </div>
+        <button class="btn btn-primary" type="button" id="reset-request-btn" style="width:100%;">Send Reset Token</button>
+        <button class="btn btn-ghost" type="button" style="width:100%; margin-top:10px;" onclick="cancelReset()">Back to Sign In</button>
+      </div>
+
+      <!-- Password Reset Verify -->
+      <div id="reset-verify-fields" style="display:none">
+        <div class="form-group" style="margin-bottom:15px">
+          <label class="form-label" for="reset-token">Reset Token</label>
+          <input class="input mono" id="reset-token" type="text" placeholder="Enter the reset token" required autofocus>
+        </div>
+        <div class="form-group" style="margin-bottom:20px">
+          <label class="form-label" for="reset-new-password">New Password</label>
+          <input class="input" id="reset-new-password" type="password" placeholder="Enter new password" required>
+        </div>
+        <button class="btn btn-primary" type="button" id="reset-verify-btn" style="width:100%;">Reset Password</button>
+        <button class="btn btn-ghost" type="button" style="width:100%; margin-top:10px;" onclick="cancelReset()">Back to Sign In</button>
       </div>
     </form>
   </div>
@@ -112,6 +137,89 @@
     applyMode();
   }
 
+  function showResetRequest() {
+    document.getElementById("login-subtitle").textContent = "Reset Password";
+    document.getElementById("credentials-fields").style.display = "none";
+    document.getElementById("reset-request-fields").style.display = "block";
+    document.getElementById("reset-username").value = "";
+    document.getElementById("reset-username").focus();
+  }
+
+  function showResetVerify() {
+    document.getElementById("login-subtitle").textContent = "Enter Reset Token";
+    document.getElementById("reset-request-fields").style.display = "none";
+    document.getElementById("reset-verify-fields").style.display = "block";
+    document.getElementById("reset-token").value = "";
+    document.getElementById("reset-new-password").value = "";
+    document.getElementById("reset-token").focus();
+  }
+
+  function cancelReset() {
+    document.getElementById("reset-request-fields").style.display = "none";
+    document.getElementById("reset-verify-fields").style.display = "none";
+    document.getElementById("credentials-fields").style.display = "block";
+    applyMode();
+  }
+
+  async function requestPasswordReset() {
+    const err = document.getElementById("login-error");
+    const username = document.getElementById("reset-username").value.trim();
+    const btn = document.getElementById("reset-request-btn");
+
+    if (!username) {
+      err.textContent = "Please enter your username";
+      err.style.display = "block";
+      return;
+    }
+
+    err.style.display = "none";
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Sending...';
+
+    try {
+      const res = await API.requestPasswordReset(username);
+      if (res.token) {
+        alert(`Your reset token is: ${res.token}\n\nIn production, this would be sent via email.`);
+      }
+      showResetVerify();
+    } catch (ex) {
+      err.textContent = ex.message || "Request failed";
+      err.style.display = "block";
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Send Reset Token";
+    }
+  }
+
+  async function verifyPasswordReset() {
+    const err = document.getElementById("login-error");
+    const token = document.getElementById("reset-token").value.trim();
+    const newPassword = document.getElementById("reset-new-password").value;
+    const btn = document.getElementById("reset-verify-btn");
+
+    if (!token || !newPassword) {
+      err.textContent = "Please fill in all fields";
+      err.style.display = "block";
+      return;
+    }
+
+    err.style.display = "none";
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Resetting...';
+
+    try {
+      await API.verifyPasswordReset(token, newPassword);
+      alert("Password reset successfully! Please sign in with your new password.");
+      cancelReset();
+    } catch (ex) {
+      err.textContent = ex.message || "Reset failed";
+      err.style.display = "block";
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Reset Password";
+    }
+  }
+
   async function submit2FA() {
     const err = document.getElementById("login-error");
     const code = document.getElementById("twofactor-code").value.trim();
@@ -151,6 +259,13 @@
     isSignupMode = false;
     applyMode();
   });
+
+  document.getElementById("forgot-btn").addEventListener("click", () => {
+    showResetRequest();
+  });
+
+  document.getElementById("reset-request-btn").addEventListener("click", requestPasswordReset);
+  document.getElementById("reset-verify-btn").addEventListener("click", verifyPasswordReset);
 
   document.getElementById("login-form").addEventListener("submit", async (e) => {
     e.preventDefault();

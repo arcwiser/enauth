@@ -207,6 +207,7 @@ async def admin_me(user=Depends(require_admin)):
         "username": user["username"],
         "role": user.get("role", "user"),
         "two_factor_enabled": user.get("two_factor_enabled", 0),
+        "theme": user.get("theme", "dark"),
     }
 
 
@@ -603,6 +604,65 @@ async def list_resellers(search: Optional[str] = None,
     args.extend([clamp_limit(limit, 50), clamp_offset(offset)])
     async with db.execute(sql, args) as cur:
         return rows_to_list(await cur.fetchall())
+
+
+@router.get("/resellers/{reseller_id}/analytics")
+async def get_reseller_analytics(reseller_id: str,
+                                  user=Depends(require_admin),
+                                  db: aiosqlite.Connection = Depends(get_db)):
+    """Get sales analytics for a specific reseller."""
+    owner_id = auth_owner_id(user)
+
+    # Verify reseller access
+    if owner_id:
+        async with db.execute("SELECT owner_user_id FROM resellers WHERE id = ?", (reseller_id,)) as cur:
+            reseller = await cur.fetchone()
+        if not reseller or reseller["owner_user_id"] != owner_id:
+            raise HTTPException(403, "Access denied")
+
+    # Get total sales (licenses sold)
+    async with db.execute(
+        """SELECT COUNT(*) as total, SUM(CAST(l.metadata AS REAL)) as revenue
+           FROM licenses l
+           JOIN key_orders ko ON l.id = ko.license_id
+           WHERE ko.reseller_id = ?""",
+        (reseller_id,)
+    ) as cur:
+        sales = await cur.fetchone()
+
+    # Get sales by date (last 30 days)
+    async with db.execute(
+        """SELECT DATE(ko.created_at) as date, COUNT(*) as count
+           FROM licenses l
+           JOIN key_orders ko ON l.id = ko.license_id
+           WHERE ko.reseller_id = ? AND ko.created_at >= datetime('now', '-30 days')
+           GROUP BY DATE(ko.created_at)
+           ORDER BY date DESC""",
+        (reseller_id,)
+    ) as cur:
+        sales_by_date = rows_to_list(await cur.fetchall())
+
+    # Get top selling products
+    async with db.execute(
+        """SELECT lp.product_id, p.name, COUNT(*) as count
+           FROM licenses l
+           JOIN key_orders ko ON l.id = ko.license_id
+           JOIN license_products lp ON l.id = lp.license_id
+           JOIN products p ON lp.product_id = p.id
+           WHERE ko.reseller_id = ?
+           GROUP BY lp.product_id
+           ORDER BY count DESC
+           LIMIT 10""",
+        (reseller_id,)
+    ) as cur:
+        top_products = rows_to_list(await cur.fetchall())
+
+    return {
+        "total_sales": sales["total"] or 0,
+        "total_revenue": float(sales["revenue"] or 0),
+        "sales_by_date": sales_by_date,
+        "top_products": top_products,
+    }
 
 
 @router.post("/resellers")
@@ -2080,6 +2140,16 @@ class CreateUserBody(BaseModel):
 class UpdateUserBody(BaseModel):
     password: Optional[str] = None
     role:     Optional[str] = None
+    theme:    Optional[str] = None
+
+
+class PasswordResetRequestBody(BaseModel):
+    username: str
+
+
+class PasswordResetVerifyBody(BaseModel):
+    token: str
+    new_password: str
 
 
 @router.get("/users")
@@ -2129,12 +2199,76 @@ async def update_user(user_id: str, body: UpdateUserBody,
         updates.append("password_hash = ?"); args.append(hash_password(body.password))
     if body.role and caller["role"] == "owner":
         updates.append("role = ?"); args.append(body.role)
+    if body.theme is not None:
+        if body.theme not in ("dark", "light"):
+            raise HTTPException(400, "Theme must be 'dark' or 'light'")
+        updates.append("theme = ?"); args.append(body.theme)
     if not updates:
         raise HTTPException(400, "Nothing to update")
     args.append(user_id)
     await db.execute(f"UPDATE admin_users SET {', '.join(updates)} WHERE id = ?", args)
     await db.commit()
     return {"ok": True}
+
+
+@router.post("/auth/password-reset/request")
+async def request_password_reset(body: PasswordResetRequestBody, db: aiosqlite.Connection = Depends(get_db)):
+    """Request a password reset token for a username."""
+    async with db.execute("SELECT id FROM admin_users WHERE username = ?", (body.username,)) as cur:
+        user = await cur.fetchone()
+    if not user:
+        # Don't reveal if user exists for security
+        return {"ok": True, "message": "If the username exists, a reset token has been generated"}
+
+    user_id = user["id"]
+    token = generate_session_token()
+    expires_at = future_hours(1)  # Token valid for 1 hour
+
+    await db.execute(
+        "INSERT INTO password_reset_tokens (id, user_id, token, expires_at) VALUES (?,?,?,?)",
+        (generate_uid(), user_id, token, expires_at)
+    )
+    await db.commit()
+
+    # Log the token for development (in production, this would be sent via email)
+    app_log.info(f"Password reset token for {body.username}: {token}")
+
+    return {"ok": True, "message": "If the username exists, a reset token has been generated", "token": token if os.getenv("DEBUG") == "true" else None}
+
+
+@router.post("/auth/password-reset/verify")
+async def verify_password_reset(body: PasswordResetVerifyBody, db: aiosqlite.Connection = Depends(get_db)):
+    """Verify a password reset token and set new password."""
+    validate_password_policy(body.new_password)
+
+    async with db.execute(
+        "SELECT id, user_id, expires_at, used_at FROM password_reset_tokens WHERE token = ?",
+        (body.token,)
+    ) as cur:
+        reset_token = await cur.fetchone()
+
+    if not reset_token:
+        raise HTTPException(400, "Invalid reset token")
+
+    if reset_token["used_at"]:
+        raise HTTPException(400, "Reset token already used")
+
+    if datetime.now(timezone.utc) > datetime.strptime(reset_token["expires_at"], "%Y-%m-%d %H:%M:%S"):
+        raise HTTPException(400, "Reset token expired")
+
+    # Mark token as used
+    await db.execute("UPDATE password_reset_tokens SET used_at = ? WHERE id = ?", (utcnow(), reset_token["id"]))
+
+    # Update password
+    await db.execute(
+        "UPDATE admin_users SET password_hash = ? WHERE id = ?",
+        (hash_password(body.new_password), reset_token["user_id"])
+    )
+    await db.commit()
+
+    await log_action(db, None, None, "password_reset", None, None, f"Password reset for user_id: {reset_token['user_id']}")
+
+    return {"ok": True, "message": "Password reset successfully"}
 
 
 @router.delete("/users/{user_id}")

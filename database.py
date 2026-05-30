@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS admin_users (
     username      TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     role          TEXT NOT NULL DEFAULT 'admin',
+    theme         TEXT DEFAULT 'dark',
     created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -256,6 +257,25 @@ CREATE TABLE IF NOT EXISTS portal_sessions (
     expires_at DATETIME NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS device_fingerprints (
+    id              TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+    fingerprint    TEXT NOT NULL,
+    user_agent      TEXT,
+    ip_address      TEXT,
+    last_seen       DATETIME DEFAULT CURRENT_TIMESTAMP,
+    is_suspicious   INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+    token       TEXT NOT NULL UNIQUE,
+    expires_at  DATETIME NOT NULL,
+    used_at     DATETIME,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 """
 
 
@@ -295,6 +315,11 @@ async def init_db():
             await db.execute("ALTER TABLE licenses ADD COLUMN client_username TEXT")
         if "client_password_hash" not in lic_cols:
             await db.execute("ALTER TABLE licenses ADD COLUMN client_password_hash TEXT")
+
+        async with db.execute("PRAGMA table_info(admin_users)") as cur:
+            user_cols = [r[1] for r in await cur.fetchall()]
+        if "theme" not in user_cols:
+            await db.execute("ALTER TABLE admin_users ADD COLUMN theme TEXT DEFAULT 'dark'")
 
         async with db.execute("PRAGMA table_info(app_files)") as cur:
             file_cols = [r[1] for r in await cur.fetchall()]

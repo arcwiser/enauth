@@ -4,11 +4,25 @@ const BASE = "";
 function getToken() { return localStorage.getItem("enauth_token"); }
 function getUser()  { return JSON.parse(localStorage.getItem("enauth_user") || "{}"); }
 function getResellerToken() { return localStorage.getItem("enauth_reseller_token"); }
-function getTheme() { return localStorage.getItem("enauth_theme") || "dark"; }
-function setTheme(theme) {
+function getTheme() { 
+  const user = getUser();
+  return user.theme || localStorage.getItem("enauth_theme") || "dark";
+}
+async function setTheme(theme) {
   const next = theme === "light" ? "light" : "dark";
   localStorage.setItem("enauth_theme", next);
   document.documentElement.setAttribute("data-theme", next);
+  // Sync with server
+  try {
+    const u = getUser();
+    if (u.id) {
+      await API.updateUser(u.id, { theme: next });
+      // Update local user data
+      localStorage.setItem("enauth_user", JSON.stringify({ ...u, theme: next }));
+    }
+  } catch (err) {
+    console.error("Failed to sync theme with server:", err);
+  }
 }
 function toggleTheme() {
   setTheme(getTheme() === "dark" ? "light" : "dark");
@@ -98,6 +112,13 @@ const API = {
   unbanLicense:  (id)  => api("POST", `/api/admin/licenses/${encodeURIComponent(id)}/unban`),
   resetHwid:     (id)  => api("POST", `/api/admin/licenses/${encodeURIComponent(id)}/reset-hwid`),
   extendLicense: (b)   => api("POST", "/api/admin/licenses/extend", b),
+
+  // Password Reset
+  requestPasswordReset: (username) => api("POST", "/api/admin/auth/password-reset/request", { username }),
+  verifyPasswordReset: (token, new_password) => api("POST", "/api/admin/auth/password-reset/verify", { token, new_password }),
+
+  // Reseller Analytics
+  getResellerAnalytics: (resellerId) => apiWithToken(getResellerToken(), "GET", `/api/admin/resellers/${encodeURIComponent(resellerId)}/analytics`),
   bulkDeleteLicenses:(ids)=> api("POST", "/api/admin/licenses/bulk-delete", { ids }),
   bulkBanLicenses: (ids) => api("POST", "/api/admin/licenses/bulk-ban", { ids }),
   bulkUnbanLicenses:(ids)=> api("POST", "/api/admin/licenses/bulk-unban", { ids }),
