@@ -128,6 +128,37 @@ async def require_owner(user=Depends(require_admin)):
     return user
 
 
+async def require_api_key(x_api_key: Optional[str] = Header(None),
+                         db: aiosqlite.Connection = Depends(get_db)):
+    """Dependency that ensures a valid API key exists."""
+    if not x_api_key:
+        raise HTTPException(401, "Missing API key")
+
+    key_hash = hash_password(x_api_key)
+
+    async with db.execute(
+        """SELECT ak.*, au.username, au.role
+           FROM api_keys ak
+           JOIN admin_users au ON ak.user_id = au.id
+           WHERE ak.key_hash = ? AND ak.is_active = 1""",
+        (key_hash,)
+    ) as cur:
+        key = await cur.fetchone()
+
+    if not key:
+        raise HTTPException(401, "Invalid API key")
+
+    # Check expiration
+    if key["expires_at"] and datetime.now(timezone.utc) > datetime.strptime(key["expires_at"], "%Y-%m-%d %H:%M:%S"):
+        raise HTTPException(401, "API key expired")
+
+    # Update last used
+    await db.execute("UPDATE api_keys SET last_used = CURRENT_TIMESTAMP WHERE id = ?", (key["id"],))
+    await db.commit()
+
+    return dict(key)
+
+
 def is_auth_panel_user(user: dict) -> bool:
     # Users from auth_users (tenants/resellers) always have an owner_user_id or role in that table.
     # The most reliable way is to check if the user dict has the expected admin_users fields.
@@ -2152,6 +2183,18 @@ class PasswordResetVerifyBody(BaseModel):
     new_password: str
 
 
+class CreateApiKeyBody(BaseModel):
+    name: str
+    scopes: str = "read"
+    expires_days: Optional[int] = None
+
+
+class UpdateApiKeyBody(BaseModel):
+    name: Optional[str] = None
+    scopes: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
 @router.get("/users")
 async def list_users(search: Optional[str] = None,
                      limit: int = 100, offset: int = 0,
@@ -2269,6 +2312,139 @@ async def verify_password_reset(body: PasswordResetVerifyBody, db: aiosqlite.Con
     await log_action(db, None, None, "password_reset", None, None, f"Password reset for user_id: {reset_token['user_id']}")
 
     return {"ok": True, "message": "Password reset successfully"}
+
+
+# ─── API Keys ────────────────────────────────────────────────────────────────
+
+@router.get("/api-keys", tags=["API Keys"])
+async def list_api_keys(user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
+    """
+    List all API keys for the current authenticated user.
+    
+    Returns a list of API keys with their metadata including name, scopes, status, last used time, and expiration.
+    
+    **Authentication**: Requires Bearer token from admin session.
+    """
+    async with db.execute(
+        """SELECT id, name, scopes, is_active, last_used, expires_at, created_at
+           FROM api_keys WHERE user_id = ? ORDER BY created_at DESC""",
+        (user["id"],)
+    ) as cur:
+        return rows_to_list(await cur.fetchall())
+
+
+@router.post("/api-keys", tags=["API Keys"])
+async def create_api_key(body: CreateApiKeyBody, user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
+    """
+    Create a new API key for external integrations.
+    
+    The API key is returned only once in the response. Store it securely as it cannot be retrieved again.
+    
+    - **name**: A descriptive name for the API key (e.g., "Production App", "Testing Script")
+    - **scopes**: Permission level - "read" (read-only), "write" (read & write), or "admin" (full access)
+    - **expires_days**: Optional expiration in days. If not provided, the key never expires.
+    
+    **Example request**:
+    ```json
+    {
+        "name": "Production App",
+        "scopes": "write",
+        "expires_days": 365
+    }
+    ```
+    
+    **Authentication**: Requires Bearer token from admin session.
+    """
+    import secrets
+    # Generate a secure random key
+    api_key = f"enauth_{secrets.token_urlsafe(32)}"
+    key_hash = hash_password(api_key)
+
+    expires_at = None
+    if body.expires_days:
+        expires_at = future_hours(body.expires_days * 24)
+
+    key_id = generate_uid()
+    await db.execute(
+        """INSERT INTO api_keys (id, user_id, key_hash, name, scopes, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (key_id, user["id"], key_hash, body.name, body.scopes, expires_at)
+    )
+    await db.commit()
+
+    await log_action(db, None, None, "api_key_created", None, None, f"API key created: {body.name}")
+
+    # Return the key only once
+    return {"id": key_id, "key": api_key, "name": body.name, "scopes": body.scopes, "expires_at": expires_at}
+
+
+@router.put("/api-keys/{key_id}", tags=["API Keys"])
+async def update_api_key(key_id: str, body: UpdateApiKeyBody, user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
+    """
+    Update an existing API key.
+    
+    You can update the name, scopes, or active status of an API key.
+    
+    **Example request**:
+    ```json
+    {
+        "name": "Updated Name",
+        "is_active": false
+    }
+    ```
+    
+    **Authentication**: Requires Bearer token from admin session.
+    """
+    # Verify ownership
+    async with db.execute("SELECT user_id FROM api_keys WHERE id = ?", (key_id,)) as cur:
+        key = await cur.fetchone()
+    if not key or key["user_id"] != user["id"]:
+        raise HTTPException(404, "API key not found")
+
+    updates, args = [], []
+    if body.name:
+        updates.append("name = ?")
+        args.append(body.name)
+    if body.scopes:
+        updates.append("scopes = ?")
+        args.append(body.scopes)
+    if body.is_active is not None:
+        updates.append("is_active = ?")
+        args.append(1 if body.is_active else 0)
+
+    if not updates:
+        raise HTTPException(400, "Nothing to update")
+
+    args.append(key_id)
+    await db.execute(f"UPDATE api_keys SET {', '.join(updates)} WHERE id = ?", args)
+    await db.commit()
+
+    await log_action(db, None, None, "api_key_updated", None, None, f"API key updated: {key_id}")
+
+    return {"ok": True}
+
+
+@router.delete("/api-keys/{key_id}", tags=["API Keys"])
+async def delete_api_key(key_id: str, user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
+    """
+    Delete an API key permanently.
+    
+    This action cannot be undone. Any applications using this key will immediately lose access.
+    
+    **Authentication**: Requires Bearer token from admin session.
+    """
+    # Verify ownership
+    async with db.execute("SELECT user_id FROM api_keys WHERE id = ?", (key_id,)) as cur:
+        key = await cur.fetchone()
+    if not key or key["user_id"] != user["id"]:
+        raise HTTPException(404, "API key not found")
+
+    await db.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
+    await db.commit()
+
+    await log_action(db, None, None, "api_key_deleted", None, None, f"API key deleted: {key_id}")
+
+    return {"ok": True}
 
 
 @router.delete("/users/{user_id}")

@@ -66,8 +66,8 @@ async def _maintenance_loop():
 
 debug_mode = os.getenv("DEBUG", "false").lower() == "true"
 app = FastAPI(title="EnAuth", version="1.0.0",
-              docs_url="/docs" if debug_mode else None,
-              redoc_url="/redoc" if debug_mode else None,
+              docs_url="/docs",
+              redoc_url="/redoc",
               lifespan=lifespan)
 
 app.state.limiter = limiter

@@ -276,6 +276,18 @@ CREATE TABLE IF NOT EXISTS password_reset_tokens (
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS api_keys (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+    key_hash    TEXT NOT NULL UNIQUE,
+    name        TEXT NOT NULL,
+    scopes      TEXT DEFAULT 'read',
+    is_active   INTEGER DEFAULT 1,
+    last_used   DATETIME,
+    expires_at  DATETIME,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 """
 
 
@@ -320,6 +332,23 @@ async def init_db():
             user_cols = [r[1] for r in await cur.fetchall()]
         if "theme" not in user_cols:
             await db.execute("ALTER TABLE admin_users ADD COLUMN theme TEXT DEFAULT 'dark'")
+
+        async with db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='api_keys'") as cur:
+            api_keys_exists = await cur.fetchone()
+        if not api_keys_exists:
+            await db.execute("""
+                CREATE TABLE api_keys (
+                    id          TEXT PRIMARY KEY,
+                    user_id     TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+                    key_hash    TEXT NOT NULL UNIQUE,
+                    name        TEXT NOT NULL,
+                    scopes      TEXT DEFAULT 'read',
+                    is_active   INTEGER DEFAULT 1,
+                    last_used   DATETIME,
+                    expires_at  DATETIME,
+                    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
         async with db.execute("PRAGMA table_info(app_files)") as cur:
             file_cols = [r[1] for r in await cur.fetchall()]

@@ -117,6 +117,12 @@ const API = {
   requestPasswordReset: (username) => api("POST", "/api/admin/auth/password-reset/request", { username }),
   verifyPasswordReset: (token, new_password) => api("POST", "/api/admin/auth/password-reset/verify", { token, new_password }),
 
+  // API Keys
+  getApiKeys: () => api("GET", "/api/admin/api-keys"),
+  createApiKey: (body) => api("POST", "/api/admin/api-keys", body),
+  updateApiKey: (id, body) => api("PUT", `/api/admin/api-keys/${encodeURIComponent(id)}`, body),
+  deleteApiKey: (id) => api("DELETE", `/api/admin/api-keys/${encodeURIComponent(id)}`),
+
   // Reseller Analytics
   getResellerAnalytics: (resellerId) => apiWithToken(getResellerToken(), "GET", `/api/admin/resellers/${encodeURIComponent(resellerId)}/analytics`),
   bulkDeleteLicenses:(ids)=> api("POST", "/api/admin/licenses/bulk-delete", { ids }),
@@ -354,6 +360,7 @@ function buildSidebar(activePage) {
     { href: "logs.html",      icon: "📋", label: "Logs",        page: "logs"      },
     { href: "audit.html",     icon: "🔎", label: "Audit",       page: "audit"     },
     { href: "users.html",     icon: "👥", label: "Users",       page: "users",     ownerOnly: true },
+    { href: "api-keys.html",  icon: "🔐", label: "API Keys",    page: "api-keys"  },
     { href: "settings.html",  icon: "⚙️", label: "Settings",   page: "settings"  },
   ].filter(n => !n.ownerOnly || isOwner);
 
