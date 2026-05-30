@@ -1,6 +1,7 @@
 import asyncio
 import csv
 import io
+import os
 from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Header, File, UploadFile, Form
@@ -24,10 +25,10 @@ from utils.crypto import (
 from utils.logger import log_action
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
-ADMIN_SESSION_HOURS = 8
-MAX_PAGE_SIZE = 200
-TEMP_2FA_TTL_MINUTES = 5
-TEMP_2FA_SWEEP_SECONDS = 60
+ADMIN_SESSION_HOURS = int(os.getenv("ADMIN_SESSION_HOURS", "8"))
+MAX_PAGE_SIZE = int(os.getenv("MAX_PAGE_SIZE", "200"))
+TEMP_2FA_TTL_MINUTES = int(os.getenv("TEMP_2FA_TTL_MINUTES", "5"))
+TEMP_2FA_SWEEP_SECONDS = int(os.getenv("TEMP_2FA_SWEEP_SECONDS", "60"))
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -205,7 +206,6 @@ async def admin_me(user=Depends(require_admin)):
         "id": user["id"],
         "username": user["username"],
         "role": user.get("role", "user"),
-        "email": user.get("email"),
         "two_factor_enabled": user.get("two_factor_enabled", 0),
     }
 
@@ -1828,11 +1828,11 @@ async def global_search(query: str,
     if category in (None, "users"):
         sql = """SELECT u.id as entity_id, u.username as title, u.role as subtitle, u.created_at,
                         NULL as app_name, 'user' as entity_type,
-                        COALESCE(u.email, '') as details,
+                        u.role as details,
                         u.role as status
                  FROM admin_users u
-                 WHERE (u.username LIKE ? OR u.email LIKE ? OR u.role LIKE ?)"""
-        items.extend(await fetch(sql + " ORDER BY u.created_at DESC LIMIT ?", (q, q, q, max_bucket)))
+                 WHERE (u.username LIKE ? OR u.role LIKE ?)"""
+        items.extend(await fetch(sql + " ORDER BY u.created_at DESC LIMIT ?", (q, q, max_bucket)))
 
     if category in (None, "resellers"):
         sql = """SELECT r.id as entity_id, r.username as title, CAST(r.balance AS TEXT) as subtitle, r.created_at,
@@ -2075,12 +2075,10 @@ async def regen_secret(app_id: str, user=Depends(require_admin),
 class CreateUserBody(BaseModel):
     username: str
     password: str
-    email:    Optional[str] = None
     role:     str = "admin"
 
 class UpdateUserBody(BaseModel):
     password: Optional[str] = None
-    email:    Optional[str] = None
     role:     Optional[str] = None
 
 
@@ -2088,11 +2086,11 @@ class UpdateUserBody(BaseModel):
 async def list_users(search: Optional[str] = None,
                      limit: int = 100, offset: int = 0,
                      user=Depends(require_owner), db: aiosqlite.Connection = Depends(get_db)):
-    sql = "SELECT id, username, email, role, two_factor_enabled, created_at FROM admin_users"
+    sql = "SELECT id, username, role, two_factor_enabled, created_at FROM admin_users"
     args = []
     if search:
-        sql += " WHERE username LIKE ? OR email LIKE ? OR role LIKE ?"
-        args.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
+        sql += " WHERE username LIKE ? OR role LIKE ?"
+        args.extend([f"%{search}%", f"%{search}%"])
     sql += " ORDER BY created_at LIMIT ? OFFSET ?"
     args.extend([clamp_limit(limit, 100), clamp_offset(offset)])
     async with db.execute(sql, args) as cur:
@@ -2109,8 +2107,8 @@ async def create_user(body: CreateUserBody, user=Depends(require_owner),
     uid = generate_uid()
     try:
         await db.execute(
-            "INSERT INTO admin_users (id, username, password_hash, email, role) VALUES (?,?,?,?,?)",
-            (uid, body.username, hash_password(body.password), body.email, body.role),
+            "INSERT INTO admin_users (id, username, password_hash, role) VALUES (?,?,?,?)",
+            (uid, body.username, hash_password(body.password), body.role),
         )
         await db.commit()
     except aiosqlite.IntegrityError:
@@ -2129,8 +2127,6 @@ async def update_user(user_id: str, body: UpdateUserBody,
     if body.password:
         validate_password_policy(body.password)
         updates.append("password_hash = ?"); args.append(hash_password(body.password))
-    if body.email is not None:
-        updates.append("email = ?"); args.append(body.email)
     if body.role and caller["role"] == "owner":
         updates.append("role = ?"); args.append(body.role)
     if not updates:

@@ -64,7 +64,6 @@ CREATE TABLE IF NOT EXISTS admin_users (
     id            TEXT PRIMARY KEY,
     username      TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
-    email         TEXT,
     role          TEXT NOT NULL DEFAULT 'admin',
     created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
 );

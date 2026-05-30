@@ -4,6 +4,7 @@ import secrets
 import string
 import asyncio
 import contextlib
+import signal
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -29,8 +30,11 @@ from database import init_db, get_db, DB_PATH
 from routes.client import router as client_router, limiter
 from routes.admin  import router as admin_router, cleanup_runtime_state
 from utils.crypto  import generate_uid, hash_password, generate_app_secret
+from utils.logger import app_log
 
 # ─── Lifespan ────────────────────────────────────────────────────────────────
+
+shutdown_event = asyncio.Event()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -38,9 +42,11 @@ async def lifespan(app: FastAPI):
     await ensure_default_admin()
     cleanup_task = asyncio.create_task(_maintenance_loop())
     yield
+    shutdown_event.set()
     cleanup_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await cleanup_task
+    app_log.info("EnAuth server shutdown complete")
 
 
 async def _maintenance_loop():
@@ -52,21 +58,27 @@ async def _maintenance_loop():
                 db.row_factory = aiosqlite.Row
                 await cleanup_runtime_state(db)
         except Exception as exc:
-            print(f"[maintenance] cleanup failed: {exc}")
+            app_log.error(f"[maintenance] cleanup failed: {exc}")
         await asyncio.sleep(600)
 
 
 # ─── App ─────────────────────────────────────────────────────────────────────
 
+debug_mode = os.getenv("DEBUG", "false").lower() == "true"
 app = FastAPI(title="EnAuth", version="1.0.0",
-              docs_url=None, redoc_url=None, lifespan=lifespan)
+              docs_url="/docs" if debug_mode else None,
+              redoc_url="/redoc" if debug_mode else None,
+              lifespan=lifespan)
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+cors_origins = os.getenv("CORS_ORIGINS", "*")
+if cors_origins != "*":
+    cors_origins = [origin.strip() for origin in cors_origins.split(",")]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins if cors_origins != "*" else ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -83,12 +95,17 @@ async def root():
     return RedirectResponse("/panel/")
 
 
+@app.get("/health")
+async def health():
+    """Health check endpoint for monitoring and load balancers."""
+    return {"status": "healthy", "service": "enauth"}
+
+
 async def ensure_default_admin():
     """Create the default owner account if no admin users exist."""
     import aiosqlite
     username = os.getenv("ADMIN_USERNAME", "admin")
     password = os.getenv("ADMIN_PASSWORD")
-    email    = os.getenv("ADMIN_EMAIL",    "admin@localhost")
 
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT COUNT(*) FROM admin_users") as cur:
@@ -98,18 +115,19 @@ async def ensure_default_admin():
                 charset = string.ascii_letters + string.digits + "!@#$%^&*()-_=+"
                 password = "".join(secrets.choice(charset) for _ in range(18))
             await db.execute(
-                "INSERT INTO admin_users (id, username, password_hash, email, role) VALUES (?,?,?,?,?)",
-                (generate_uid(), username, hash_password(password), email, "owner"),
+                "INSERT INTO admin_users (id, username, password_hash, role) VALUES (?,?,?,?)",
+                (generate_uid(), username, hash_password(password), "owner"),
             )
             await db.commit()
-            print(f"\n  +------------------------------------------+")
-            print(f"  |  Default admin account created           |")
-            print(f"  |  Username : {username:<29}|")
-            print(f"  |  Password : {password:<29}|")
-            print(f"  +------------------------------------------+\n")
+            app_log.info(f"Default admin account created - Username: {username}, Password: {password}")
 
 
 # ─── Entry point ─────────────────────────────────────────────────────────────
+
+def handle_signal(signum, frame):
+    """Handle shutdown signals gracefully."""
+    app_log.info(f"Received signal {signum}, initiating graceful shutdown...")
+    shutdown_event.set()
 
 if __name__ == "__main__":
     import uvicorn
@@ -117,8 +135,12 @@ if __name__ == "__main__":
     port  = int(os.getenv("PORT", "8080"))
     debug = os.getenv("DEBUG", "false").lower() == "true"
 
-    print(f"\n  EnAuth Server starting on https://{host}:{port}")
-    print(f"  Admin panel -> https://localhost:{port}/panel/\n")
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+    app_log.info(f"EnAuth Server starting on https://{host}:{port}")
+    app_log.info(f"Admin panel -> https://localhost:{port}/panel/")
 
     ssl_cert = os.getenv("SSL_CERT")
     ssl_key  = os.getenv("SSL_KEY")
@@ -134,6 +156,6 @@ if __name__ == "__main__":
     if ssl_cert and ssl_key:
         uvicorn_kwargs["ssl_certfile"] = ssl_cert
         uvicorn_kwargs["ssl_keyfile"]  = ssl_key
-        print(f"  SSL enabled using: {ssl_cert}")
+        app_log.info(f"SSL enabled using: {ssl_cert}")
 
     uvicorn.run(**uvicorn_kwargs)

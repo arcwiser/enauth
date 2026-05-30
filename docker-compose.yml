@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  enauth:
+    build: .
+    container_name: enauth-server
+    ports:
+      - "8080:8080"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8080
+      - DEBUG=false
+      - DB_PATH=/app/data/enauth.db
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=
+      - CORS_ORIGINS=*
+      - ADMIN_SESSION_HOURS=8
+      - MAX_PAGE_SIZE=200
+      - TEMP_2FA_TTL_MINUTES=5
+      - TEMP_2FA_SWEEP_SECONDS=60
+      - TIMESTAMP_TOLERANCE=60
+      - SESSION_DURATION=86400
+      - MAX_LOGIN_STRIKES=5
+      - NONCE_CACHE_SIZE=10000
+      - NONCE_TTL=120
+      - RATE_LIMIT_INIT=20
+      - RATE_LIMIT_NEWS=15
+      - RATE_LIMIT_LOGIN=8
+      - RATE_LIMIT_HEARTBEAT=60
+      - RATE_LIMIT_LOGOUT=20
+      - RATE_LIMIT_VALIDATE=30
+      - RATE_LIMIT_DOWNLOAD=10
+      - LOG_LEVEL=INFO
+      - LOG_FILE=/app/data/server.log
+      - LOG_MAX_BYTES=5242880
+      - LOG_BACKUP_COUNT=2
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s

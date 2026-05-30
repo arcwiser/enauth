@@ -25,11 +25,12 @@ limiter = Limiter(key_func=get_remote_address)
 router = APIRouter(prefix="/api/client", tags=["client"])
 
 # ─── Security Constants ───────────────────────────────────────────────────────
-TIMESTAMP_TOLERANCE  = 60      # ±60 seconds — tight replay window
-SESSION_DURATION     = 86400   # 24 hours
-MAX_LOGIN_STRIKES    = 5       # lock key after 5 bad attempts (down from 10)
-NONCE_CACHE_SIZE     = 10_000  # max unique nonces to remember
-NONCE_TTL            = 120     # seconds to keep a nonce (2× tolerance)
+import os
+TIMESTAMP_TOLERANCE  = int(os.getenv("TIMESTAMP_TOLERANCE", "60"))      # ±60 seconds — tight replay window
+SESSION_DURATION     = int(os.getenv("SESSION_DURATION", "86400"))       # 24 hours
+MAX_LOGIN_STRIKES    = int(os.getenv("MAX_LOGIN_STRIKES", "5"))          # lock key after 5 bad attempts (down from 10)
+NONCE_CACHE_SIZE     = int(os.getenv("NONCE_CACHE_SIZE", "10000"))      # max unique nonces to remember
+NONCE_TTL            = int(os.getenv("NONCE_TTL", "120"))                # seconds to keep a nonce (2× tolerance)
 
 # ─── Nonce Cache (replay protection) ─────────────────────────────────────────
 # Stores (nonce → expiry_ts). Evicts expired entries on each insert.
