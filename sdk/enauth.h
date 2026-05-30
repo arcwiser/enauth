@@ -1,11 +1,5 @@
 #pragma once
-/*
- *  EnAuth C++ Client SDK
- *
- *  Requirements:
- *    - Windows 7+
- *    - Link: winhttp.lib  bcrypt.lib  crypt32.lib
- *    - C++17 or later
+
  */
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -28,7 +22,6 @@ namespace enauth {
 
 namespace hwid { std::string Collect(); }
 
-// ─── Result types ────────────────────────────────────────────────────────────
 
 enum class Status {
     Success,
@@ -172,7 +165,7 @@ private:
     std::vector<unsigned char> m_enc_app_secret;
     std::vector<unsigned char> m_enc_version;
 
-    // Session state — stored XOR-encrypted with m_xor_key
+    // session state — stored XOR-encrypted with m_xor_key
     std::vector<unsigned char> m_enc_token;
     std::vector<unsigned char> m_enc_license_key;
     std::vector<unsigned char> m_enc_expires_at;
