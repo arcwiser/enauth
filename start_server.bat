@@ -12,7 +12,7 @@ echo ======================================
 echo   EnAuth Server
 echo ======================================
 echo.
-echo   Admin panel -> https://127.0.0.1:8080/panel/
+echo   panel -> https://127.0.0.1:8080/panel/
 echo.
 
 python main.py
