@@ -4,7 +4,7 @@ import io
 import os
 from datetime import datetime, timezone, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Header, File, UploadFile, Form
+from fastapi import APIRouter, Depends, HTTPException, Header, File, UploadFile, Form, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -13,16 +13,14 @@ import re
 import secrets
 import pyotp
 
-# Store temporary login sessions for 2FA validation (expires in 5 minutes)
-TEMP_2FA_SESSIONS = {}
-
 from database import get_db
+from routes.client import limiter
 from utils.crypto import (
     generate_license_key, generate_app_secret,
     generate_session_token, generate_uid,
     hash_password, verify_password,
 )
-from utils.logger import log_action
+from utils.logger import app_log, log_action
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 ADMIN_SESSION_HOURS = int(os.getenv("ADMIN_SESSION_HOURS", "8"))
@@ -38,6 +36,9 @@ def utcnow() -> str:
 
 def future_hours(h: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(hours=h)).strftime("%Y-%m-%d %H:%M:%S")
+
+def future_minutes(m: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(minutes=m)).strftime("%Y-%m-%d %H:%M:%S")
 
 def row_to_dict(row) -> dict:
     if row is None:
@@ -64,17 +65,13 @@ def _utcnow_dt() -> datetime:
 async def cleanup_runtime_state(db: aiosqlite.Connection):
     """Prune expired auth/session records and stale temp 2FA challenges."""
     now = utcnow()
-    current = _utcnow_dt()
-
-    for token, sess in list(TEMP_2FA_SESSIONS.items()):
-        if sess["expires"] <= current:
-            TEMP_2FA_SESSIONS.pop(token, None)
 
     await db.execute("DELETE FROM admin_sessions WHERE expires_at <= ?", (now,))
     await db.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (now,))
     await db.execute("DELETE FROM reseller_sessions WHERE expires_at <= ?", (now,))
     await db.execute("DELETE FROM portal_sessions WHERE expires_at <= ?", (now,))
     await db.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
+    await db.execute("DELETE FROM temp_2fa_sessions WHERE expires_at <= ?", (now,))
     await db.execute("DELETE FROM logs WHERE timestamp < datetime(?, '-30 days')", (now,))
     await db.commit()
 
@@ -180,8 +177,18 @@ def require_panel_owner(user: dict) -> None:
     """Raise 403 unless the caller is a true panel owner (admin_users.role=='owner').
     Used to protect global, non-tenanted resources like banned HWIDs, variables,
     news, and the panel users list from regular auth_users."""
-    if is_auth_panel_user(user):
+    if user.get("_source") != "admin_users" or user.get("role") != "owner":
         raise HTTPException(403, "Owner role required")
+
+
+async def create_temp_2fa_session(db: aiosqlite.Connection, user_id: str, role: str) -> str:
+    token = secrets.token_hex(32)
+    await db.execute(
+        "INSERT INTO temp_2fa_sessions (id, user_id, role, token, expires_at) VALUES (?, ?, ?, ?, ?)",
+        (generate_uid(), user_id, role, token, future_minutes(TEMP_2FA_TTL_MINUTES)),
+    )
+    await db.commit()
+    return token
 
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
@@ -195,7 +202,10 @@ class SignupBody(BaseModel):
     password: str
 
 @router.post("/auth/login")
-async def admin_login(body: LoginBody, db: aiosqlite.Connection = Depends(get_db)):
+@limiter.limit("8/minute")
+async def admin_login(request: Request = None, body: LoginBody = None, db: aiosqlite.Connection = Depends(get_db)):
+    if body is None:
+        raise HTTPException(400, "Invalid request")
     async with db.execute("SELECT * FROM admin_users WHERE username = ?", (body.username,)) as cur:
         user = await cur.fetchone()
     if not user:
@@ -205,12 +215,7 @@ async def admin_login(body: LoginBody, db: aiosqlite.Connection = Depends(get_db
 
     # 2FA Check
     if user["two_factor_enabled"] == 1:
-        temp_token = secrets.token_hex(32)
-        TEMP_2FA_SESSIONS[temp_token] = {
-            "user_id": user["id"],
-            "role": user["role"],
-            "expires": datetime.now(timezone.utc) + timedelta(minutes=5)
-        }
+        temp_token = await create_temp_2fa_session(db, user["id"], user["role"])
         return {
             "two_factor_required": True,
             "temp_token": temp_token,
@@ -247,7 +252,10 @@ async def admin_me(user=Depends(require_admin)):
 
 
 @router.post("/auth/signup")
-async def auth_signup(body: SignupBody, db: aiosqlite.Connection = Depends(get_db)):
+@limiter.limit("5/minute")
+async def auth_signup(request: Request = None, body: SignupBody = None, db: aiosqlite.Connection = Depends(get_db)):
+    if body is None:
+        raise HTTPException(400, "Invalid request")
     username = body.username.strip()
     if len(username) < 3:
         raise HTTPException(400, "Username too short")
@@ -291,12 +299,7 @@ async def auth_signin(body: LoginBody, db: aiosqlite.Connection = Depends(get_db
     if admin_user and verify_password(body.password, admin_user["password_hash"]):
         # 2FA Check
         if admin_user["two_factor_enabled"] == 1:
-            temp_token = secrets.token_hex(32)
-            TEMP_2FA_SESSIONS[temp_token] = {
-                "user_id": admin_user["id"],
-                "role": admin_user["role"],
-                "expires": datetime.now(timezone.utc) + timedelta(minutes=5)
-            }
+            temp_token = await create_temp_2fa_session(db, admin_user["id"], admin_user["role"])
             return {
                 "two_factor_required": True,
                 "temp_token": temp_token,
@@ -321,7 +324,8 @@ class TwoFactorVerifyBody(BaseModel):
     code: str
 
 @router.post("/auth/2fa/setup")
-async def setup_two_factor(user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
+@limiter.limit("10/minute")
+async def setup_two_factor(request: Request = None, user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
     # Only admin_users supports 2FA currently
     if user.get("_source") != "admin_users":
         raise HTTPException(400, "Two-factor authentication is only available for administrative users.")
@@ -343,7 +347,10 @@ class TwoFactorEnableBody(BaseModel):
     code: str
 
 @router.post("/auth/2fa/enable")
-async def enable_two_factor(body: TwoFactorEnableBody, user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
+@limiter.limit("10/minute")
+async def enable_two_factor(request: Request = None, body: TwoFactorEnableBody = None, user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
+    if body is None:
+        raise HTTPException(400, "Invalid request")
     if user.get("_source") != "admin_users":
         raise HTTPException(400, "Two-factor authentication is only available for administrative users.")
 
@@ -365,7 +372,10 @@ async def enable_two_factor(body: TwoFactorEnableBody, user=Depends(require_admi
 
 
 @router.post("/auth/2fa/disable")
-async def disable_two_factor(body: TwoFactorEnableBody, user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
+@limiter.limit("10/minute")
+async def disable_two_factor(request: Request = None, body: TwoFactorEnableBody = None, user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
+    if body is None:
+        raise HTTPException(400, "Invalid request")
     if user.get("_source") != "admin_users":
         raise HTTPException(400, "Two-factor authentication is only available for administrative users.")
 
@@ -387,13 +397,22 @@ async def disable_two_factor(body: TwoFactorEnableBody, user=Depends(require_adm
 
 
 @router.post("/auth/2fa/verify")
-async def verify_two_factor(body: TwoFactorVerifyBody, db: aiosqlite.Connection = Depends(get_db)):
-    sess = TEMP_2FA_SESSIONS.get(body.temp_token)
+@limiter.limit("10/minute")
+async def verify_two_factor(request: Request = None, body: TwoFactorVerifyBody = None, db: aiosqlite.Connection = Depends(get_db)):
+    if body is None:
+        raise HTTPException(400, "Invalid request")
+    async with db.execute(
+        "SELECT * FROM temp_2fa_sessions WHERE token = ?",
+        (body.temp_token,),
+    ) as cur:
+        sess = await cur.fetchone()
+
     if not sess:
         raise HTTPException(401, "Invalid or expired temporary session.")
 
-    if datetime.now(timezone.utc) > sess["expires"]:
-        TEMP_2FA_SESSIONS.pop(body.temp_token, None)
+    if sess["expires_at"] <= utcnow():
+        await db.execute("DELETE FROM temp_2fa_sessions WHERE token = ?", (body.temp_token,))
+        await db.commit()
         raise HTTPException(401, "Temporary login session expired.")
 
     # Load administrative user secret
@@ -413,10 +432,8 @@ async def verify_two_factor(body: TwoFactorVerifyBody, db: aiosqlite.Connection 
         "INSERT INTO admin_sessions (id, user_id, token, expires_at) VALUES (?, ?, ?, ?)",
         (generate_uid(), user["id"], token, future_hours(ADMIN_SESSION_HOURS)),
     )
+    await db.execute("DELETE FROM temp_2fa_sessions WHERE token = ?", (body.temp_token,))
     await db.commit()
-
-    # Clear temporary login session
-    TEMP_2FA_SESSIONS.pop(body.temp_token, None)
 
     return {"token": token, "username": user["username"], "role": user["role"]}
 
@@ -2259,7 +2276,10 @@ async def update_user(user_id: str, body: UpdateUserBody,
 
 
 @router.post("/auth/password-reset/request")
-async def request_password_reset(body: PasswordResetRequestBody, db: aiosqlite.Connection = Depends(get_db)):
+@limiter.limit("5/minute")
+async def request_password_reset(request: Request = None, body: PasswordResetRequestBody = None, db: aiosqlite.Connection = Depends(get_db)):
+    if body is None:
+        raise HTTPException(400, "Invalid request")
     """Request a password reset token for a username."""
     async with db.execute("SELECT id FROM admin_users WHERE username = ?", (body.username,)) as cur:
         user = await cur.fetchone()
@@ -2277,14 +2297,17 @@ async def request_password_reset(body: PasswordResetRequestBody, db: aiosqlite.C
     )
     await db.commit()
 
-    # Log the token for development (in production, this would be sent via email)
-    app_log.info(f"Password reset token for {body.username}: {token}")
+    # Do not log the reset token itself; it should only be delivered through the intended recovery channel.
+    app_log.info(f"Password reset requested for {body.username}")
 
     return {"ok": True, "message": "If the username exists, a reset token has been generated", "token": token if os.getenv("DEBUG") == "true" else None}
 
 
 @router.post("/auth/password-reset/verify")
-async def verify_password_reset(body: PasswordResetVerifyBody, db: aiosqlite.Connection = Depends(get_db)):
+@limiter.limit("5/minute")
+async def verify_password_reset(request: Request = None, body: PasswordResetVerifyBody = None, db: aiosqlite.Connection = Depends(get_db)):
+    if body is None:
+        raise HTTPException(400, "Invalid request")
     """Verify a password reset token and set new password."""
     validate_password_policy(body.new_password)
 
@@ -2753,7 +2776,10 @@ class PortalRegisterBody(BaseModel):
     license_key: str
 
 @router.post("/portal/register")
-async def portal_register(body: PortalRegisterBody, db: aiosqlite.Connection = Depends(get_db)):
+@limiter.limit("5/minute")
+async def portal_register(request: Request = None, body: PortalRegisterBody = None, db: aiosqlite.Connection = Depends(get_db)):
+    if body is None:
+        raise HTTPException(400, "Invalid request")
     async with db.execute("SELECT app_id FROM panels WHERE id = ?", (body.panel_id,)) as cur:
         panel = await cur.fetchone()
     if not panel:
@@ -2800,7 +2826,10 @@ class PortalLoginBody(BaseModel):
     password: str
 
 @router.post("/portal/login")
-async def portal_login(body: PortalLoginBody, db: aiosqlite.Connection = Depends(get_db)):
+@limiter.limit("8/minute")
+async def portal_login(request: Request = None, body: PortalLoginBody = None, db: aiosqlite.Connection = Depends(get_db)):
+    if body is None:
+        raise HTTPException(400, "Invalid request")
     async with db.execute("SELECT app_id FROM panels WHERE id = ?", (body.panel_id,)) as cur:
         panel = await cur.fetchone()
     if not panel:

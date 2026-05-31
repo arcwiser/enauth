@@ -2,19 +2,32 @@ import logging
 import os
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
+from pathlib import Path
 
 # Setup rotating file logger
 log_formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
-log_file = 'server.log'
+log_file = os.getenv("LOG_FILE", "server.log")
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+log_max_bytes = int(os.getenv("LOG_MAX_BYTES", str(5 * 1024 * 1024)))
+log_backup_count = int(os.getenv("LOG_BACKUP_COUNT", "2"))
 
-my_handler = RotatingFileHandler(log_file, mode='a', maxBytes=5*1024*1024, 
-                                 backupCount=2, encoding=None, delay=0)
+Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+
+my_handler = RotatingFileHandler(
+    log_file,
+    mode='a',
+    maxBytes=log_max_bytes,
+    backupCount=log_backup_count,
+    encoding=None,
+    delay=0,
+)
 my_handler.setFormatter(log_formatter)
-my_handler.setLevel(logging.INFO)
+my_handler.setLevel(getattr(logging, log_level, logging.INFO))
 
 app_log = logging.getLogger('root')
-app_log.setLevel(logging.INFO)
-app_log.addHandler(my_handler)
+app_log.setLevel(getattr(logging, log_level, logging.INFO))
+if not any(getattr(handler, "baseFilename", None) == my_handler.baseFilename for handler in app_log.handlers):
+    app_log.addHandler(my_handler)
 
 async def log_action(db, action: str, *,
                      license_key: str = None,

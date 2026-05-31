@@ -1,0 +1,167 @@
+import importlib
+import os
+import shutil
+import sys
+import uuid
+import unittest
+from pathlib import Path
+import logging
+
+import aiosqlite
+import pyotp
+from fastapi import HTTPException
+
+from utils.crypto import hash_password
+
+
+MODULES_TO_RESET = [
+    "main",
+    "database",
+    "routes.admin",
+    "routes.client",
+    "utils.logger",
+]
+
+
+class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.workdir = Path(__file__).resolve().parent / f"_tmp-{uuid.uuid4().hex}"
+        self.workdir.mkdir(parents=True, exist_ok=True)
+        self.db_path = self.workdir / "enauth.db"
+        self.log_path = self.workdir / "server.log"
+
+        os.environ["DB_PATH"] = str(self.db_path)
+        os.environ["LOG_FILE"] = str(self.log_path)
+        os.environ["LOG_LEVEL"] = "INFO"
+        os.environ["LOG_MAX_BYTES"] = str(1024 * 1024)
+        os.environ["LOG_BACKUP_COUNT"] = "1"
+        os.environ["DEBUG"] = "false"
+        os.environ["TEMP_2FA_TTL_MINUTES"] = "5"
+
+        for name in MODULES_TO_RESET:
+            sys.modules.pop(name, None)
+
+        self.database = importlib.import_module("database")
+        self.admin = importlib.import_module("routes.admin")
+        await self.database.init_db()
+
+    async def asyncTearDown(self):
+        logger = logging.getLogger("root")
+        for handler in list(logger.handlers):
+            handler.close()
+            logger.removeHandler(handler)
+        shutil.rmtree(self.workdir, ignore_errors=True)
+
+    async def _create_admin_user(self, username="admin", role="owner", two_factor_enabled=1):
+        secret = pyotp.random_base32()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            user_id = "user-1"
+            await db.execute(
+                """
+                INSERT INTO admin_users (id, username, password_hash, role, two_factor_enabled, two_factor_secret)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, username, hash_password("Password123!"), role, two_factor_enabled, secret),
+            )
+            await db.commit()
+        return user_id, secret
+
+    async def test_require_panel_owner_blocks_non_owner_admins(self):
+        with self.assertRaises(HTTPException) as ctx:
+            self.admin.require_panel_owner({"_source": "admin_users", "role": "admin"})
+        self.assertEqual(ctx.exception.status_code, 403)
+
+        with self.assertRaises(HTTPException) as ctx:
+            self.admin.require_panel_owner({"_source": "auth_users", "role": "owner"})
+        self.assertEqual(ctx.exception.status_code, 403)
+
+        self.assertIsNone(
+            self.admin.require_panel_owner({"_source": "admin_users", "role": "owner"})
+        )
+
+    async def test_two_factor_temp_session_persists_and_verifies(self):
+        user_id, secret = await self._create_admin_user()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            temp_token = await self.admin.create_temp_2fa_session(db, user_id, "owner")
+
+            async with db.execute(
+                "SELECT token, user_id, role FROM temp_2fa_sessions WHERE token = ?",
+                (temp_token,),
+            ) as cur:
+                row = await cur.fetchone()
+
+            self.assertIsNotNone(row)
+            self.assertEqual(row["user_id"], user_id)
+            self.assertEqual(row["role"], "owner")
+
+            result = await self.admin.verify_two_factor.__wrapped__(
+                body=self.admin.TwoFactorVerifyBody(
+                    temp_token=temp_token,
+                    code=pyotp.TOTP(secret).now(),
+                ),
+                db=db,
+            )
+
+            self.assertIn("token", result)
+            self.assertEqual(result["username"], "admin")
+
+            async with db.execute(
+                "SELECT COUNT(*) FROM temp_2fa_sessions WHERE token = ?",
+                (temp_token,),
+            ) as cur:
+                remaining = (await cur.fetchone())[0]
+            self.assertEqual(remaining, 0)
+
+            async with db.execute(
+                "SELECT COUNT(*) FROM admin_sessions WHERE token = ?",
+                (result["token"],),
+            ) as cur:
+                sessions = (await cur.fetchone())[0]
+            self.assertEqual(sessions, 1)
+
+    async def test_cleanup_removes_expired_temp_2fa_sessions(self):
+        user_id, _ = await self._create_admin_user(two_factor_enabled=0)
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute(
+                """
+                INSERT INTO temp_2fa_sessions (id, user_id, role, token, expires_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("temp-1", user_id, "owner", "expired-token", "2000-01-01 00:00:00"),
+            )
+            await db.commit()
+
+            await self.admin.cleanup_runtime_state(db)
+
+            async with db.execute(
+                "SELECT COUNT(*) FROM temp_2fa_sessions WHERE token = ?",
+                ("expired-token",),
+            ) as cur:
+                remaining = (await cur.fetchone())[0]
+
+        self.assertEqual(remaining, 0)
+
+    async def test_password_reset_token_is_not_written_to_logs(self):
+        await self._create_admin_user(two_factor_enabled=0)
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            result = await self.admin.request_password_reset.__wrapped__(
+                body=self.admin.PasswordResetRequestBody(username="admin"),
+                db=db,
+            )
+
+            self.assertIsNone(result["token"])
+
+        log_text = self.log_path.read_text(encoding="utf-8")
+        self.assertNotIn("Password reset token for", log_text)
+        self.assertIn("Password reset requested for admin", log_text)
+
+
+if __name__ == "__main__":
+    unittest.main()

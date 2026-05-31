@@ -16,15 +16,15 @@
     </div>
     <div class="content">
       <!-- Hero Section -->
-      <div class="card" style="background: linear-gradient(135deg, rgba(0, 242, 255, 0.1), rgba(112, 0, 255, 0.1)); border-color: var(--primary-glow);">
-        <div style="display: flex; align-items: center; justify-content: space-between;">
+      <section class="page-hero">
+        <div class="page-hero__inner">
           <div>
-            <h1 style="font-size: 24px; font-weight: 700; margin-bottom: 8px;">Welcome back, <span id="user-name-title" style="color: var(--primary);">Admin</span>!</h1>
-            <p style="color: var(--text-dim); font-size: 14px;">Your network is secured and everything is running smoothly.</p>
+            <h1 class="page-hero__title">Welcome back, <span id="user-name-title" style="color: var(--primary);">Admin</span>!</h1>
+            <p class="page-hero__subtitle">Your panel is online, your licensing operations are healthy, and the most important actions are one click away.</p>
           </div>
           <div class="topbar-badge" id="topbar-time-hero" style="padding: 8px 20px; font-size: 14px;"></div>
         </div>
-      </div>
+      </section>
 
       <!-- Stats Grid -->
       <div class="stats-grid" id="stats-grid">
@@ -160,28 +160,28 @@
         <div class="card-header">
           <div class="card-title">⚡ Quick Actions</div>
         </div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px">
-          <a href="licenses.html" class="btn btn-outline" style="justify-content:center;padding:16px;flex-direction:column;gap:6px;height:auto">
+        <div class="quick-actions-grid">
+          <a href="licenses.html" class="btn btn-outline quick-action">
             <span style="font-size:24px">🔑</span>
             <span>Manage Licenses</span>
           </a>
-          <a href="sessions.html" class="btn btn-outline" style="justify-content:center;padding:16px;flex-direction:column;gap:6px;height:auto">
+          <a href="sessions.html" class="btn btn-outline quick-action">
             <span style="font-size:24px">🔗</span>
             <span>Active Sessions</span>
           </a>
-          <a href="bans.html" class="btn btn-outline" style="justify-content:center;padding:16px;flex-direction:column;gap:6px;height:auto">
+          <a href="bans.html" class="btn btn-outline quick-action">
             <span style="font-size:24px">🚫</span>
             <span>Manage Bans</span>
           </a>
-          <a href="logs.html" class="btn btn-outline" style="justify-content:center;padding:16px;flex-direction:column;gap:6px;height:auto">
+          <a href="logs.html" class="btn btn-outline quick-action">
             <span style="font-size:24px">📋</span>
             <span>View Logs</span>
           </a>
-          <a href="apps.html" class="btn btn-outline" style="justify-content:center;padding:16px;flex-direction:column;gap:6px;height:auto">
+          <a href="apps.html" class="btn btn-outline quick-action">
             <span style="font-size:24px">📦</span>
             <span>Applications</span>
           </a>
-          <a href="resellers.html" class="btn btn-outline" style="justify-content:center;padding:16px;flex-direction:column;gap:6px;height:auto">
+          <a href="resellers.html" class="btn btn-outline quick-action">
             <span style="font-size:24px">🤝</span>
             <span>Resellers</span>
           </a>

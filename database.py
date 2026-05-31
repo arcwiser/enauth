@@ -1,7 +1,10 @@
 import aiosqlite
+import importlib.util
 import os
+from pathlib import Path
 
 DB_PATH = os.getenv("DB_PATH", "enauth.db")
+MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -291,6 +294,157 @@ CREATE TABLE IF NOT EXISTS api_keys (
 """
 
 
+async def _get_schema_version(db: aiosqlite.Connection) -> int:
+    async with db.execute("PRAGMA user_version") as cur:
+        row = await cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+async def _set_schema_version(db: aiosqlite.Connection, version: int):
+    await db.execute(f"PRAGMA user_version = {int(version)}")
+
+
+def _discover_migration_files() -> list[tuple[int, Path]]:
+    if not MIGRATIONS_DIR.exists():
+        return []
+
+    migrations = []
+    for path in MIGRATIONS_DIR.glob("[0-9][0-9][0-9][0-9]_*.py"):
+        try:
+            version = int(path.stem.split("_", 1)[0])
+        except ValueError:
+            continue
+        migrations.append((version, path))
+    return sorted(migrations, key=lambda item: item[0])
+
+
+LATEST_SCHEMA_VERSION = max((version for version, _ in _discover_migration_files()), default=0)
+
+
+async def _apply_schema_v1(db: aiosqlite.Connection):
+    await db.executescript(SCHEMA)
+
+    async with db.execute("PRAGMA table_info(applications)") as cur:
+        app_cols = [r[1] for r in await cur.fetchall()]
+    if "owner_user_id" not in app_cols:
+        await db.execute("ALTER TABLE applications ADD COLUMN owner_user_id TEXT REFERENCES auth_users(id) ON DELETE SET NULL")
+
+    async with db.execute("PRAGMA table_info(resellers)") as cur:
+        reseller_cols = [r[1] for r in await cur.fetchall()]
+    if "owner_user_id" not in reseller_cols:
+        await db.execute("ALTER TABLE resellers ADD COLUMN owner_user_id TEXT REFERENCES auth_users(id) ON DELETE CASCADE")
+
+    async with db.execute("PRAGMA table_info(licenses)") as cur:
+        lic_cols = [r[1] for r in await cur.fetchall()]
+    if "metadata" not in lic_cols:
+        await db.execute("ALTER TABLE licenses ADD COLUMN metadata TEXT")
+
+    if "last_ip" not in lic_cols:
+        await db.execute("ALTER TABLE licenses ADD COLUMN last_ip TEXT")
+    if "login_strikes" not in lic_cols:
+        await db.execute("ALTER TABLE licenses ADD COLUMN login_strikes INTEGER DEFAULT 0")
+    if "client_username" not in lic_cols:
+        await db.execute("ALTER TABLE licenses ADD COLUMN client_username TEXT")
+    if "client_password_hash" not in lic_cols:
+        await db.execute("ALTER TABLE licenses ADD COLUMN client_password_hash TEXT")
+
+    async with db.execute("PRAGMA table_info(admin_users)") as cur:
+        user_cols = [r[1] for r in await cur.fetchall()]
+    if "theme" not in user_cols:
+        await db.execute("ALTER TABLE admin_users ADD COLUMN theme TEXT DEFAULT 'dark'")
+
+    async with db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='api_keys'") as cur:
+        api_keys_exists = await cur.fetchone()
+    if not api_keys_exists:
+        await db.execute("""
+            CREATE TABLE api_keys (
+                id          TEXT PRIMARY KEY,
+                user_id     TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+                key_hash    TEXT NOT NULL UNIQUE,
+                name        TEXT NOT NULL,
+                scopes      TEXT DEFAULT 'read',
+                is_active   INTEGER DEFAULT 1,
+                last_used   DATETIME,
+                expires_at  DATETIME,
+                created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+    async with db.execute("PRAGMA table_info(app_files)") as cur:
+        file_cols = [r[1] for r in await cur.fetchall()]
+    if "file_sha256" not in file_cols:
+        await db.execute("ALTER TABLE app_files ADD COLUMN file_sha256 TEXT")
+
+    async with db.execute("PRAGMA table_info(news)") as cur:
+        news_cols = [r[1] for r in await cur.fetchall()]
+    if "app_id" not in news_cols:
+        await db.execute("ALTER TABLE news ADD COLUMN app_id TEXT REFERENCES applications(id) ON DELETE CASCADE")
+
+    async with db.execute("PRAGMA table_info(banned_hwids)") as cur:
+        ban_cols = [r[1] for r in await cur.fetchall()]
+    if "app_id" not in ban_cols:
+        await db.execute("ALTER TABLE banned_hwids ADD COLUMN app_id TEXT REFERENCES applications(id) ON DELETE CASCADE")
+
+    async with db.execute("PRAGMA table_info(admin_users)") as cur:
+        admin_cols = [r[1] for r in await cur.fetchall()]
+    if "two_factor_enabled" not in admin_cols:
+        await db.execute("ALTER TABLE admin_users ADD COLUMN two_factor_enabled INTEGER DEFAULT 0")
+    if "two_factor_secret" not in admin_cols:
+        await db.execute("ALTER TABLE admin_users ADD COLUMN two_factor_secret TEXT")
+
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_apps_owner ON applications(owner_user_id)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_resellers_owner ON resellers(owner_user_id)")
+
+
+async def _apply_schema_v2(db: aiosqlite.Connection):
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS temp_2fa_sessions (
+            id         TEXT PRIMARY KEY,
+            user_id    TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+            role       TEXT NOT NULL,
+            token      TEXT NOT NULL UNIQUE,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            expires_at DATETIME NOT NULL
+        )
+    """)
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_temp_2fa_token ON temp_2fa_sessions(token)")
+
+
+async def run_migrations(db: aiosqlite.Connection):
+    current_version = await _get_schema_version(db)
+    migrations = _discover_migration_files()
+
+    for version, path in migrations:
+        if version <= current_version:
+            continue
+        if version != current_version + 1:
+            raise RuntimeError(
+                f"Migration gap detected: expected version {current_version + 1} but found {version} at {path.name}"
+            )
+
+        module_name = f"_enauth_migration_{path.stem}"
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        if not spec or not spec.loader:
+            raise RuntimeError(f"Unable to load migration file: {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        apply = getattr(module, "apply", None)
+        if apply is None:
+            raise RuntimeError(f"Migration file missing apply(db): {path}")
+
+        await apply(db)
+        current_version = version
+        await _set_schema_version(db, current_version)
+        await db.commit()
+
+    # Best-effort compatibility for databases that predate this migration system.
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_apps_owner ON applications(owner_user_id)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_resellers_owner ON resellers(owner_user_id)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_temp_2fa_token ON temp_2fa_sessions(token)")
+    await db.commit()
+
+
 async def get_db():
     db = await aiosqlite.connect(DB_PATH)
     db.row_factory = aiosqlite.Row
@@ -302,81 +456,8 @@ async def get_db():
 
 
 async def init_db():
+    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.executescript(SCHEMA)
-        async with db.execute("PRAGMA table_info(applications)") as cur:
-            app_cols = [r[1] for r in await cur.fetchall()]
-        if "owner_user_id" not in app_cols:
-            await db.execute("ALTER TABLE applications ADD COLUMN owner_user_id TEXT REFERENCES auth_users(id) ON DELETE SET NULL")
-
-        async with db.execute("PRAGMA table_info(resellers)") as cur:
-            reseller_cols = [r[1] for r in await cur.fetchall()]
-        if "owner_user_id" not in reseller_cols:
-            await db.execute("ALTER TABLE resellers ADD COLUMN owner_user_id TEXT REFERENCES auth_users(id) ON DELETE CASCADE")
-
-        async with db.execute("PRAGMA table_info(licenses)") as cur:
-            lic_cols = [r[1] for r in await cur.fetchall()]
-        if "metadata" not in lic_cols:
-            await db.execute("ALTER TABLE licenses ADD COLUMN metadata TEXT")
-
-        if "last_ip" not in lic_cols:
-            await db.execute("ALTER TABLE licenses ADD COLUMN last_ip TEXT")
-        if "login_strikes" not in lic_cols:
-            await db.execute("ALTER TABLE licenses ADD COLUMN login_strikes INTEGER DEFAULT 0")
-        if "client_username" not in lic_cols:
-            await db.execute("ALTER TABLE licenses ADD COLUMN client_username TEXT")
-        if "client_password_hash" not in lic_cols:
-            await db.execute("ALTER TABLE licenses ADD COLUMN client_password_hash TEXT")
-
-        async with db.execute("PRAGMA table_info(admin_users)") as cur:
-            user_cols = [r[1] for r in await cur.fetchall()]
-        if "theme" not in user_cols:
-            await db.execute("ALTER TABLE admin_users ADD COLUMN theme TEXT DEFAULT 'dark'")
-
-        async with db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='api_keys'") as cur:
-            api_keys_exists = await cur.fetchone()
-        if not api_keys_exists:
-            await db.execute("""
-                CREATE TABLE api_keys (
-                    id          TEXT PRIMARY KEY,
-                    user_id     TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
-                    key_hash    TEXT NOT NULL UNIQUE,
-                    name        TEXT NOT NULL,
-                    scopes      TEXT DEFAULT 'read',
-                    is_active   INTEGER DEFAULT 1,
-                    last_used   DATETIME,
-                    expires_at  DATETIME,
-                    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-
-        async with db.execute("PRAGMA table_info(app_files)") as cur:
-            file_cols = [r[1] for r in await cur.fetchall()]
-        if "file_sha256" not in file_cols:
-            await db.execute("ALTER TABLE app_files ADD COLUMN file_sha256 TEXT")
-
-        async with db.execute("PRAGMA table_info(news)") as cur:
-            news_cols = [r[1] for r in await cur.fetchall()]
-        if "app_id" not in news_cols:
-            # We need to add app_id. Since it's NOT NULL, we'll have to handle existing data.
-            # For simplicity, we'll allow it to be NULL temporarily or default to a dummy.
-            await db.execute("ALTER TABLE news ADD COLUMN app_id TEXT REFERENCES applications(id) ON DELETE CASCADE")
-
-        async with db.execute("PRAGMA table_info(banned_hwids)") as cur:
-            ban_cols = [r[1] for r in await cur.fetchall()]
-        if "app_id" not in ban_cols:
-            await db.execute("ALTER TABLE banned_hwids ADD COLUMN app_id TEXT REFERENCES applications(id) ON DELETE CASCADE")
-            # Note: PRIMARY KEY change in SQLite requires table recreation, 
-            # but for now we'll just add the column to avoid crashing.
-
-
-        async with db.execute("PRAGMA table_info(admin_users)") as cur:
-            admin_cols = [r[1] for r in await cur.fetchall()]
-        if "two_factor_enabled" not in admin_cols:
-            await db.execute("ALTER TABLE admin_users ADD COLUMN two_factor_enabled INTEGER DEFAULT 0")
-        if "two_factor_secret" not in admin_cols:
-            await db.execute("ALTER TABLE admin_users ADD COLUMN two_factor_secret TEXT")
-
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_apps_owner ON applications(owner_user_id)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_resellers_owner ON resellers(owner_user_id)")
-        await db.commit()
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA foreign_keys=ON")
+        await run_migrations(db)

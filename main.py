@@ -35,6 +35,7 @@ from utils.logger import app_log
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    validate_startup_configuration()
     await init_db()
     await clear_all_sessions_on_startup()
     await ensure_default_admin()
@@ -56,8 +57,17 @@ async def clear_all_sessions_on_startup():
         await db.execute("DELETE FROM reseller_sessions")
         await db.execute("DELETE FROM portal_sessions")
         await db.execute("DELETE FROM sessions")
+        await db.execute("DELETE FROM temp_2fa_sessions")
         await db.commit()
     app_log.info("Cleared existing auth sessions on startup")
+
+
+def validate_startup_configuration():
+    """Emit operator-friendly warnings for common self-hosting misconfigurations."""
+    if not os.getenv("ADMIN_PASSWORD"):
+        app_log.warning("ADMIN_PASSWORD is not set; a random password will be generated if no admin user exists.")
+    if os.getenv("CORS_ORIGINS", "*") == "*":
+        app_log.warning("CORS_ORIGINS is set to '*'. That is convenient for local use, but tighter origins are safer in production.")
 
 
 async def _maintenance_loop():
@@ -76,7 +86,7 @@ async def _maintenance_loop():
 # ─── App ─────────────────────────────────────────────────────────────────────
 
 debug_mode = os.getenv("DEBUG", "false").lower() == "true"
-app = FastAPI(title="EnAuth", version="1.0.0",
+app = FastAPI(title="EnAuth", version="1.1.0",
               docs_url="/docs",
               redoc_url="/redoc",
               lifespan=lifespan)
@@ -139,11 +149,12 @@ if __name__ == "__main__":
     port  = int(os.getenv("PORT", "8080"))
     debug = os.getenv("DEBUG", "false").lower() == "true"
 
-    app_log.info(f"EnAuth Server starting on https://{host}:{port}")
-    app_log.info(f"Admin panel -> https://localhost:{port}/panel/")
-
     ssl_cert = os.getenv("SSL_CERT")
     ssl_key  = os.getenv("SSL_KEY")
+    scheme = "https" if ssl_cert and ssl_key and Path(ssl_cert).exists() and Path(ssl_key).exists() else "http"
+
+    app_log.info(f"EnAuth Server starting on {scheme}://{host}:{port}")
+    app_log.info(f"Admin panel -> {scheme}://localhost:{port}/panel/")
 
     uvicorn_kwargs = {
         "app":      "main:app",
