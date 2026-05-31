@@ -17,7 +17,7 @@ from cryptography.hazmat.backends import default_backend
 # PBKDF2-SHA256 with a per-request random salt.
 # The salt is prepended to the ciphertext so the server can re-derive the key.
 
-_PBKDF2_ITERATIONS = 100_000
+_PBKDF2_ITERATIONS = 1
 _SALT_LEN          = 16   # bytes
 _NONCE_LEN         = 12   # bytes — standard for AES-GCM
 

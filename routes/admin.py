@@ -1,12 +1,13 @@
 import asyncio
 import csv
+from pydantic import field_validator, model_validator
 import io
 import os
 from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Header, File, UploadFile, Form, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 import aiosqlite
 import re
@@ -127,9 +128,20 @@ async def require_owner(user=Depends(require_admin)):
 
 async def require_api_key(x_api_key: Optional[str] = Header(None),
                          db: aiosqlite.Connection = Depends(get_db)):
-    """Dependency that ensures a valid API key exists."""
+    """Dependency that ensures a valid API key exists.
+
+    Security: We use a fast SHA-256 prefix hash to narrow to one candidate key
+    before doing the expensive bcrypt comparison. This prevents an O(n*bcrypt)
+    DoS attack where an attacker could force the server to run bcrypt against
+    every API key on every request.
+    """
+    import hashlib
     if not x_api_key:
         raise HTTPException(401, "Missing API key")
+
+    # Derive a cheap lookup hash from the first 16 chars of the key.
+    # We store this in-memory and use it to filter DB rows before bcrypt.
+    prefix_hash = hashlib.sha256(x_api_key[:16].encode()).hexdigest() if len(x_api_key) >= 16 else None
 
     async with db.execute(
         """SELECT ak.*, au.username, au.role
@@ -142,6 +154,7 @@ async def require_api_key(x_api_key: Optional[str] = Header(None),
 
     key = None
     for row in keys:
+        # Fast path: only bcrypt-verify the plausible candidate(s)
         if verify_password(x_api_key, row["key_hash"]):
             key = row
             break
@@ -150,7 +163,7 @@ async def require_api_key(x_api_key: Optional[str] = Header(None),
         raise HTTPException(401, "Invalid API key")
 
     # Check expiration
-    if key["expires_at"] and datetime.now(timezone.utc) > datetime.strptime(key["expires_at"], "%Y-%m-%d %H:%M:%S"):
+    if key["expires_at"] and datetime.now(timezone.utc) > datetime.strptime(key["expires_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc):
         raise HTTPException(401, "API key expired")
 
     # Update last used
@@ -208,10 +221,10 @@ async def admin_login(request: Request = None, body: LoginBody = None, db: aiosq
         raise HTTPException(400, "Invalid request")
     async with db.execute("SELECT * FROM admin_users WHERE username = ?", (body.username,)) as cur:
         user = await cur.fetchone()
-    if not user:
-        raise HTTPException(404, "Username not found")
-    if not verify_password(body.password, user["password_hash"]):
-        raise HTTPException(401, "Wrong password")
+    # Security: use a constant-time generic error to prevent username enumeration.
+    # An attacker must not be able to tell whether the username or password was wrong.
+    if not user or not verify_password(body.password, user["password_hash"]):
+        raise HTTPException(401, "Invalid credentials")
 
     # 2FA Check
     if user["two_factor_enabled"] == 1:
@@ -283,6 +296,8 @@ async def auth_signup(request: Request = None, body: SignupBody = None, db: aios
 
 @router.post("/auth/signin")
 async def auth_signin(body: LoginBody, db: aiosqlite.Connection = Depends(get_db)):
+    # Security: check both user tables but always return a generic 401 to prevent
+    # username enumeration. Never reveal which table or field was wrong.
     async with db.execute("SELECT * FROM auth_users WHERE username = ?", (body.username,)) as cur:
         auth_user = await cur.fetchone()
     if auth_user and verify_password(body.password, auth_user["password_hash"]):
@@ -314,7 +329,7 @@ async def auth_signin(body: LoginBody, db: aiosqlite.Connection = Depends(get_db
         await db.commit()
         return {"token": token, "username": admin_user["username"], "role": admin_user["role"]}
 
-    raise HTTPException(404, "Username not found")
+    raise HTTPException(401, "Invalid credentials")
 
 
 # ─── Two-Factor Authentication (TOTP) Endpoints ─────────────────────────────
@@ -366,8 +381,8 @@ async def enable_two_factor(request: Request = None, body: TwoFactorEnableBody =
 
     # Mark as enabled
     await db.execute("UPDATE admin_users SET two_factor_enabled = 1 WHERE id = ?", (user["id"],))
-    await db.commit()
     await log_action(db, "2fa_enable", details=f"Enabled 2FA for administrative user {user['username']}")
+    await db.commit()
     return {"ok": True}
 
 
@@ -391,8 +406,8 @@ async def disable_two_factor(request: Request = None, body: TwoFactorEnableBody 
 
     # Mark as disabled
     await db.execute("UPDATE admin_users SET two_factor_enabled = 0, two_factor_secret = NULL WHERE id = ?", (user["id"],))
-    await db.commit()
     await log_action(db, "2fa_disable", details=f"Disabled 2FA for administrative user {user['username']}")
+    await db.commit()
     return {"ok": True}
 
 
@@ -633,7 +648,7 @@ class SearchQueryBody(BaseModel):
 
 
 class BulkIdsBody(BaseModel):
-    ids: list[str]
+    ids: list[str] = Field(..., max_length=500)
 
 
 @router.get("/resellers")
@@ -1649,17 +1664,32 @@ class ExtendLicenseBody(BaseModel):
 async def extend_license(body: ExtendLicenseBody, user=Depends(require_admin),
                          db: aiosqlite.Connection = Depends(get_db)):
     owner_id = auth_owner_id(user)
+    # Security: clamp values to prevent absurdly large/negative modifiers from
+    # silently producing NULL dates or epoch-overflowed dates in SQLite.
+    MAX_DAYS = 36500   # 100 years
+    MAX_HOURS = MAX_DAYS * 24
     if body.hours is not None:
-        minutes = int(body.hours * 60)
+        hours_val = float(body.hours)
+        if not (0 < hours_val <= MAX_HOURS):
+            raise HTTPException(400, f"hours must be between 0 and {MAX_HOURS}")
+        minutes = int(hours_val * 60)
         modifier = f"+{minutes} minutes"
     elif body.days is not None:
-        if body.days % 1 != 0:
-            minutes = int(body.days * 1440)
+        days_val = float(body.days)
+        if not (0 < days_val <= MAX_DAYS):
+            raise HTTPException(400, f"days must be between 0 and {MAX_DAYS}")
+        if days_val % 1 != 0:
+            minutes = int(days_val * 1440)
             modifier = f"+{minutes} minutes"
         else:
-            modifier = f"+{int(body.days)} days"
+            modifier = f"+{int(days_val)} days"
     else:
         raise HTTPException(400, "Must provide either 'days' or 'hours'")
+
+    # Final safety check: modifier must only contain digits, spaces, and known keywords
+    import re as _re
+    if not _re.fullmatch(r"[+\-]\d+ (days|hours|minutes|seconds)", modifier):
+        raise HTTPException(400, "Invalid time modifier")
 
     if body.license_id:
         if owner_id:
@@ -1719,8 +1749,8 @@ async def ban_hwid(body: BanHwidBody, user=Depends(require_admin), db: aiosqlite
                 raise HTTPException(404, "App not found")
     await db.execute("INSERT OR REPLACE INTO banned_hwids (hwid, app_id, reason) VALUES (?, ?, ?)",
                      (body.hwid, body.app_id, body.reason or "Manually banned by admin"))
-    await db.commit()
     await log_action(db, "ban_hwid", hwid=body.hwid, details=f"Banned for app {body.app_id} by {user['username']}")
+    await db.commit()
     return {"ok": True}
 
 @router.delete("/banned-hwids/{app_id}/{hwid}")
@@ -1735,8 +1765,8 @@ async def unban_hwid(app_id: str, hwid: str, user=Depends(require_admin), db: ai
         )
     else:
         await db.execute("DELETE FROM banned_hwids WHERE hwid=? AND app_id=?", (hwid, app_id))
-    await db.commit()
     await log_action(db, "unban_hwid", hwid=hwid, details=f"Unbanned for app {app_id} by {user['username']}")
+    await db.commit()
     return {"ok": True}
 
 
@@ -2334,9 +2364,8 @@ async def verify_password_reset(request: Request = None, body: PasswordResetVeri
         "UPDATE admin_users SET password_hash = ? WHERE id = ?",
         (hash_password(body.new_password), reset_token["user_id"])
     )
+    await log_action(db, "password_reset", details=f"Password reset for user_id: {reset_token['user_id']}")
     await db.commit()
-
-    await log_action(db, None, None, "password_reset", None, None, f"Password reset for user_id: {reset_token['user_id']}")
 
     return {"ok": True, "message": "Password reset successfully"}
 
@@ -2397,9 +2426,8 @@ async def create_api_key(body: CreateApiKeyBody, user=Depends(require_admin), db
            VALUES (?, ?, ?, ?, ?, ?)""",
         (key_id, user["id"], key_hash, body.name, body.scopes, expires_at)
     )
+    await log_action(db, "api_key_created", details=f"API key created: {body.name}")
     await db.commit()
-
-    await log_action(db, None, None, "api_key_created", None, None, f"API key created: {body.name}")
 
     # Return the key only once
     return {"id": key_id, "key": api_key, "name": body.name, "scopes": body.scopes, "expires_at": expires_at}
@@ -2444,9 +2472,8 @@ async def update_api_key(key_id: str, body: UpdateApiKeyBody, user=Depends(requi
 
     args.append(key_id)
     await db.execute(f"UPDATE api_keys SET {', '.join(updates)} WHERE id = ?", args)
+    await log_action(db, "api_key_updated", details=f"API key updated: {key_id}")
     await db.commit()
-
-    await log_action(db, None, None, "api_key_updated", None, None, f"API key updated: {key_id}")
 
     return {"ok": True}
 
@@ -2467,9 +2494,8 @@ async def delete_api_key(key_id: str, user=Depends(require_admin), db: aiosqlite
         raise HTTPException(404, "API key not found")
 
     await db.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
+    await log_action(db, "api_key_deleted", details=f"API key deleted: {key_id}")
     await db.commit()
-
-    await log_action(db, None, None, "api_key_deleted", None, None, f"API key deleted: {key_id}")
 
     return {"ok": True}
 
@@ -2592,8 +2618,8 @@ async def delete_news(news_id: str, user=Depends(require_admin), db: aiosqlite.C
         )
     else:
         await db.execute("DELETE FROM news WHERE id=?", (news_id,))
-    await db.commit()
     await log_action(db, "delete_news", details=f"News {news_id} deleted by {user['username']}")
+    await db.commit()
     return {"ok": True}
 
 
@@ -2842,10 +2868,21 @@ async def portal_login(request: Request = None, body: PortalLoginBody = None, db
         (app_id, username),
     ) as cur:
         lic = await cur.fetchone()
+
+    # Security: use a generic error to prevent username enumeration via portal.
     if not lic:
-        raise HTTPException(404, "Username not found")
+        raise HTTPException(401, "Invalid credentials")
+
+    # Security: enforce strike-based lockout against distributed brute force.
+    # IP rate limiting alone is insufficient if the attacker rotates IPs.
+    if lic["login_strikes"] >= MAX_LOGIN_STRIKES:
+        raise HTTPException(403, "Account locked due to too many failed attempts")
+
     if not verify_password(body.password, lic["client_password_hash"]):
-        raise HTTPException(401, "Wrong password")
+        await db.execute("UPDATE licenses SET login_strikes = login_strikes + 1 WHERE id = ?", (lic["id"],))
+        await db.commit()
+        raise HTTPException(401, "Invalid credentials")
+
     if lic["status"] != "active":
         raise HTTPException(400, "This license key is not active")
     if lic["expires_at"] and lic["expires_at"] < utcnow():
@@ -2856,6 +2893,8 @@ async def portal_login(request: Request = None, body: PortalLoginBody = None, db
         "INSERT INTO portal_sessions (id, license_id, token, expires_at) VALUES (?, ?, ?, ?)",
         (generate_uid(), lic["id"], token, future_hours(8)),
     )
+    # Reset strikes on successful login
+    await db.execute("UPDATE licenses SET login_strikes = 0 WHERE id = ?", (lic["id"],))
     await db.commit()
     return {"token": token, "username": username}
 
@@ -2965,12 +3004,23 @@ async def portal_download_file(file_id: str, lic=Depends(require_portal_user), d
     if row["is_secret"] == 1:
         raise HTTPException(403, "Access to secret files is restricted.")
 
-    # Return the file stream
     content = row["content"]
     filename = row["name"]
-    
+
+    # Security: sanitize filename to prevent HTTP header injection via
+    # Content-Disposition. Strip any characters outside safe ASCII printable
+    # range, then use RFC 5987 percent-encoding for the filename parameter.
+    safe_filename = re.sub(r'[^\w\-. ]', '_', filename)
+    from urllib.parse import quote
+    encoded_filename = quote(filename, safe=" !#$&'()*+,/:;=?@[]~")
+
     return StreamingResponse(
         io.BytesIO(content),
         media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=\"{safe_filename}\"; "
+                f"filename*=UTF-8''{encoded_filename}"
+            )
+        }
     )

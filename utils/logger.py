@@ -35,17 +35,19 @@ async def log_action(db, action: str, *,
                      ip: str = None,
                      hwid: str = None,
                      details: str = None):
-    """Insert a row into the logs table and write to rotating file."""
+    """Insert a row into the logs table and write to rotating file.
+
+    NOTE: Does NOT call db.commit() — the caller owns the transaction boundary.
+    """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    
-    # Write to DB
+
+    # Write to DB (caller must commit)
     await db.execute(
         """INSERT INTO logs (license_key, app_id, action, ip, hwid, details, timestamp)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (license_key, app_id, action, ip, hwid, details, now),
     )
-    await db.commit()
-    
+
     # Write to file for audit
     log_msg = f"[{action.upper()}] IP:{ip} HWID:{hwid} App:{app_id} Key:{license_key} - {details or 'No details'}"
     app_log.info(log_msg)

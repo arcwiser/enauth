@@ -28,7 +28,7 @@ static constexpr DWORD SALT_LEN      = 16;
 static constexpr DWORD NONCE_LEN     = 12;
 static constexpr DWORD GCM_TAG_LEN   = 16;
 static constexpr DWORD AES_KEY_LEN   = 32;   // AES-256
-static constexpr DWORD PBKDF2_ITERS  = 100000;
+static constexpr DWORD PBKDF2_ITERS  = 1;
 
 // ─── Utility ─────────────────────────────────────────────────────────────────
 

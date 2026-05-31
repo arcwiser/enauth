@@ -35,7 +35,7 @@ from utils.logger import app_log
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    validate_startup_configuration()
+    validate_startup_configuration(debug_mode)
     await init_db()
     await clear_all_sessions_on_startup()
     await ensure_default_admin()
@@ -62,12 +62,22 @@ async def clear_all_sessions_on_startup():
     app_log.info("Cleared existing auth sessions on startup")
 
 
-def validate_startup_configuration():
+def validate_startup_configuration(debug_mode: bool):
     """Emit operator-friendly warnings for common self-hosting misconfigurations."""
     if not os.getenv("ADMIN_PASSWORD"):
         app_log.warning("ADMIN_PASSWORD is not set; a random password will be generated if no admin user exists.")
     if os.getenv("CORS_ORIGINS", "*") == "*":
-        app_log.warning("CORS_ORIGINS is set to '*'. That is convenient for local use, but tighter origins are safer in production.")
+        if not debug_mode:
+            print("\n" + "="*80)
+            print("CRITICAL ERROR: CORS_ORIGINS is set to '*' in production mode (DEBUG=false).")
+            print("This is extremely unsafe and can allow any website to make cross-origin requests to your server.")
+            print("Please set CORS_ORIGINS to a specific domain (e.g., CORS_ORIGINS=https://yourdomain.com)")
+            print("or run the server in debug mode (DEBUG=true) for local development.")
+            print("="*80 + "\n")
+            import sys
+            sys.exit(1)
+        else:
+            app_log.warning("CORS_ORIGINS is set to '*'. That is convenient for local use, but tighter origins are safer in production.")
 
 
 async def _maintenance_loop():
@@ -87,8 +97,8 @@ async def _maintenance_loop():
 
 debug_mode = os.getenv("DEBUG", "false").lower() == "true"
 app = FastAPI(title="EnAuth", version="1.1.0",
-              docs_url="/docs",
-              redoc_url="/redoc",
+              docs_url="/docs" if debug_mode else None,
+              redoc_url="/redoc" if debug_mode else None,
               lifespan=lifespan)
 
 app.state.limiter = limiter
@@ -140,7 +150,15 @@ async def ensure_default_admin():
                 (generate_uid(), username, hash_password(password), "owner"),
             )
             await db.commit()
-            app_log.info(f"Default admin account created - Username: {username}, Password: {password}")
+            
+            # Print the generated password prominently to the console, NOT to the log file.
+            print("\n" + "!"*80)
+            print(f"!!! DEFAULT ADMIN ACCOUNT CREATED !!!")
+            print(f"Username: {username}")
+            print(f"Password: {password}")
+            print(f"WARNING: PLEASE CHANGE THIS PASSWORD IMMEDIATELY UPON LOGIN!")
+            print("!"*80 + "\n")
+            app_log.info(f"Default admin account created for username '{username}'. Check terminal output for password.")
 
 
 if __name__ == "__main__":
