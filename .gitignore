@@ -8,3 +8,5 @@ venv/
 node_modules/
 server.log*
 tests/_*/
+
+*.log*
