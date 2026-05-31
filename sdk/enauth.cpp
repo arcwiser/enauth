@@ -113,6 +113,21 @@ static unsigned char GenerateRuntimeKey() {
     return static_cast<unsigned char>((tsc ^ info[0] ^ info[3]) & 0xFF);
 }
 
+static std::string WideToUtf8(const wchar_t* text) {
+    if (!text || !*text) {
+        return {};
+    }
+
+    const int required = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
+    if (required <= 0) {
+        return {};
+    }
+
+    std::string result(static_cast<size_t>(required - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text, -1, result.data(), required, nullptr, nullptr);
+    return result;
+}
+
 // ─── WinHTTP POST ────────────────────────────────────────────────────────────
 
 std::string Client::Post(const std::string& endpoint, const std::string& body) {
@@ -319,6 +334,14 @@ LoginResult Client::Login(const std::string& license_key,
         result.status     = MessageToStatus(result.message);
         result.token      = JsonGet(dec, OBFUSCATE("token"));
         result.expires_at = JsonGet(dec, OBFUSCATE("expires_at"));
+
+        if (result.message.empty()) {
+            if (!dec.empty()) {
+                result.message = dec;
+            } else if (!result.success) {
+                result.message = OBFUSCATE("EMPTY_RESPONSE");
+            }
+        }
 
         std::string vars_json = JsonGet(dec, OBFUSCATE("variables"));
         if (!vars_json.empty()) {
@@ -580,7 +603,7 @@ void Client::AntiDebug() {
         pe.dwSize = sizeof(pe);
         if (Process32First(hSnap, &pe)) {
             do {
-                std::string name = pe.szExeFile;
+                std::string name = WideToUtf8(pe.szExeFile);
                 for (const auto& dbg : dbgProcs) {
                     if (_stricmp(name.c_str(), dbg.c_str()) == 0) {
                         CloseHandle(hSnap);
@@ -670,4 +693,3 @@ bool Client::IsEmulated() {
 }
 
 } // namespace enauth
-

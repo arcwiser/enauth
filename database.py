@@ -262,7 +262,7 @@ CREATE TABLE IF NOT EXISTS portal_sessions (
 
 CREATE TABLE IF NOT EXISTS device_fingerprints (
     id              TEXT PRIMARY KEY,
-    user_id         TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+    license_id      TEXT NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
     fingerprint    TEXT NOT NULL,
     user_agent      TEXT,
     ip_address      TEXT,
@@ -408,6 +408,23 @@ async def _apply_schema_v2(db: aiosqlite.Connection):
         )
     """)
     await db.execute("CREATE INDEX IF NOT EXISTS idx_temp_2fa_token ON temp_2fa_sessions(token)")
+
+
+async def _apply_schema_v3(db: aiosqlite.Connection):
+    await db.execute("DROP TABLE IF EXISTS device_fingerprints")
+    await db.execute("""
+        CREATE TABLE device_fingerprints (
+            id              TEXT PRIMARY KEY,
+            license_id      TEXT NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+            fingerprint     TEXT NOT NULL,
+            user_agent      TEXT,
+            ip_address      TEXT,
+            last_seen       DATETIME DEFAULT CURRENT_TIMESTAMP,
+            is_suspicious   INTEGER DEFAULT 0
+        )
+    """)
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_device_fingerprints_license ON device_fingerprints(license_id)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_device_fingerprints_fingerprint ON device_fingerprints(fingerprint)")
 
 
 async def run_migrations(db: aiosqlite.Connection):

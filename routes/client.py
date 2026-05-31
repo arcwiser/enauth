@@ -84,13 +84,13 @@ def generate_device_fingerprint(request: Request, hwid: str) -> str:
     return hashlib.sha256(fingerprint_data.encode()).hexdigest()
 
 
-async def check_fingerprint_consistency(db: aiosqlite.Connection, user_id: str, fingerprint: str, ip: str, user_agent: str) -> bool:
+async def check_fingerprint_consistency(db: aiosqlite.Connection, license_id: str, fingerprint: str, ip: str, user_agent: str) -> bool:
     """Check if the fingerprint is consistent with previous logins."""
     # Check if this fingerprint has been seen before for this user
     async with db.execute(
         """SELECT id, is_suspicious FROM device_fingerprints
-           WHERE user_id = ? AND fingerprint = ?""",
-        (user_id, fingerprint)
+           WHERE license_id = ? AND fingerprint = ?""",
+        (license_id, fingerprint)
     ) as cur:
         existing = await cur.fetchone()
     
@@ -107,8 +107,8 @@ async def check_fingerprint_consistency(db: aiosqlite.Connection, user_id: str, 
     # New fingerprint - check if it's suspicious (too many different fingerprints)
     async with db.execute(
         """SELECT COUNT(*) as count FROM device_fingerprints
-           WHERE user_id = ? AND last_seen > datetime('now', '-7 days')""",
-        (user_id,)
+           WHERE license_id = ? AND last_seen > datetime('now', '-7 days')""",
+        (license_id,)
     ) as cur:
         recent_count = (await cur.fetchone())["count"]
     
@@ -116,9 +116,9 @@ async def check_fingerprint_consistency(db: aiosqlite.Connection, user_id: str, 
     
     # Store the new fingerprint
     await db.execute(
-        """INSERT INTO device_fingerprints (id, user_id, fingerprint, user_agent, ip_address, is_suspicious)
+        """INSERT INTO device_fingerprints (id, license_id, fingerprint, user_agent, ip_address, is_suspicious)
            VALUES (?, ?, ?, ?, ?, ?)""",
-        (generate_uid(), user_id, fingerprint, user_agent, ip, 1 if is_suspicious else 0)
+        (generate_uid(), license_id, fingerprint, user_agent, ip, 1 if is_suspicious else 0)
     )
     
     return not is_suspicious
@@ -358,7 +358,7 @@ async def client_login(request: Request, req: EncryptedRequest,
     # ── Device fingerprint consistency check ──
     fingerprint = generate_device_fingerprint(request, hwid)
     user_agent = request.headers.get("User-Agent", "")
-    # Use license ID as user identifier for fingerprint tracking
+    # Use license ID for fingerprint tracking
     fingerprint_ok = await check_fingerprint_consistency(db, lic["id"], fingerprint, ip, user_agent)
     if not fingerprint_ok:
         await log_action(db, "suspicious_fingerprint", license_key=license_key, app_id=app["id"],
