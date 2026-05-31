@@ -1,4 +1,5 @@
 @echo off
+<<<<<<< HEAD
 setlocal EnableExtensions EnableDelayedExpansion
 echo [DEBUG] Script path: %~f0
 echo [DEBUG] Script dir : %~dp0
@@ -45,12 +46,22 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+=======
+setlocal
+cd /d "%~dp0"
+set HOST=127.0.0.1
+set PORT=8080
+set DEBUG=false
+set SSL_CERT=
+set SSL_KEY=
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 
 echo.
 echo ======================================
 echo   EnAuth Server
 echo ======================================
 echo.
+<<<<<<< HEAD
 echo   Admin panel -^> http://127.0.0.1:%PORT%/panel/
 echo.
 
@@ -59,4 +70,11 @@ start "EnAuth Server" cmd /k "cd /d ""%~dp0"" && py -3.12 main.py"
 echo [DEBUG] Server window launched.
 
 popd
+=======
+echo   Admin panel -> https://127.0.0.1:8080/panel/
+echo.
+
+python main.py
+
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 pause

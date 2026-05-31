@@ -2,6 +2,7 @@
 
 /* ─── Design Tokens ────────────────────────────────────────────────────────── */
 :root {
+<<<<<<< HEAD
   --bg:          #04060a;
   --bg-accent:   #0b111b;
   --bg-card:     rgba(13, 18, 29, 0.72);
@@ -10,6 +11,15 @@
   
   --primary:     #5efcff;
   --primary-glow: rgba(94, 252, 255, 0.24);
+=======
+  --bg:          #05070a;
+  --bg-accent:   #0a0d14;
+  --bg-card:     rgba(16, 20, 30, 0.6);
+  --bg-hover:    rgba(255, 255, 255, 0.03);
+  
+  --primary:     #00f2ff;
+  --primary-glow: rgba(0, 242, 255, 0.3);
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
   --secondary:   #7000ff;
   --secondary-glow: rgba(112, 0, 255, 0.3);
   
@@ -38,18 +48,28 @@
   --orange:      #ff9d00;
   --blue:        #3b82f6;
   --orange-dim:  rgba(255, 157, 0, 0.1);
+<<<<<<< HEAD
   --radius:      10px;
+=======
+  --radius:      8px;
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
   
   --border:      rgba(255, 255, 255, 0.08);
   --border-focus: rgba(255, 255, 255, 0.15);
   
   --radius-sm:   8px;
+<<<<<<< HEAD
   --radius-md:   14px;
   --radius-lg:   24px;
   --radius-xl:   30px;
   --glass:       blur(16px) saturate(170%);
   --shadow-lg:   0 24px 70px rgba(0,0,0,0.35);
   --shadow-sm:   0 8px 24px rgba(0,0,0,0.18);
+=======
+  --radius-md:   12px;
+  --radius-lg:   20px;
+  --glass:       blur(12px) saturate(180%);
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 }
 
 :root[data-theme="light"] {
@@ -75,6 +95,7 @@
 /* ─── Base Styles ───────────────────────────────────────────────────────────── */
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+<<<<<<< HEAD
 :focus:not(:focus-visible) {
   outline: none;
 }
@@ -84,19 +105,28 @@
   outline-offset: 2px;
 }
 
+=======
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 body {
   background: var(--bg);
   background-image: 
     radial-gradient(circle at 0% 0%, rgba(0, 242, 255, 0.05) 0%, transparent 40%),
+<<<<<<< HEAD
     radial-gradient(circle at 100% 100%, rgba(112, 0, 255, 0.06) 0%, transparent 40%),
     radial-gradient(circle at 50% 100%, rgba(255, 157, 0, 0.03) 0%, transparent 35%);
+=======
+    radial-gradient(circle at 100% 100%, rgba(112, 0, 255, 0.05) 0%, transparent 40%);
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
   color: var(--text-main);
   font-family: 'Outfit', sans-serif;
   height: 100vh;
   overflow: hidden;
   display: flex;
+<<<<<<< HEAD
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+=======
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 }
 
 body::before {
@@ -120,7 +150,10 @@ body::before {
   display: flex;
   width: 100%;
   height: 100%;
+<<<<<<< HEAD
   position: relative;
+=======
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 }
 
 /* ─── Sidebar ────────────────────────────────────────────────────────────────── */
@@ -132,7 +165,10 @@ body::before {
   flex-direction: column;
   z-index: 100;
   backdrop-filter: var(--glass);
+<<<<<<< HEAD
   box-shadow: inset -1px 0 0 rgba(255,255,255,0.02);
+=======
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 }
 
 .sidebar-logo {
@@ -196,7 +232,11 @@ body::before {
 .nav-item:hover {
   background: var(--bg-hover);
   color: var(--text-main);
+<<<<<<< HEAD
   transform: translateX(5px);
+=======
+  transform: translateX(4px);
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 }
 
 .nav-item.active {
@@ -269,35 +309,53 @@ body::before {
   flex-direction: column;
   background: transparent;
   overflow: hidden;
+<<<<<<< HEAD
   min-width: 0;
 }
 
 .topbar {
   min-height: 72px;
+=======
+}
+
+.topbar {
+  height: 70px;
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
   padding: 0 40px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid var(--border);
   backdrop-filter: var(--glass);
+<<<<<<< HEAD
   background: rgba(4, 6, 10, 0.28);
   position: sticky;
   top: 0;
   z-index: 20;
+=======
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 }
 
 .topbar-title {
   font-size: 18px;
   font-weight: 600;
   color: var(--text-main);
+<<<<<<< HEAD
   letter-spacing: -0.02em;
+=======
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 }
 
 .content {
   flex: 1;
+<<<<<<< HEAD
   padding: 32px 40px 40px;
   overflow-y: auto;
   scrollbar-gutter: stable;
+=======
+  padding: 40px;
+  overflow-y: auto;
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 }
 
 /* ─── Cards & Containers ─────────────────────────────────────────────────────── */
@@ -305,6 +363,7 @@ body::before {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
+<<<<<<< HEAD
   padding: 28px;
   backdrop-filter: var(--glass);
   box-shadow: var(--shadow-sm);
@@ -320,6 +379,12 @@ body::before {
   border-radius: inherit;
   pointer-events: none;
   background: linear-gradient(135deg, rgba(255,255,255,0.05), transparent 40%);
+=======
+  padding: 30px;
+  backdrop-filter: var(--glass);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+  margin-bottom: 24px;
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 }
 
 .card-header {
@@ -327,10 +392,16 @@ body::before {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 24px;
+<<<<<<< HEAD
   gap: 16px;
 }
 
 .card-title { font-size: 16px; font-weight: 650; letter-spacing: -0.01em; }
+=======
+}
+
+.card-title { font-size: 16px; font-weight: 600; }
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 
 /* ─── Stats Grid ─────────────────────────────────────────────────────────────── */
 .stats-grid {
@@ -350,11 +421,15 @@ body::before {
   gap: 16px;
   transition: all 0.3s ease;
   position: relative;
+<<<<<<< HEAD
   overflow: hidden;
+=======
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 }
 
 .stat-card:hover {
   transform: translateY(-5px);
+<<<<<<< HEAD
   border-color: rgba(94, 252, 255, 0.3);
   box-shadow: var(--shadow-lg);
 }
@@ -365,6 +440,10 @@ body::before {
   inset: 0;
   background: linear-gradient(135deg, rgba(255,255,255,0.06), transparent 45%);
   pointer-events: none;
+=======
+  border-color: var(--primary-glow);
+  box-shadow: 0 15px 40px rgba(0,0,0,0.3);
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 }
 
 .stat-icon {
@@ -432,6 +511,7 @@ tr:hover td { background: var(--bg-hover); color: var(--text-main); }
   gap: 8px;
   font-family: inherit;
   text-decoration: none;
+<<<<<<< HEAD
   position: relative;
 }
 
@@ -442,6 +522,17 @@ tr:hover td { background: var(--bg-hover); color: var(--text-main); }
 }
 
 .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 12px 30px rgba(94, 252, 255, 0.28); }
+=======
+}
+
+.btn-primary {
+  background: var(--primary);
+  color: #000;
+  box-shadow: 0 5px 15px var(--primary-glow);
+}
+
+.btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 25px var(--primary-glow); }
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 
 .btn-danger {
   background: rgba(255, 62, 62, 0.1);
@@ -485,7 +576,11 @@ tr:hover td { background: var(--bg-hover); color: var(--text-main); }
   color: var(--text-main);
 }
 
+<<<<<<< HEAD
 .btn-outline:hover { background: var(--bg-hover); border-color: rgba(94, 252, 255, 0.22); }
+=======
+.btn-outline:hover { background: var(--bg-hover); border-color: var(--text-muted); }
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 
 .btn-ghost {
   background: transparent;
@@ -567,7 +662,11 @@ tr:hover td { background: var(--bg-hover); color: var(--text-main); }
 .input:focus, .select:focus {
   outline: none;
   border-color: var(--primary);
+<<<<<<< HEAD
   box-shadow: 0 0 0 4px var(--primary-glow);
+=======
+  box-shadow: 0 0 0 3px var(--primary-glow);
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 }
 
 /* ─── Modals ────────────────────────────────────────────────────────────────── */
@@ -599,7 +698,10 @@ tr:hover td { background: var(--bg-hover); color: var(--text-main); }
   display: flex;
   flex-direction: column;
   max-height: 85vh; /* Keep within viewport height */
+<<<<<<< HEAD
   box-shadow: var(--shadow-lg);
+=======
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 }
 
 .modal-overlay.open .modal { transform: translateY(0); }
@@ -654,21 +756,33 @@ tr:hover td { background: var(--bg-hover); color: var(--text-main); }
   display: flex;
   align-items: center;
   justify-content: center;
+<<<<<<< HEAD
   background:
     radial-gradient(circle at top, rgba(0, 242, 255, 0.12), transparent 30%),
     radial-gradient(circle at bottom right, rgba(112, 0, 255, 0.10), transparent 26%),
     linear-gradient(180deg, #04060a 0%, #060913 62%, #04060a 100%);
+=======
+  background: radial-gradient(circle at center, #0c121d 0%, #05070a 100%);
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 }
 
 .login-box {
   width: 100%;
+<<<<<<< HEAD
   max-width: 460px;
+=======
+  max-width: 420px;
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 40px;
   backdrop-filter: var(--glass);
+<<<<<<< HEAD
   box-shadow: var(--shadow-lg);
+=======
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
   animation: fadeIn 0.6s ease-out;
 }
 
@@ -782,6 +896,7 @@ tr:hover td { background: var(--bg-hover); color: var(--text-main); }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
+<<<<<<< HEAD
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -793,6 +908,8 @@ tr:hover td { background: var(--bg-hover); color: var(--text-main); }
   }
 }
 
+=======
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 .empty {
   padding: 60px;
   text-align: center;
@@ -800,9 +917,12 @@ tr:hover td { background: var(--bg-hover); color: var(--text-main); }
   flex-direction: column;
   align-items: center;
   gap: 12px;
+<<<<<<< HEAD
   border: 1px dashed var(--border);
   border-radius: var(--radius-lg);
   background: rgba(255,255,255,0.02);
+=======
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 }
 
 .empty-icon { font-size: 48px; opacity: 0.3; }
@@ -909,8 +1029,13 @@ tr:hover td { background: var(--bg-hover); color: var(--text-main); }
 
 /* ─── Topbar Badge ───────────────────────────────────────────────────────── */
 .topbar-badge {
+<<<<<<< HEAD
   background: rgba(94, 252, 255, 0.08);
   border: 1px solid rgba(94, 252, 255, 0.16);
+=======
+  background: rgba(0, 242, 255, 0.08);
+  border: 1px solid rgba(0, 242, 255, 0.15);
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
   border-radius: var(--radius-sm);
   padding: 6px 14px;
   font-size: 12px;
@@ -918,6 +1043,7 @@ tr:hover td { background: var(--bg-hover); color: var(--text-main); }
   color: var(--primary);
 }
 
+<<<<<<< HEAD
 .page-hero {
   background: var(--bg-hero);
   border: 1px solid rgba(94, 252, 255, 0.14);
@@ -983,6 +1109,8 @@ tr:hover td { background: var(--bg-hover); color: var(--text-main); }
   transform: translateY(-2px);
 }
 
+=======
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 /* ─── Button icon variant ────────────────────────────────────────────────── */
 .btn-icon {
   padding: 6px;
@@ -1021,6 +1149,7 @@ tr:hover td { background: var(--bg-hover); color: var(--text-main); }
   .content {
     padding-top: 24px;
   }
+<<<<<<< HEAD
 
   .page-hero__inner {
     flex-direction: column;
@@ -1071,4 +1200,6 @@ tr:hover td { background: var(--bg-hover); color: var(--text-main); }
   .modal {
     max-width: calc(100vw - 24px);
   }
+=======
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 }

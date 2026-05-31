@@ -6,7 +6,10 @@ __pycache__/
 *.pem
 venv/
 node_modules/
+<<<<<<< HEAD
 server.log*
 tests/_*/
 
 *.log*
+=======
+>>>>>>> 41cd6f0 (auto deploy clean auth system)

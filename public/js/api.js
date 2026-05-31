@@ -1,4 +1,5 @@
 // ─── API Base ─────────────────────────────────────────────────────────────────
+<<<<<<< HEAD
 const BASE = (() => {
   const origin = window.location.origin || "";
   if (origin && origin !== "null") return "";
@@ -37,11 +38,27 @@ async function setTheme(theme, syncServer = true) {
   } catch (err) {
     console.error("Failed to sync theme with server:", err);
   }
+=======
+const BASE = "";
+
+function getToken() { return localStorage.getItem("enauth_token"); }
+function getUser()  { return JSON.parse(localStorage.getItem("enauth_user") || "{}"); }
+function getResellerToken() { return localStorage.getItem("enauth_reseller_token"); }
+function getTheme() { return localStorage.getItem("enauth_theme") || "dark"; }
+function setTheme(theme) {
+  const next = theme === "light" ? "light" : "dark";
+  localStorage.setItem("enauth_theme", next);
+  document.documentElement.setAttribute("data-theme", next);
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 }
 function toggleTheme() {
   setTheme(getTheme() === "dark" ? "light" : "dark");
 }
+<<<<<<< HEAD
 setTheme(getTheme(), false);
+=======
+setTheme(getTheme());
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
 
 function requireAuth() {
   if (!getToken()) { window.location.href = "/panel/index.html"; }
@@ -126,6 +143,7 @@ const API = {
   unbanLicense:  (id)  => api("POST", `/api/admin/licenses/${encodeURIComponent(id)}/unban`),
   resetHwid:     (id)  => api("POST", `/api/admin/licenses/${encodeURIComponent(id)}/reset-hwid`),
   extendLicense: (b)   => api("POST", "/api/admin/licenses/extend", b),
+<<<<<<< HEAD
 
   // Password Reset
   requestPasswordReset: (username) => api("POST", "/api/admin/auth/password-reset/request", { username }),
@@ -139,6 +157,8 @@ const API = {
 
   // Reseller Analytics
   getResellerAnalytics: (resellerId) => apiWithToken(getResellerToken(), "GET", `/api/admin/resellers/${encodeURIComponent(resellerId)}/analytics`),
+=======
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
   bulkDeleteLicenses:(ids)=> api("POST", "/api/admin/licenses/bulk-delete", { ids }),
   bulkBanLicenses: (ids) => api("POST", "/api/admin/licenses/bulk-ban", { ids }),
   bulkUnbanLicenses:(ids)=> api("POST", "/api/admin/licenses/bulk-unban", { ids }),
@@ -374,7 +394,10 @@ function buildSidebar(activePage) {
     { href: "logs.html",      icon: "📋", label: "Logs",        page: "logs"      },
     { href: "audit.html",     icon: "🔎", label: "Audit",       page: "audit"     },
     { href: "users.html",     icon: "👥", label: "Users",       page: "users",     ownerOnly: true },
+<<<<<<< HEAD
     { href: "api-keys.html",  icon: "🔐", label: "API Keys",    page: "api-keys"  },
+=======
+>>>>>>> 41cd6f0 (auto deploy clean auth system)
     { href: "settings.html",  icon: "⚙️", label: "Settings",   page: "settings"  },
   ].filter(n => !n.ownerOnly || isOwner);
 

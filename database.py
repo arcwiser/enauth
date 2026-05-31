@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS admin_users (
     id            TEXT PRIMARY KEY,
     username      TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
+    email         TEXT,
     role          TEXT NOT NULL DEFAULT 'admin',
     theme         TEXT DEFAULT 'dark',
     created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -460,8 +461,6 @@ async def run_migrations(db: aiosqlite.Connection):
     await db.execute("CREATE INDEX IF NOT EXISTS idx_resellers_owner ON resellers(owner_user_id)")
     await db.execute("CREATE INDEX IF NOT EXISTS idx_temp_2fa_token ON temp_2fa_sessions(token)")
     await db.commit()
-
-
 async def get_db():
     db = await aiosqlite.connect(DB_PATH)
     db.row_factory = aiosqlite.Row
