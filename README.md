@@ -81,6 +81,26 @@ If you just want to test the project locally:
 python main.py
 ```
 
+## Ubuntu VPS installation
+
+On Ubuntu 22.04 or newer, clone the repository and run the included installer
+from the repository root:
+
+```bash
+chmod +x deploy/install_ubuntu.sh
+sudo ./deploy/install_ubuntu.sh
+```
+
+The installer adds Docker and Compose when missing, creates a locked-down
+`.env`, generates a cryptographically random license-key pepper and admin
+password, starts the service, and waits for the health check. The database and
+logs remain in the persistent `data` directory.
+
+The application listens on port 8080. Place Nginx, Caddy, or another HTTPS
+reverse proxy in front of it before public use; an Nginx starting point is
+provided at `deploy/nginx.conf.example`. Set `CORS_ORIGINS` to the exact public
+HTTPS origin and keep `COOKIE_SECURE=true` in production.
+
 Then open:
 
 ```text

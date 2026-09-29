@@ -1,6 +1,8 @@
 # EnAuth C++ SDK
 
-Windows C++17 client SDK for EnAuth authentication and licensing system.
+Windows C++17 client SDK for EnAuth authentication and licensing system. The
+EnAuth server can run on an Ubuntu VPS; the Windows client connects to its
+public HTTPS URL.
 
 ## Requirements
 
@@ -181,6 +183,31 @@ if (!result.success) {
 The client is not thread-safe. Use synchronization if accessing from multiple threads, or create separate client instances per thread.
 
 ## Building
+
+### Ready-to-run example
+
+The `example` directory contains a console client and a Windows bootstrapper.
+It detects CMake and the Visual Studio C++ Build Tools, installs either through
+Windows Package Manager when missing, and builds the SDK example.
+
+```powershell
+cd sdk\example
+.\build.bat
+
+$env:ENAUTH_SERVER_URL = "https://auth.example.com"
+$env:ENAUTH_APP_ID = "your-app-id"
+$env:ENAUTH_APP_SECRET = "your-app-secret"
+$env:ENAUTH_APP_VERSION = "1.0.0"
+.\build\Release\enauth-example.exe
+```
+
+The program prompts for the license key so it is not stored in source code or
+shell history. For automated test environments only, it can also read
+`ENAUTH_LICENSE_KEY`. Optional product checks use `ENAUTH_PRODUCT_ID` and
+`ENAUTH_PRODUCT_LEVEL`.
+
+Run `bootstrap.ps1 -SkipInstall` when dependency installation is managed by
+your organization and the script should fail instead of installing tools.
 
 ### Using Visual Studio
 
