@@ -17,7 +17,7 @@ from cryptography.hazmat.backends import default_backend
 # PBKDF2-SHA256 with a per-request random salt.
 # The salt is prepended to the ciphertext so the server can re-derive the key.
 
-_PBKDF2_ITERATIONS = 1
+_PBKDF2_ITERATIONS = 100_000
 _SALT_LEN          = 16   # bytes
 _NONCE_LEN         = 12   # bytes — standard for AES-GCM
 
@@ -96,6 +96,29 @@ def generate_license_key() -> str:
     chars = string.ascii_uppercase + string.digits
     groups = ["".join(secrets.choice(chars) for _ in range(6)) for _ in range(6)]
     return "-".join(groups)
+
+
+def normalize_license_key(value: str) -> str:
+    return value.strip().upper()
+
+
+def hash_license_key(value: str) -> str:
+    """Return a deterministic, server-peppered lookup hash for a license."""
+    pepper = os.getenv("LICENSE_KEY_PEPPER", "")
+    if not pepper:
+        raise RuntimeError("LICENSE_KEY_PEPPER is required")
+    return hmaclib.new(
+        pepper.encode("utf-8"),
+        normalize_license_key(value).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def mask_license_key(value: str) -> str:
+    normalized = normalize_license_key(value)
+    if len(normalized) <= 12:
+        return normalized[:4] + "…"
+    return f"{normalized[:8]}…{normalized[-4:]}"
 
 
 def generate_app_secret() -> str:

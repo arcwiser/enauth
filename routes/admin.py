@@ -5,13 +5,14 @@ import io
 import os
 from datetime import datetime, timezone, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Header, File, UploadFile, Form, Request
+from fastapi import APIRouter, Depends, HTTPException, Header, File, UploadFile, Form, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Optional
 import aiosqlite
 import re
 import secrets
+import hashlib
 import pyotp
 
 from database import get_db
@@ -20,6 +21,7 @@ from utils.crypto import (
     generate_license_key, generate_app_secret,
     generate_session_token, generate_uid,
     hash_password, verify_password,
+    hash_license_key, mask_license_key,
 )
 from utils.logger import app_log, log_action
 
@@ -28,6 +30,8 @@ ADMIN_SESSION_HOURS = int(os.getenv("ADMIN_SESSION_HOURS", "8"))
 MAX_PAGE_SIZE = int(os.getenv("MAX_PAGE_SIZE", "200"))
 TEMP_2FA_TTL_MINUTES = int(os.getenv("TEMP_2FA_TTL_MINUTES", "5"))
 TEMP_2FA_SWEEP_SECONDS = int(os.getenv("TEMP_2FA_SWEEP_SECONDS", "60"))
+ADMIN_COOKIE_NAME = "enauth_admin_session"
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -87,11 +91,14 @@ def validate_password_policy(password: str):
         raise HTTPException(400, "Password must include at least one special character")
 
 
-async def require_admin(authorization: Optional[str] = Header(None),
+async def require_admin(request: Request,
+                        authorization: Optional[str] = Header(None),
                         db: aiosqlite.Connection = Depends(get_db)):
-    if not authorization or not authorization.startswith("Bearer "):
+    token = request.cookies.get(ADMIN_COOKIE_NAME)
+    if not token and authorization and authorization.startswith("Bearer "):
+        token = authorization[7:]
+    if not token:
         raise HTTPException(401, "Unauthorized")
-    token = authorization[7:]
 
     async with db.execute(
         """SELECT au.* FROM admin_sessions s
@@ -139,24 +146,35 @@ async def require_api_key(x_api_key: Optional[str] = Header(None),
     if not x_api_key:
         raise HTTPException(401, "Missing API key")
 
-    # Derive a cheap lookup hash from the first 16 chars of the key.
-    # We store this in-memory and use it to filter DB rows before bcrypt.
-    prefix_hash = hashlib.sha256(x_api_key[:16].encode()).hexdigest() if len(x_api_key) >= 16 else None
+    if len(x_api_key) < 32 or not x_api_key.startswith("enauth_"):
+        raise HTTPException(401, "Invalid API key")
+    key_prefix = x_api_key[:20]
+    deterministic_hash = hashlib.sha256(x_api_key.encode("utf-8")).hexdigest()
 
     async with db.execute(
         """SELECT ak.*, au.username, au.role
            FROM api_keys ak
            JOIN admin_users au ON ak.user_id = au.id
-           WHERE ak.is_active = 1
+           WHERE ak.is_active = 1 AND (ak.key_prefix = ? OR ak.key_prefix IS NULL)
            ORDER BY ak.created_at DESC""",
+        (key_prefix,),
     ) as cur:
         keys = await cur.fetchall()
 
     key = None
     for row in keys:
-        # Fast path: only bcrypt-verify the plausible candidate(s)
-        if verify_password(x_api_key, row["key_hash"]):
+        stored_hash = row["key_hash"]
+        if secrets.compare_digest(stored_hash, deterministic_hash):
             key = row
+            break
+        # Backward-compatible verification for keys created before deterministic
+        # hashes and prefixes were introduced. Successful use upgrades the row.
+        if stored_hash.startswith("$2") and verify_password(x_api_key, stored_hash):
+            key = row
+            await db.execute(
+                "UPDATE api_keys SET key_hash = ?, key_prefix = ? WHERE id = ?",
+                (deterministic_hash, key_prefix, row["id"]),
+            )
             break
 
     if not key:
@@ -214,9 +232,21 @@ class SignupBody(BaseModel):
     username: str
     password: str
 
+
+def set_admin_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        ADMIN_COOKIE_NAME,
+        token,
+        max_age=ADMIN_SESSION_HOURS * 3600,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="strict",
+        path="/",
+    )
+
 @router.post("/auth/login")
 @limiter.limit("8/minute")
-async def admin_login(request: Request = None, body: LoginBody = None, db: aiosqlite.Connection = Depends(get_db)):
+async def admin_login(response: Response, request: Request = None, body: LoginBody = None, db: aiosqlite.Connection = Depends(get_db)):
     if body is None:
         raise HTTPException(400, "Invalid request")
     async with db.execute("SELECT * FROM admin_users WHERE username = ?", (body.username,)) as cur:
@@ -241,14 +271,16 @@ async def admin_login(request: Request = None, body: LoginBody = None, db: aiosq
         (generate_uid(), user["id"], token, future_hours(ADMIN_SESSION_HOURS)),
     )
     await db.commit()
-    return {"token": token, "username": user["username"], "role": user["role"]}
+    set_admin_cookie(response, token)
+    return {"username": user["username"], "role": user["role"]}
 
 
 @router.post("/auth/logout")
-async def admin_logout(user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
+async def admin_logout(response: Response, user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
     await db.execute("DELETE FROM admin_sessions WHERE user_id = ?", (user["id"],))
     await db.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user["id"],))
     await db.commit()
+    response.delete_cookie(ADMIN_COOKIE_NAME, path="/", secure=COOKIE_SECURE, samesite="strict")
     return {"ok": True}
 
 
@@ -295,7 +327,8 @@ async def auth_signup(request: Request = None, body: SignupBody = None, db: aios
 
 
 @router.post("/auth/signin")
-async def auth_signin(body: LoginBody, db: aiosqlite.Connection = Depends(get_db)):
+@limiter.limit("8/minute")
+async def auth_signin(response: Response, request: Request, body: LoginBody, db: aiosqlite.Connection = Depends(get_db)):
     # Security: check both user tables but always return a generic 401 to prevent
     # username enumeration. Never reveal which table or field was wrong.
     async with db.execute("SELECT * FROM auth_users WHERE username = ?", (body.username,)) as cur:
@@ -307,7 +340,8 @@ async def auth_signin(body: LoginBody, db: aiosqlite.Connection = Depends(get_db
             (generate_uid(), auth_user["id"], token, future_hours(ADMIN_SESSION_HOURS)),
         )
         await db.commit()
-        return {"token": token, "username": auth_user["username"], "role": auth_user["role"]}
+        set_admin_cookie(response, token)
+        return {"username": auth_user["username"], "role": auth_user["role"]}
 
     async with db.execute("SELECT * FROM admin_users WHERE username = ?", (body.username,)) as cur:
         admin_user = await cur.fetchone()
@@ -327,7 +361,8 @@ async def auth_signin(body: LoginBody, db: aiosqlite.Connection = Depends(get_db
             (generate_uid(), admin_user["id"], token, future_hours(ADMIN_SESSION_HOURS)),
         )
         await db.commit()
-        return {"token": token, "username": admin_user["username"], "role": admin_user["role"]}
+        set_admin_cookie(response, token)
+        return {"username": admin_user["username"], "role": admin_user["role"]}
 
     raise HTTPException(401, "Invalid credentials")
 
@@ -413,7 +448,7 @@ async def disable_two_factor(request: Request = None, body: TwoFactorEnableBody 
 
 @router.post("/auth/2fa/verify")
 @limiter.limit("10/minute")
-async def verify_two_factor(request: Request = None, body: TwoFactorVerifyBody = None, db: aiosqlite.Connection = Depends(get_db)):
+async def verify_two_factor(response: Response, request: Request = None, body: TwoFactorVerifyBody = None, db: aiosqlite.Connection = Depends(get_db)):
     if body is None:
         raise HTTPException(400, "Invalid request")
     async with db.execute(
@@ -449,8 +484,8 @@ async def verify_two_factor(request: Request = None, body: TwoFactorVerifyBody =
     )
     await db.execute("DELETE FROM temp_2fa_sessions WHERE token = ?", (body.temp_token,))
     await db.commit()
-
-    return {"token": token, "username": user["username"], "role": user["role"]}
+    set_admin_cookie(response, token)
+    return {"username": user["username"], "role": user["role"]}
 
 
 # ─── Product Levels & Pricing ────────────────────────────────────────────────
@@ -1089,8 +1124,8 @@ async def reseller_buy_key(body: ResellerBuyBody, reseller=Depends(require_resel
         license_id = generate_uid()
         license_key = generate_license_key()
         await db.execute(
-            "INSERT INTO licenses (id, key, app_id, max_hwids, expires_at, notes) VALUES (?, ?, ?, ?, ?, ?)",
-            (license_id, license_key, target["app_id"], 1, expires, f"product_id={target['product_id']}"),
+            "INSERT INTO licenses (id, key, key_hash, app_id, max_hwids, expires_at, notes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (license_id, mask_license_key(license_key), hash_license_key(license_key), target["app_id"], 1, expires, f"product_id={target['product_id']}"),
         )
         await db.execute(
             "INSERT OR IGNORE INTO license_products (id, license_id, product_id) VALUES (?, ?, ?)",
@@ -1301,12 +1336,32 @@ async def dashboard(user=Depends(require_admin), db: aiosqlite.Connection = Depe
             (owner_id,),
         ) as cur:
             recent_logs = rows_to_list(await cur.fetchall())
+        async with db.execute(
+            """SELECT strftime('%H', lg.timestamp) AS hour,
+                      SUM(CASE WHEN lg.action = 'login' THEN 1 ELSE 0 END) AS success,
+                      SUM(CASE WHEN lg.action LIKE '%fail%' THEN 1 ELSE 0 END) AS failed
+               FROM logs lg JOIN applications a ON a.id = lg.app_id
+               WHERE lg.timestamp >= datetime('now', '-23 hours') AND a.owner_user_id = ?
+               GROUP BY strftime('%Y-%m-%d %H', lg.timestamp)
+               ORDER BY lg.timestamp""",
+            (owner_id,),
+        ) as cur:
+            traffic = rows_to_list(await cur.fetchall())
     else:
         logins_today = await scalar("SELECT COUNT(*) FROM logs WHERE action='login' AND timestamp >= ?", today)
         async with db.execute(
             "SELECT * FROM logs ORDER BY timestamp DESC LIMIT 10"
         ) as cur:
             recent_logs = rows_to_list(await cur.fetchall())
+        async with db.execute(
+            """SELECT strftime('%H', timestamp) AS hour,
+                      SUM(CASE WHEN action = 'login' THEN 1 ELSE 0 END) AS success,
+                      SUM(CASE WHEN action LIKE '%fail%' THEN 1 ELSE 0 END) AS failed
+               FROM logs WHERE timestamp >= datetime('now', '-23 hours')
+               GROUP BY strftime('%Y-%m-%d %H', timestamp)
+               ORDER BY timestamp"""
+        ) as cur:
+            traffic = rows_to_list(await cur.fetchall())
 
     return {
         "total_licenses":  total_licenses,
@@ -1316,6 +1371,7 @@ async def dashboard(user=Depends(require_admin), db: aiosqlite.Connection = Depe
         "total_apps":      total_apps,
         "logins_today":    logins_today,
         "recent_logs":     recent_logs,
+        "traffic":         traffic,
     }
 
 
@@ -1456,8 +1512,8 @@ async def create_license(body: CreateLicenseBody,
         lid = generate_uid()
         notes = body.notes
         await db.execute(
-            "INSERT INTO licenses (id, key, app_id, max_hwids, expires_at, notes, metadata) VALUES (?,?,?,?,?,?,?)",
-            (lid, key, body.app_id, body.max_hwids, expires, notes, body.metadata),
+            "INSERT INTO licenses (id, key, key_hash, app_id, max_hwids, expires_at, notes, metadata) VALUES (?,?,?,?,?,?,?,?)",
+            (lid, mask_license_key(key), hash_license_key(key), body.app_id, body.max_hwids, expires, notes, body.metadata),
         )
         for pid in unique_pids:
             await db.execute(
@@ -2319,11 +2375,12 @@ async def request_password_reset(request: Request = None, body: PasswordResetReq
 
     user_id = user["id"]
     token = generate_session_token()
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     expires_at = future_hours(1)  # Token valid for 1 hour
 
     await db.execute(
         "INSERT INTO password_reset_tokens (id, user_id, token, expires_at) VALUES (?,?,?,?)",
-        (generate_uid(), user_id, token, expires_at)
+        (generate_uid(), user_id, token_hash, expires_at)
     )
     await db.commit()
 
@@ -2343,7 +2400,7 @@ async def verify_password_reset(request: Request = None, body: PasswordResetVeri
 
     async with db.execute(
         "SELECT id, user_id, expires_at, used_at FROM password_reset_tokens WHERE token = ?",
-        (body.token,)
+        (hashlib.sha256(body.token.encode("utf-8")).hexdigest(),)
     ) as cur:
         reset_token = await cur.fetchone()
 
@@ -2353,7 +2410,8 @@ async def verify_password_reset(request: Request = None, body: PasswordResetVeri
     if reset_token["used_at"]:
         raise HTTPException(400, "Reset token already used")
 
-    if datetime.now(timezone.utc) > datetime.strptime(reset_token["expires_at"], "%Y-%m-%d %H:%M:%S"):
+    expires_at = datetime.strptime(reset_token["expires_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) > expires_at:
         raise HTTPException(400, "Reset token expired")
 
     # Mark token as used
@@ -2414,7 +2472,9 @@ async def create_api_key(body: CreateApiKeyBody, user=Depends(require_admin), db
     import secrets
     # Generate a secure random key
     api_key = f"enauth_{secrets.token_urlsafe(32)}"
-    key_hash = hash_password(api_key)
+    import hashlib
+    key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+    key_prefix = api_key[:20]
 
     expires_at = None
     if body.expires_days:
@@ -2422,9 +2482,9 @@ async def create_api_key(body: CreateApiKeyBody, user=Depends(require_admin), db
 
     key_id = generate_uid()
     await db.execute(
-        """INSERT INTO api_keys (id, user_id, key_hash, name, scopes, expires_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (key_id, user["id"], key_hash, body.name, body.scopes, expires_at)
+        """INSERT INTO api_keys (id, user_id, key_hash, key_prefix, name, scopes, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (key_id, user["id"], key_hash, key_prefix, body.name, body.scopes, expires_at)
     )
     await log_action(db, "api_key_created", details=f"API key created: {body.name}")
     await db.commit()
@@ -2826,8 +2886,8 @@ async def portal_register(request: Request = None, body: PortalRegisterBody = No
 
     license_key = body.license_key.strip().upper()
     async with db.execute(
-        "SELECT * FROM licenses WHERE key = ? AND app_id = ?",
-        (license_key, app_id),
+        "SELECT * FROM licenses WHERE key_hash = ? AND app_id = ?",
+        (hash_license_key(license_key), app_id),
     ) as cur:
         lic = await cur.fetchone()
     if not lic:

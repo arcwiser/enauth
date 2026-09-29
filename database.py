@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS applications (
 CREATE TABLE IF NOT EXISTS licenses (
     id           TEXT PRIMARY KEY,
     key          TEXT NOT NULL UNIQUE,
+    key_hash     TEXT UNIQUE,
     app_id       TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
     status       TEXT NOT NULL DEFAULT 'active',
     created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -62,6 +63,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_heartbeat  DATETIME DEFAULT CURRENT_TIMESTAMP,
     expires_at      DATETIME NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS request_nonces (
+    nonce_hash TEXT PRIMARY KEY,
+    expires_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_request_nonces_expires
+    ON request_nonces(expires_at);
 
 CREATE TABLE IF NOT EXISTS admin_users (
     id            TEXT PRIMARY KEY,
@@ -284,6 +293,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     id          TEXT PRIMARY KEY,
     user_id     TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
     key_hash    TEXT NOT NULL UNIQUE,
+    key_prefix  TEXT,
     name        TEXT NOT NULL,
     scopes      TEXT DEFAULT 'read',
     is_active   INTEGER DEFAULT 1,
@@ -348,6 +358,20 @@ async def _apply_schema_v1(db: aiosqlite.Connection):
         await db.execute("ALTER TABLE licenses ADD COLUMN client_username TEXT")
     if "client_password_hash" not in lic_cols:
         await db.execute("ALTER TABLE licenses ADD COLUMN client_password_hash TEXT")
+    if "key_hash" not in lic_cols:
+        await db.execute("ALTER TABLE licenses ADD COLUMN key_hash TEXT")
+
+    # One-way migration: existing plaintext keys become masked display values.
+    # Operators must back up before upgrading, as documented in the README.
+    from utils.crypto import hash_license_key, mask_license_key
+    async with db.execute("SELECT id, key FROM licenses WHERE key_hash IS NULL") as cur:
+        legacy_licenses = await cur.fetchall()
+    for license_row in legacy_licenses:
+        await db.execute(
+            "UPDATE licenses SET key = ?, key_hash = ? WHERE id = ?",
+            (mask_license_key(license_row["key"]), hash_license_key(license_row["key"]), license_row["id"]),
+        )
+    await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_licenses_key_hash ON licenses(key_hash)")
 
     async with db.execute("PRAGMA table_info(admin_users)") as cur:
         user_cols = [r[1] for r in await cur.fetchall()]
@@ -362,6 +386,7 @@ async def _apply_schema_v1(db: aiosqlite.Connection):
                 id          TEXT PRIMARY KEY,
                 user_id     TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
                 key_hash    TEXT NOT NULL UNIQUE,
+                key_prefix  TEXT,
                 name        TEXT NOT NULL,
                 scopes      TEXT DEFAULT 'read',
                 is_active   INTEGER DEFAULT 1,
@@ -370,6 +395,12 @@ async def _apply_schema_v1(db: aiosqlite.Connection):
                 created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+    else:
+        async with db.execute("PRAGMA table_info(api_keys)") as cur:
+            api_key_cols = [r[1] for r in await cur.fetchall()]
+        if "key_prefix" not in api_key_cols:
+            await db.execute("ALTER TABLE api_keys ADD COLUMN key_prefix TEXT")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(key_prefix)")
 
     async with db.execute("PRAGMA table_info(app_files)") as cur:
         file_cols = [r[1] for r in await cur.fetchall()]
@@ -474,6 +505,7 @@ async def get_db():
 async def init_db():
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA foreign_keys=ON")
         await run_migrations(db)

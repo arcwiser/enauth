@@ -10,6 +10,7 @@ import logging
 import aiosqlite
 import pyotp
 from fastapi import HTTPException
+from fastapi import Response
 
 from utils.crypto import hash_password
 
@@ -37,6 +38,7 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
         os.environ["LOG_BACKUP_COUNT"] = "1"
         os.environ["DEBUG"] = "false"
         os.environ["TEMP_2FA_TTL_MINUTES"] = "5"
+        os.environ["LICENSE_KEY_PEPPER"] = "test-license-pepper-that-is-long-enough"
 
         for name in MODULES_TO_RESET:
             sys.modules.pop(name, None)
@@ -97,7 +99,9 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(row["user_id"], user_id)
             self.assertEqual(row["role"], "owner")
 
+            response = Response()
             result = await self.admin.verify_two_factor.__wrapped__(
+                response=response,
                 body=self.admin.TwoFactorVerifyBody(
                     temp_token=temp_token,
                     code=pyotp.TOTP(secret).now(),
@@ -105,8 +109,10 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
                 db=db,
             )
 
-            self.assertIn("token", result)
             self.assertEqual(result["username"], "admin")
+            cookie = response.headers.get("set-cookie", "")
+            self.assertIn("enauth_admin_session=", cookie)
+            session_token = cookie.split("enauth_admin_session=", 1)[1].split(";", 1)[0]
 
             async with db.execute(
                 "SELECT COUNT(*) FROM temp_2fa_sessions WHERE token = ?",
@@ -117,7 +123,7 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
 
             async with db.execute(
                 "SELECT COUNT(*) FROM admin_sessions WHERE token = ?",
-                (result["token"],),
+                (session_token,),
             ) as cur:
                 sessions = (await cur.fetchone())[0]
             self.assertEqual(sessions, 1)

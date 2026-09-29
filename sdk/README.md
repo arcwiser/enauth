@@ -131,12 +131,19 @@ Check `Status` enum in `enauth.h` for all possible status codes:
 ## Security Features
 
 The SDK includes:
-- AES-256-GCM encryption for all communication
+- Strict operating-system TLS certificate validation
+- HTTPS enforcement for every non-local server
+- Network timeouts and a 4 MiB response limit
+- AES-256-GCM application-layer message protection
 - HMAC-SHA256 signature verification
 - Replay attack protection
 - Runtime string obfuscation
-- Anti-debugging checks
+- Optional anti-debugging checks when `ENAUTH_ENABLE_ANTI_DEBUG` is defined
 - HWID collection and validation
+
+Application secrets compiled into a desktop application can be recovered by a
+determined attacker. Do not treat the SDK as a place to keep a master secret,
+and do not rely on a local license check to protect server-side privileges.
 
 ## HWID Collection
 

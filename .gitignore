@@ -1,15 +1,22 @@
 __pycache__/
-*.pyc
+*.py[cod]
 .env
 *.db
+*.db-*
 *.log
+*.log.*
 *.pem
 venv/
+.venv/
 node_modules/
-<<<<<<< HEAD
-server.log*
+.pytest_cache/
+.test-deps*/
+.test-build/
 tests/_*/
-
-*.log*
-=======
->>>>>>> 41cd6f0 (auto deploy clean auth system)
+build/
+out/
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.user
