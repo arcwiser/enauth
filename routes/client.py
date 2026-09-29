@@ -1,8 +1,6 @@
 import time
 import hashlib
 from datetime import datetime, timezone, timedelta
-from collections import OrderedDict
-from threading import Lock
 
 from fastapi import APIRouter, Request, Depends, HTTPException
 from fastapi.responses import JSONResponse
@@ -17,7 +15,7 @@ from utils.crypto import (
     encrypt_payload, decrypt_payload,
     verify_signature, compute_signature,
     generate_session_token, generate_uid,
-    is_valid_hwid,
+    is_valid_hwid, hash_license_key, mask_license_key,
 )
 from utils.logger import log_action
 
@@ -32,33 +30,20 @@ MAX_LOGIN_STRIKES    = int(os.getenv("MAX_LOGIN_STRIKES", "5"))          # lock 
 NONCE_CACHE_SIZE     = int(os.getenv("NONCE_CACHE_SIZE", "10000"))      # max unique nonces to remember
 NONCE_TTL            = int(os.getenv("NONCE_TTL", "120"))                # seconds to keep a nonce (2× tolerance)
 
-# ─── Nonce Cache (replay protection) ─────────────────────────────────────────
-# Stores (nonce → expiry_ts). Evicts expired entries on each insert.
-_nonce_cache: OrderedDict[str, float] = OrderedDict()
-_nonce_lock  = Lock()
-
-
-def _check_and_store_nonce(nonce: str, now: float) -> bool:
-    """Return True if nonce is fresh (not seen before). Thread-safe."""
-    with _nonce_lock:
-        # Evict expired entries
-        cutoff = now - NONCE_TTL
-        while _nonce_cache:
-            oldest_key, oldest_ts = next(iter(_nonce_cache.items()))
-            if oldest_ts < cutoff:
-                _nonce_cache.popitem(last=False)
-            else:
-                break
-
-        if nonce in _nonce_cache:
-            return False   # replay detected
-
-        # Evict oldest if cache is full
-        if len(_nonce_cache) >= NONCE_CACHE_SIZE:
-            _nonce_cache.popitem(last=False)
-
-        _nonce_cache[nonce] = now
+async def _check_and_store_nonce(db: aiosqlite.Connection, nonce: str, now: float) -> bool:
+    """Atomically persist a nonce so replay checks survive restarts and workers."""
+    nonce_hash = hashlib.sha256(nonce.encode("utf-8")).hexdigest()
+    await db.execute("DELETE FROM request_nonces WHERE expires_at <= ?", (int(now),))
+    try:
+        await db.execute(
+            "INSERT INTO request_nonces(nonce_hash, expires_at) VALUES (?, ?)",
+            (nonce_hash, int(now) + NONCE_TTL),
+        )
+        await db.commit()
         return True
+    except aiosqlite.IntegrityError:
+        await db.rollback()
+        return False
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -72,8 +57,11 @@ class EncryptedRequest(BaseModel):
 
 
 def get_ip(request: Request) -> str:
-    fwd = request.headers.get("X-Forwarded-For")
-    return fwd.split(",")[0].strip() if fwd else (request.client.host or "unknown")
+    if os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true":
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 
 def generate_device_fingerprint(request: Request, hwid: str) -> str:
@@ -148,7 +136,7 @@ async def parse_request(req: EncryptedRequest, db) -> tuple[dict, dict]:
 
     # 2. Nonce check — build a nonce from sig+ts if client didn't send one
     nonce = req.nonce or f"{req.sig[:32]}{req.ts}"
-    if not _check_and_store_nonce(nonce, now):
+    if not await _check_and_store_nonce(db, nonce, now):
         raise HTTPException(400, "REPLAY_ATTACK")
 
     # 3. App lookup
@@ -259,25 +247,25 @@ async def client_login(request: Request, req: EncryptedRequest,
     # ── HWID format validation ──
     # Clients must send a SHA-256 or SHA-512 hex digest — no raw strings
     if not is_valid_hwid(hwid):
-        await log_action(db, "login_fail", license_key=license_key, app_id=app["id"],
+        await log_action(db, "login_fail", license_key=mask_license_key(license_key), app_id=app["id"],
                          ip=ip, hwid=hwid[:32], details="Invalid HWID format")
         return enc_resp({"success": False, "message": "INVALID_HWID_FORMAT"}, secret, req.app_id)
 
     # ── Fetch license ──
     async with db.execute(
-        "SELECT * FROM licenses WHERE key = ? AND app_id = ?", (license_key, app["id"])
+        "SELECT * FROM licenses WHERE key_hash = ? AND app_id = ?", (hash_license_key(license_key), app["id"])
     ) as cur:
         lic = await cur.fetchone()
 
     if not lic:
         # Increment IP-level strike counter to slow down key enumeration
-        await log_action(db, "login_fail", license_key=license_key, app_id=app["id"],
+        await log_action(db, "login_fail", license_key=mask_license_key(license_key), app_id=app["id"],
                          ip=ip, hwid=hwid, details="Key not found")
         return enc_resp({"success": False, "message": "INVALID_KEY"}, secret, req.app_id)
 
     # ── Brute force lockout (5 strikes) ──
     if lic["login_strikes"] >= MAX_LOGIN_STRIKES:
-        await log_action(db, "login_locked", license_key=license_key, app_id=app["id"],
+        await log_action(db, "login_locked", license_key=mask_license_key(license_key), app_id=app["id"],
                          ip=ip, hwid=hwid, details=f"Locked after {MAX_LOGIN_STRIKES} strikes")
         return enc_resp({"success": False, "message": "KEY_LOCKED_STRIKES"}, secret, req.app_id)
 
@@ -312,19 +300,19 @@ async def client_login(request: Request, req: EncryptedRequest,
         # Auto-ban the key linked to this banned hardware
         await db.execute("UPDATE licenses SET status = 'banned' WHERE id = ?", (lic["id"],))
         await db.commit()
-        await log_action(db, "auto_ban", license_key=license_key, app_id=app["id"],
+        await log_action(db, "auto_ban", license_key=mask_license_key(license_key), app_id=app["id"],
                          ip=ip, hwid=hwid,
                          details=f"Auto-banned: linked to banned HWID ({ban_row['reason']})")
         return enc_resp({"success": False, "message": "BANNED_HWID"}, secret, req.app_id)
 
     # ── Status checks ──
     if lic["status"] == "banned":
-        await log_action(db, "login_banned", license_key=license_key, app_id=app["id"],
+        await log_action(db, "login_banned", license_key=mask_license_key(license_key), app_id=app["id"],
                          ip=ip, hwid=hwid)
         return enc_resp({"success": False, "message": "BANNED_KEY"}, secret, req.app_id)
 
     if lic["status"] == "expired" or (lic["expires_at"] and lic["expires_at"] < utcnow()):
-        await log_action(db, "login_expired", license_key=license_key, app_id=app["id"],
+        await log_action(db, "login_expired", license_key=mask_license_key(license_key), app_id=app["id"],
                          ip=ip, hwid=hwid)
         return enc_resp({"success": False, "message": "EXPIRED_KEY"}, secret, req.app_id)
 
@@ -332,7 +320,7 @@ async def client_login(request: Request, req: EncryptedRequest,
     suspicious = False
     if lic["last_ip"] and lic["last_ip"] != ip:
         suspicious = True
-        await log_action(db, "suspicious_login", license_key=license_key, app_id=app["id"],
+        await log_action(db, "suspicious_login", license_key=mask_license_key(license_key), app_id=app["id"],
                          ip=ip, hwid=hwid, details=f"IP changed from {lic['last_ip']}")
 
     # ── HWID check ──
@@ -343,7 +331,7 @@ async def client_login(request: Request, req: EncryptedRequest,
 
     if hwid not in known_hashes:
         if len(known_hashes) >= lic["max_hwids"]:
-            await log_action(db, "login_hwid_limit", license_key=license_key,
+            await log_action(db, "login_hwid_limit", license_key=mask_license_key(license_key),
                              app_id=app["id"], ip=ip, hwid=hwid)
             return enc_resp({"success": False, "message": "MAX_HWIDS"}, secret, req.app_id)
         await db.execute(
@@ -361,7 +349,7 @@ async def client_login(request: Request, req: EncryptedRequest,
     # Use license ID for fingerprint tracking
     fingerprint_ok = await check_fingerprint_consistency(db, lic["id"], fingerprint, ip, user_agent)
     if not fingerprint_ok:
-        await log_action(db, "suspicious_fingerprint", license_key=license_key, app_id=app["id"],
+        await log_action(db, "suspicious_fingerprint", license_key=mask_license_key(license_key), app_id=app["id"],
                          ip=ip, hwid=hwid, details="New device fingerprint detected (multiple devices in short period)")
         # Don't block login, just log it for security monitoring
 
@@ -385,7 +373,7 @@ async def client_login(request: Request, req: EncryptedRequest,
     )
     await db.commit()
 
-    await log_action(db, "login", license_key=license_key, app_id=app["id"],
+    await log_action(db, "login", license_key=mask_license_key(license_key), app_id=app["id"],
                      ip=ip, hwid=hwid, details="Success")
 
     # ── Fetch non-secret variables only ──

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from utils.crypto import compute_signature, decrypt_payload, encrypt_payload
+from utils.crypto import compute_signature, decrypt_payload, encrypt_payload, hash_license_key, mask_license_key
 
 
 MODULES_TO_RESET = [
@@ -51,6 +51,7 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
         os.environ["MAX_LOGIN_STRIKES"] = "5"
         os.environ["NONCE_CACHE_SIZE"] = "10000"
         os.environ["NONCE_TTL"] = "120"
+        os.environ["LICENSE_KEY_PEPPER"] = "test-license-pepper-that-is-long-enough"
 
         for name in MODULES_TO_RESET:
             sys.modules.pop(name, None)
@@ -81,10 +82,10 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
             )
             await db.execute(
                 """
-                INSERT INTO licenses (id, key, app_id, status, max_hwids, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO licenses (id, key, key_hash, app_id, status, max_hwids, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (license_id, license_key, app_id, "active", 2, "2099-12-31 23:59:59"),
+                (license_id, mask_license_key(license_key), hash_license_key(license_key), app_id, "active", 2, "2099-12-31 23:59:59"),
             )
             await db.execute(
                 "INSERT INTO app_files (id, app_id, name, content, is_secret) VALUES (?, ?, ?, ?, ?)",

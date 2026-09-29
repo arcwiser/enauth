@@ -16,6 +16,7 @@ class DatabaseMigrationTests(unittest.IsolatedAsyncioTestCase):
         self.db_path = self.workdir / "enauth.db"
 
         os.environ["DB_PATH"] = str(self.db_path)
+        os.environ["LICENSE_KEY_PEPPER"] = "test-license-pepper-that-is-long-enough"
 
         sys.modules.pop("database", None)
         self.database = importlib.import_module("database")
@@ -40,6 +41,34 @@ class DatabaseMigrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(version, self.database.LATEST_SCHEMA_VERSION)
         self.assertIsNotNone(temp_table)
+
+    async def test_security_migration_hashes_existing_license_keys(self):
+        plaintext_key = "ABCDEF-ABCDEF-ABCDEF-ABCDEF-ABCDEF-ABCDEF"
+        async with self.database.aiosqlite.connect(self.db_path) as db:
+            db.row_factory = self.database.aiosqlite.Row
+            await self.database._apply_schema_v1(db)
+            await self.database._apply_schema_v2(db)
+            await self.database._apply_schema_v3(db)
+            await db.execute(
+                "INSERT INTO applications(id, name, secret_key, version) VALUES (?, ?, ?, ?)",
+                ("app-1", "Test", "s" * 64, "1.0.0"),
+            )
+            await db.execute(
+                "INSERT INTO licenses(id, key, key_hash, app_id) VALUES (?, ?, NULL, ?)",
+                ("lic-1", plaintext_key, "app-1"),
+            )
+            await db.execute("PRAGMA user_version = 3")
+            await db.commit()
+
+        await self.database.init_db()
+
+        async with self.database.aiosqlite.connect(self.db_path) as db:
+            db.row_factory = self.database.aiosqlite.Row
+            async with db.execute("SELECT key, key_hash FROM licenses WHERE id = 'lic-1'") as cur:
+                license_row = await cur.fetchone()
+
+        self.assertNotEqual(license_row["key"], plaintext_key)
+        self.assertEqual(len(license_row["key_hash"]), 64)
 
     async def test_init_db_upgrades_version_1_database(self):
         async with self.database.aiosqlite.connect(self.db_path) as db:

@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   enauth:
     build: .
@@ -12,8 +10,11 @@ services:
       - DEBUG=false
       - DB_PATH=/app/data/enauth.db
       - ADMIN_USERNAME=admin
-      - ADMIN_PASSWORD=
-      - CORS_ORIGINS=*
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
+      - LICENSE_KEY_PEPPER=${LICENSE_KEY_PEPPER:?Set LICENSE_KEY_PEPPER in .env}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:8080}
+      - TRUST_PROXY_HEADERS=${TRUST_PROXY_HEADERS:-false}
+      - COOKIE_SECURE=${COOKIE_SECURE:-false}
       - ADMIN_SESSION_HOURS=8
       - MAX_PAGE_SIZE=200
       - TEMP_2FA_TTL_MINUTES=5
@@ -38,7 +39,7 @@ services:
       - ./data:/app/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8080/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3

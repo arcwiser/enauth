@@ -1,12 +1,11 @@
 // ─── API Base ─────────────────────────────────────────────────────────────────
-<<<<<<< HEAD
 const BASE = (() => {
   const origin = window.location.origin || "";
   if (origin && origin !== "null") return "";
   return localStorage.getItem("enauth_base_url") || "http://127.0.0.1:8080";
 })();
 
-function getToken() { return localStorage.getItem("enauth_token"); }
+function getToken() { return Object.keys(getUser()).length ? "cookie-session" : null; }
 function getUser()  {
   const raw = localStorage.getItem("enauth_user");
   if (!raw) return {};
@@ -19,6 +18,11 @@ function getUser()  {
   }
 }
 function getResellerToken() { return localStorage.getItem("enauth_reseller_token"); }
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>'"]/g, char => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;"
+  })[char]);
+}
 function getTheme() { 
   const user = getUser();
   return user.theme || localStorage.getItem("enauth_theme") || "dark";
@@ -38,27 +42,11 @@ async function setTheme(theme, syncServer = true) {
   } catch (err) {
     console.error("Failed to sync theme with server:", err);
   }
-=======
-const BASE = "";
-
-function getToken() { return localStorage.getItem("enauth_token"); }
-function getUser()  { return JSON.parse(localStorage.getItem("enauth_user") || "{}"); }
-function getResellerToken() { return localStorage.getItem("enauth_reseller_token"); }
-function getTheme() { return localStorage.getItem("enauth_theme") || "dark"; }
-function setTheme(theme) {
-  const next = theme === "light" ? "light" : "dark";
-  localStorage.setItem("enauth_theme", next);
-  document.documentElement.setAttribute("data-theme", next);
->>>>>>> 41cd6f0 (auto deploy clean auth system)
 }
 function toggleTheme() {
   setTheme(getTheme() === "dark" ? "light" : "dark");
 }
-<<<<<<< HEAD
 setTheme(getTheme(), false);
-=======
-setTheme(getTheme());
->>>>>>> 41cd6f0 (auto deploy clean auth system)
 
 function requireAuth() {
   if (!getToken()) { window.location.href = "/panel/index.html"; }
@@ -76,9 +64,9 @@ function requireOwner() {
 async function api(method, path, body = null) {
   const opts = {
     method,
+    credentials: "same-origin",
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${getToken()}`,
     },
   };
   if (body) opts.body = JSON.stringify(body);
@@ -91,7 +79,7 @@ async function api(method, path, body = null) {
   }
 
   if (res.status === 401) {
-    localStorage.clear();
+    localStorage.removeItem("enauth_user");
     window.location.href = "/panel/index.html";
     return;
   }
@@ -143,7 +131,6 @@ const API = {
   unbanLicense:  (id)  => api("POST", `/api/admin/licenses/${encodeURIComponent(id)}/unban`),
   resetHwid:     (id)  => api("POST", `/api/admin/licenses/${encodeURIComponent(id)}/reset-hwid`),
   extendLicense: (b)   => api("POST", "/api/admin/licenses/extend", b),
-<<<<<<< HEAD
 
   // Password Reset
   requestPasswordReset: (username) => api("POST", "/api/admin/auth/password-reset/request", { username }),
@@ -157,8 +144,6 @@ const API = {
 
   // Reseller Analytics
   getResellerAnalytics: (resellerId) => apiWithToken(getResellerToken(), "GET", `/api/admin/resellers/${encodeURIComponent(resellerId)}/analytics`),
-=======
->>>>>>> 41cd6f0 (auto deploy clean auth system)
   bulkDeleteLicenses:(ids)=> api("POST", "/api/admin/licenses/bulk-delete", { ids }),
   bulkBanLicenses: (ids) => api("POST", "/api/admin/licenses/bulk-ban", { ids }),
   bulkUnbanLicenses:(ids)=> api("POST", "/api/admin/licenses/bulk-unban", { ids }),
@@ -377,56 +362,104 @@ function closeModal(id) { document.getElementById(id).classList.remove("open"); 
 
 // ─── Sidebar builder ─────────────────────────────────────────────────────────
 function buildSidebar(activePage) {
-  const user = getUser();
-  const isOwner = user.role === "owner";
-  const nav = [
-    { href: "dashboard.html", icon: "📊", label: "Dashboard",   page: "dashboard" },
-    { href: "apps.html",      icon: "📦", label: "Apps",        page: "apps"      },
-    { href: "panels.html",    icon: "🌐", label: "User Panels", page: "panels"    },
-    { href: "products.html",  icon: "🧩", label: "Levels",      page: "products"  },
-    { href: "licenses.html",  icon: "🔑", label: "Licenses",    page: "licenses"  },
-    { href: "files.html",     icon: "📁", label: "App Files",   page: "files"     },
-    { href: "sessions.html",  icon: "🔗", label: "Sessions",    page: "sessions"  },
-    { href: "bans.html",      icon: "🚫", label: "Bans",        page: "bans"      },
-    { href: "news.html",      icon: "📢", label: "News",        page: "news"      },
-    { href: "variables.html", icon: "🧪", label: "Variables",   page: "variables", ownerOnly: true },
-    { href: "resellers.html", icon: "🤝", label: "Resellers",   page: "resellers" },
-    { href: "logs.html",      icon: "📋", label: "Logs",        page: "logs"      },
-    { href: "audit.html",     icon: "🔎", label: "Audit",       page: "audit"     },
-    { href: "users.html",     icon: "👥", label: "Users",       page: "users",     ownerOnly: true },
-<<<<<<< HEAD
-    { href: "api-keys.html",  icon: "🔐", label: "API Keys",    page: "api-keys"  },
-=======
->>>>>>> 41cd6f0 (auto deploy clean auth system)
-    { href: "settings.html",  icon: "⚙️", label: "Settings",   page: "settings"  },
-  ].filter(n => !n.ownerOnly || isOwner);
-
-  const html = `
-    <div class="sidebar-logo">
-      <div class="logo-icon">E</div>
-      <div class="logo-text">ENAUTH</div>
-    </div>
-    <nav class="sidebar-nav">
-      <div class="nav-section">Navigation</div>
-      ${nav.map(n => `
-        <a class="nav-item ${activePage === n.page ? "active" : ""}" href="${n.href}">
-          <span class="nav-icon">${n.icon}</span> ${n.label}
-        </a>`).join("")}
-    </nav>
-    <div class="sidebar-footer">
-      <div class="sidebar-user">
-        <div class="user-avatar">${(user.username || "?")[0].toUpperCase()}</div>
-        <div class="user-info">
-          <div class="user-name">${user.username || "Admin"}</div>
-          <div class="user-role">${user.role || "admin"}</div>
-        </div>
-      </div>
-      <button class="sidebar-logout" onclick="toggleTheme()">☼ Toggle Theme</button>
-      <button class="sidebar-logout" onclick="doLogout()">⬅ Sign Out</button>
-    </div>`;
-
+  if (!document.getElementById('navigation-styles')) {
+    const stylesheet = document.createElement('link');
+    stylesheet.id = 'navigation-styles';
+    stylesheet.rel = 'stylesheet';
+    stylesheet.href = 'css/navigation.css';
+    document.head.append(stylesheet);
+  }
   const el = document.getElementById("sidebar");
-  if (el) el.innerHTML = html;
+  if (!el) return;
+  const user = getUser();
+  const groups = [
+    ["Workspace", [["dashboard", "Overview", "grid"], ["apps", "Applications", "box"], ["products", "Product levels", "layers"], ["licenses", "Licenses", "key"]]],
+    ["Distribution", [["files", "Files", "file"], ["news", "Announcements", "message"], ["panels", "Customer panels", "window"], ["resellers", "Resellers", "users"]]],
+    ["Security", [["sessions", "Active sessions", "pulse"], ["bans", "Blocklist", "shield"], ["logs", "Event logs", "list"], ["audit", "Audit trail", "search"]]],
+    ["Administration", [["users", "Team members", "users", true], ["api-keys", "API keys", "key"], ["variables", "Variables", "code", true], ["settings", "Settings", "settings"]]]
+  ];
+  const paths = {
+    grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+    box: '<path d="m12 3 9 5v8l-9 5-9-5V8Z M3 8l9 5 9-5 M12 13v8 M7 5.8l9 5"/>',
+    layers: '<path d="m12 3 10 5-10 5L2 8Z M2 12l10 5 10-5 M2 16l10 5 10-5"/>',
+    key: '<circle cx="8" cy="9" r="5"/><path d="m12 13 8 8m-4-4 3-3m-6 0 3-3"/>',
+    file: '<path d="M14 3H5v18h14V8Zm0 0v5h5 M8 13h8 M8 17h5"/>',
+    message: '<path d="M4 4h16v12H9l-5 4Z M8 8h8 M8 12h5"/>',
+    window: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18 M8 9v11"/>',
+    users: '<circle cx="9" cy="8" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3 M16 5a3 3 0 0 1 0 6 M18 15a5 5 0 0 1 3 5"/>',
+    pulse: '<path d="M2 12h5l3-8 4 16 3-8h5"/>',
+    shield: '<path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6Z M8 12h8"/>',
+    list: '<path d="M9 5h12 M9 12h12 M9 19h12 M3 5h1 M3 12h1 M3 19h1"/>',
+    search: '<circle cx="10" cy="10" r="7"/><path d="m15 15 6 6"/>',
+    code: '<path d="m8 6-6 6 6 6 M16 6l6 6-6 6 M14 3l-4 18"/>',
+    settings: '<path d="M3 6h18 M3 12h18 M3 18h18"/><circle cx="8" cy="6" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="8" cy="18" r="2"/>'
+  };
+  const icon = name => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + paths[name] + '</svg>';
+  el.classList.add('workspace-sidebar');
+  el.innerHTML = '<a class="workspace-brand" href="dashboard.html"><span class="brand-mark">e<span>.</span></span><span>enauth<small>CONTROL CENTER</small></span></a>' +
+    '<div class="workspace-label"><span class="workspace-dot"></span> Management console<span class="workspace-tag">PRO</span></div>' +
+    '<label class="nav-search">' + icon('search') + '<input type="search" placeholder="Find a page…" aria-label="Filter navigation" autocomplete="off"><kbd>/</kbd></label>' +
+    '<nav class="workspace-nav" aria-label="Main navigation">' + groups.map(([label, items]) => '<section class="nav-group"><h2>' + label + '</h2>' + items.filter(item => !item[3] || user.role === 'owner').map(([page, label, glyph]) => '<a class="workspace-link' + (page === activePage ? ' is-current' : '') + '" href="' + page + '.html"' + (page === activePage ? ' aria-current="page"' : '') + '>' + icon(glyph) + '<span>' + label + '</span>' + (page === activePage ? '<span class="current-dot"></span>' : '') + '</a>').join('') + '</section>').join('') + '<p class="nav-empty" hidden>No matching pages</p></nav>' +
+    '<footer class="workspace-footer"><div class="workspace-account"><span class="account-avatar"></span><span><strong class="account-name"></strong><small class="account-role"></small></span><a href="settings.html" aria-label="Account settings">' + icon('settings') + '</a></div><div class="workspace-actions"><button type="button" class="theme-action">◐ <span>Appearance</span></button><button type="button" class="signout-action">↗ <span>Sign out</span></button></div></footer>';
+  el.querySelector('.account-name').textContent = user.username || 'Admin';
+  el.querySelector('.account-role').textContent = user.role || 'admin';
+  el.querySelector('.account-avatar').textContent = (user.username || 'A').slice(0, 1).toUpperCase();
+  el.querySelector('.theme-action').onclick = toggleTheme;
+  el.querySelector('.signout-action').onclick = doLogout;
+  const input = el.querySelector('input');
+  input.oninput = () => {
+    let visible = 0;
+    el.querySelectorAll('.nav-group').forEach(group => {
+      let count = 0;
+      group.querySelectorAll('a').forEach(link => {
+        link.hidden = !link.textContent.toLowerCase().includes(input.value.trim().toLowerCase());
+        if (!link.hidden) count++;
+      });
+      group.hidden = count === 0;
+      visible += count;
+    });
+    el.querySelector('.nav-empty').hidden = visible !== 0;
+  };
+  document.querySelector('.menu-trigger')?.remove();
+  document.querySelector('.menu-backdrop')?.remove();
+  const trigger = document.createElement('button');
+  trigger.className = 'menu-trigger';
+  trigger.type = 'button';
+  trigger.textContent = '☰';
+  trigger.setAttribute('aria-label', 'Open navigation');
+  trigger.setAttribute('aria-controls', 'sidebar');
+  trigger.setAttribute('aria-expanded', 'false');
+  document.querySelector('.topbar')?.prepend(trigger);
+  const backdrop = document.createElement('button');
+  backdrop.className = 'menu-backdrop';
+  backdrop.setAttribute('aria-label', 'Close navigation');
+  backdrop.tabIndex = -1;
+  document.body.append(backdrop);
+  const mobile = window.matchMedia('(max-width: 900px)');
+  const setOpen = open => {
+    document.body.classList.toggle('navigation-open', open);
+    trigger.setAttribute('aria-expanded', String(open));
+    trigger.setAttribute('aria-label', open ? 'Close navigation' : 'Open navigation');
+    el.inert = mobile.matches && !open;
+    if (open) input.focus(); else trigger.focus();
+  };
+  el.inert = mobile.matches;
+  mobile.addEventListener('change', () => { el.inert = mobile.matches && !document.body.classList.contains('navigation-open'); });
+  trigger.onclick = () => setOpen(!document.body.classList.contains('navigation-open'));
+  backdrop.onclick = () => setOpen(false);
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && document.body.classList.contains('navigation-open')) setOpen(false);
+    if (event.key === '/' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.target.matches('input,textarea,select,[contenteditable="true"]')) {
+      event.preventDefault();
+      if (mobile.matches) setOpen(true); else input.focus();
+    }
+    if (event.key === 'Tab' && mobile.matches && document.body.classList.contains('navigation-open')) {
+      const elements = [...el.querySelectorAll('a,button,input')].filter(node => node.getClientRects().length);
+      const first = elements[0], last = elements[elements.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+  });
 }
 
 async function doLogout() {

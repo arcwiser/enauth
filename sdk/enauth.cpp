@@ -11,6 +11,8 @@
 #include <stdexcept>
 #include <thread>
 #include <winternl.h>
+#include <algorithm>
+#include <cwctype>
 
 #pragma comment(lib, "ntdll.lib")
 
@@ -148,44 +150,71 @@ std::string Client::Post(const std::string& endpoint, const std::string& body) {
         throw std::runtime_error(OBFUSCATE("Invalid URL"));
 
     bool https = (comps.nScheme == INTERNET_SCHEME_HTTPS);
+    std::wstring host(wHost, comps.dwHostNameLength);
+    std::transform(host.begin(), host.end(), host.begin(), ::towlower);
+    const bool localhost = host == L"localhost" || host == L"127.0.0.1" || host == L"::1";
+    if (!https && !localhost)
+        throw std::runtime_error(OBFUSCATE("HTTPS is required for non-local EnAuth servers"));
+
     HINTERNET hSession = WinHttpOpen(W_OBFUSCATE(L"EnAuth/1.0").c_str(),
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) throw std::runtime_error(OBFUSCATE("WinHttpOpen failed"));
 
+    WinHttpSetTimeouts(hSession, 10000, 10000, 10000, 15000);
+
     HINTERNET hConnect = WinHttpConnect(hSession, wHost, comps.nPort, 0);
+    if (!hConnect) {
+        WinHttpCloseHandle(hSession);
+        throw std::runtime_error(OBFUSCATE("WinHttpConnect failed"));
+    }
     HINTERNET hReq     = WinHttpOpenRequest(hConnect, W_OBFUSCATE(L"POST").c_str(), wPath,
         nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         https ? WINHTTP_FLAG_SECURE : 0);
-
-    if (https) {
-        DWORD flags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
-                      SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE |
-                      SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
-                      SECURITY_FLAG_IGNORE_CERT_DATE_INVALID;
-        WinHttpSetOption(hReq, WINHTTP_OPTION_SECURITY_FLAGS, &flags, sizeof(flags));
+    if (!hReq) {
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        throw std::runtime_error(OBFUSCATE("WinHttpOpenRequest failed"));
     }
 
+#ifdef ENAUTH_ENABLE_ANTI_DEBUG
     SecurityCheck();
+#endif
 
     LPCWSTR hdrs = L"Content-Type: application/json";
     std::string response;
-    if (WinHttpSendRequest(hReq, hdrs, (DWORD)-1,
+    bool requestOk = WinHttpSendRequest(hReq, hdrs, (DWORD)-1,
                            (LPVOID)body.c_str(), (DWORD)body.size(),
                            (DWORD)body.size(), 0) &&
-        WinHttpReceiveResponse(hReq, nullptr))
-    {
+        WinHttpReceiveResponse(hReq, nullptr);
+    if (requestOk) {
+        DWORD statusCode = 0;
+        DWORD statusSize = sizeof(statusCode);
+        WinHttpQueryHeaders(hReq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize,
+                            WINHTTP_NO_HEADER_INDEX);
         DWORD avail = 0;
         while (WinHttpQueryDataAvailable(hReq, &avail) && avail > 0) {
+            if (response.size() + avail > 4 * 1024 * 1024) {
+                WinHttpCloseHandle(hReq);
+                WinHttpCloseHandle(hConnect);
+                WinHttpCloseHandle(hSession);
+                throw std::runtime_error(OBFUSCATE("Server response exceeded 4 MiB"));
+            }
             std::string chunk(avail, '\0');
             DWORD read = 0;
-            WinHttpReadData(hReq, &chunk[0], avail, &read);
+            if (!WinHttpReadData(hReq, &chunk[0], avail, &read)) break;
             response.append(chunk.data(), read);
+        }
+        if (statusCode < 200 || statusCode >= 300) {
+            response.clear();
         }
     }
 
     WinHttpCloseHandle(hReq);
     WinHttpCloseHandle(hConnect);
     WinHttpCloseHandle(hSession);
+    if (!requestOk || response.empty())
+        throw std::runtime_error(OBFUSCATE("EnAuth request failed"));
     return response;
 }
 
@@ -258,8 +287,10 @@ Client::Client(const std::string& server_url, const std::string& app_id,
     EncryptStore(m_enc_app_secret, app_secret);
     EncryptStore(m_enc_version,    version);
     
+#ifdef ENAUTH_ENABLE_ANTI_DEBUG
     SecurityCheck();
     HideThread();
+#endif
 }
 
 void Client::EncryptStore(std::vector<unsigned char>& target, const std::string& source) {
@@ -603,7 +634,11 @@ void Client::AntiDebug() {
         pe.dwSize = sizeof(pe);
         if (Process32First(hSnap, &pe)) {
             do {
+#ifdef UNICODE
                 std::string name = WideToUtf8(pe.szExeFile);
+#else
+                std::string name = pe.szExeFile;
+#endif
                 for (const auto& dbg : dbgProcs) {
                     if (_stricmp(name.c_str(), dbg.c_str()) == 0) {
                         CloseHandle(hSnap);

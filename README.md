@@ -10,8 +10,8 @@ A comprehensive authentication and licensing system with support for license key
 - **Reseller System**: Built-in reseller management with balance and pricing controls
 - **Admin Panel**: Full-featured web interface for managing all aspects of the system
 - **Two-Factor Authentication**: TOTP-based 2FA for admin accounts
-- **Security**: AES-256-GCM encryption, HMAC signatures, rate limiting, and replay protection
-- **C++ SDK**: Client SDK for Windows applications with anti-debugging features
+- **Security**: Hashed license storage, secure dashboard cookies, rate limiting, durable replay protection, and audit logging
+- **C++ SDK**: C++17 Windows SDK with strict TLS validation, timeouts, and response limits
 - **Audit Logging**: Comprehensive logging of all actions
 
 ## Installation
@@ -69,8 +69,9 @@ Before starting the server for the first time:
 1. Copy `.env.example` to `.env`.
 2. Set `HOST`, `PORT`, and `DB_PATH` if you want custom values.
 3. Set `ADMIN_USERNAME` and `ADMIN_PASSWORD` if you want a known initial admin login.
-4. If you do not set `ADMIN_PASSWORD`, the server will generate one on first startup and log it.
-5. Decide whether you want to run behind HTTPS directly or behind a reverse proxy like Nginx or Caddy.
+4. Generate and set a stable `LICENSE_KEY_PEPPER` containing at least 32 random characters. Back it up separately; losing it makes existing keys unverifiable.
+5. If you do not set `ADMIN_PASSWORD`, the server generates one on first startup and prints it once to the terminal.
+6. Use HTTPS directly or place the service behind a trusted reverse proxy. Set `COOKIE_SECURE=true` when the public URL is HTTPS.
 
 ### Local Development Run
 
@@ -79,6 +80,26 @@ If you just want to test the project locally:
 ```bash
 python main.py
 ```
+
+## Ubuntu VPS installation
+
+On Ubuntu 22.04 or newer, clone the repository and run the included installer
+from the repository root:
+
+```bash
+chmod +x deploy/install_ubuntu.sh
+sudo ./deploy/install_ubuntu.sh
+```
+
+The installer adds Docker and Compose when missing, creates a locked-down
+`.env`, generates a cryptographically random license-key pepper and admin
+password, starts the service, and waits for the health check. The database and
+logs remain in the persistent `data` directory.
+
+The application listens on port 8080. Place Nginx, Caddy, or another HTTPS
+reverse proxy in front of it before public use; an Nginx starting point is
+provided at `deploy/nginx.conf.example`. Set `CORS_ORIGINS` to the exact public
+HTTPS origin and keep `COOKIE_SECURE=true` in production.
 
 Then open:
 
@@ -95,8 +116,14 @@ The repository includes Docker support if you want a reproducible deployment wit
 From the project root:
 
 ```bash
+cp .env.example .env
+# Set ADMIN_PASSWORD and LICENSE_KEY_PEPPER before continuing.
 docker compose up -d --build
 ```
+
+Compose refuses to start without those two secrets. Its default origin is
+`http://localhost:8080`; set `CORS_ORIGINS` to the exact public dashboard
+origin before deployment.
 
 If your Docker installation still uses the older command, this also works:
 
@@ -391,7 +418,13 @@ The system uses SQLite with the following main tables:
 
 ## Security Considerations
 
-- All client communication is encrypted with AES-256-GCM
+- TLS is mandatory for non-local SDK connections; certificate errors are never ignored
+- License keys are returned only when created and stored as server-peppered hashes
+- Dashboard sessions use `HttpOnly`, `SameSite=Strict` cookies rather than browser storage
+- Replay nonces are stored in SQLite so protection survives restarts and multiple workers
+- The application-layer AES/HMAC envelope is defense in depth, not a replacement for TLS
+- Application secrets embedded in a desktop executable must be treated as extractable
+- A client-side license check can be patched; keep high-value authorization decisions server-side
 - HMAC signatures prevent request tampering
 - Nonce-based replay protection
 - Rate limiting on all endpoints

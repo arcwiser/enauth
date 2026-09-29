@@ -1,38 +1,34 @@
 @echo off
 setlocal
-<<<<<<< HEAD
-=======
-set PY=C:\Users\Weirdo\AppData\Local\Python\pythoncore-3.14-64\python.exe
-set PIP=C:\Users\Weirdo\AppData\Local\Python\bin\pip.exe
->>>>>>> 41cd6f0 (auto deploy clean auth system)
+cd /d "%~dp0"
 
 echo.
 echo  [EnAuth] Installing Python dependencies...
 echo.
-<<<<<<< HEAD
 
-REM Try pip first
-pip install -r requirements.txt
-if errorlevel 1 (
-    echo.
-    echo  [!] pip install failed. Trying with python -m pip...
-    python -m pip install -r requirements.txt
-    if errorlevel 1 (
-        echo.
-        echo  [!] python -m pip also failed. Trying with py launcher...
-        py -m pip install -r requirements.txt
-    )
-=======
-"%PIP%" install -r requirements.txt
-if errorlevel 1 (
-    echo.
-    echo  [!] pip install failed. Trying with python -m pip...
-    "%PY%" -m pip install -r requirements.txt
->>>>>>> 41cd6f0 (auto deploy clean auth system)
+where py >nul 2>nul
+if not errorlevel 1 (
+    py -3.12 -m pip install -r requirements.txt
+    if not errorlevel 1 goto done
+    py -m pip install -r requirements.txt
+    if not errorlevel 1 goto done
 )
 
+where python >nul 2>nul
+if errorlevel 1 goto missing
+python -m pip install -r requirements.txt
+if errorlevel 1 goto failed
+
+:done
 echo.
 echo  [*] Dependencies installed.
 echo  [*] Run start_server.bat to launch EnAuth.
-echo.
-pause
+exit /b 0
+
+:missing
+echo  [!] Python was not found. Install Python 3.12 or later and try again.
+exit /b 1
+
+:failed
+echo  [!] Dependency installation failed.
+exit /b 1

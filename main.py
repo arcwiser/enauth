@@ -15,7 +15,8 @@ except ImportError:
 
 load_dotenv(Path(__file__).parent / ".env")
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
@@ -37,7 +38,6 @@ from utils.logger import app_log
 async def lifespan(app: FastAPI):
     validate_startup_configuration(debug_mode)
     await init_db()
-    await clear_all_sessions_on_startup()
     await ensure_default_admin()
     cleanup_task = asyncio.create_task(_maintenance_loop())
     yield
@@ -47,25 +47,14 @@ async def lifespan(app: FastAPI):
     app_log.info("EnAuth server shutdown complete")
 
 
-async def clear_all_sessions_on_startup():
-    """Invalidate any in-flight auth and portal sessions when the server starts."""
-    import aiosqlite
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        await db.execute("DELETE FROM admin_sessions")
-        await db.execute("DELETE FROM auth_sessions")
-        await db.execute("DELETE FROM reseller_sessions")
-        await db.execute("DELETE FROM portal_sessions")
-        await db.execute("DELETE FROM sessions")
-        await db.execute("DELETE FROM temp_2fa_sessions")
-        await db.commit()
-    app_log.info("Cleared existing auth sessions on startup")
-
-
 def validate_startup_configuration(debug_mode: bool):
     """Emit operator-friendly warnings for common self-hosting misconfigurations."""
     if not os.getenv("ADMIN_PASSWORD"):
         app_log.warning("ADMIN_PASSWORD is not set; a random password will be generated if no admin user exists.")
+    license_pepper = os.getenv("LICENSE_KEY_PEPPER", "")
+    if len(license_pepper) < 32:
+        print("CRITICAL ERROR: LICENSE_KEY_PEPPER must contain at least 32 characters.")
+        sys.exit(1)
     if os.getenv("CORS_ORIGINS", "*") == "*":
         if not debug_mode:
             print("\n" + "="*80)
@@ -113,6 +102,33 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+MAX_REQUEST_BYTES = int(os.getenv("MAX_REQUEST_BYTES", str(2 * 1024 * 1024)))
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_REQUEST_BYTES:
+                return JSONResponse({"detail": "Request body too large"}, status_code=413)
+        except ValueError:
+            return JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
+
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; "
+        "base-uri 'self'; form-action 'self'"
+    )
+    if request.url.scheme == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
 
 app.include_router(client_router)
 app.include_router(admin_router)

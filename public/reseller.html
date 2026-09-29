@@ -18,10 +18,7 @@
       <button class="btn btn-outline" type="button" onclick="setTab('tab-products')" id="tab-btn-products">My Products</button>
       <button class="btn btn-outline" type="button" onclick="setTab('tab-generate')" id="tab-btn-generate">Generate</button>
       <button class="btn btn-outline" type="button" onclick="setTab('tab-keys')" id="tab-btn-keys">Keys (Manage)</button>
-<<<<<<< HEAD
       <button class="btn btn-outline" type="button" onclick="setTab('tab-analytics')" id="tab-btn-analytics">Analytics</button>
-=======
->>>>>>> 41cd6f0 (auto deploy clean auth system)
     </div>
     <div class="content">
       <div id="tab-products">
@@ -84,7 +81,6 @@
           <button class="btn btn-danger" type="button" onclick="bulkDelete()">Delete selected</button>
         </div>
       </div>
-<<<<<<< HEAD
 
       <div id="tab-analytics" style="display:none">
         <div class="card" style="margin-top:0">
@@ -111,8 +107,6 @@
           </div>
         </div>
       </div>
-=======
->>>>>>> 41cd6f0 (auto deploy clean auth system)
       </div>
     </div>
   </div>
@@ -143,22 +137,14 @@
   }
 
   function setTab(tabId) {
-<<<<<<< HEAD
     const tabs = ["tab-products","tab-generate","tab-keys","tab-analytics"];
-=======
-    const tabs = ["tab-products","tab-generate","tab-keys"];
->>>>>>> 41cd6f0 (auto deploy clean auth system)
     tabs.forEach(id => {
       const el = document.getElementById(id);
       if (!el) return;
       el.style.display = (id === tabId) ? "" : "none";
     });
 
-<<<<<<< HEAD
     ["tab-products","tab-generate","tab-keys","tab-analytics"].forEach(x => {
-=======
-    ["tab-products","tab-generate","tab-keys"].forEach(x => {
->>>>>>> 41cd6f0 (auto deploy clean auth system)
       const btn = document.getElementById("tab-btn-" + x.replace("tab-",""));
       if (btn) btn.className = "btn btn-outline";
     });
@@ -199,7 +185,6 @@
 
     await loadKeys();
 
-<<<<<<< HEAD
     // Load analytics when analytics tab is clicked
     document.getElementById("tab-btn-analytics").addEventListener("click", loadAnalytics);
 
@@ -252,11 +237,6 @@
     }
   }
 
-=======
-    setTab("tab-products");
-  }
-
->>>>>>> 41cd6f0 (auto deploy clean auth system)
   function refreshPricing(products) {
     const pid = document.getElementById("buy-product").value;
     const prod = products.find(p => p.id === pid);

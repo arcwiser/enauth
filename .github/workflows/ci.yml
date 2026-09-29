@@ -20,5 +20,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Reject unresolved merge conflicts
+        shell: pwsh
+        run: |
+          $matches = git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- ':!sdk/json.hpp'
+          if ($LASTEXITCODE -eq 0) { Write-Error "Unresolved merge conflict markers found:`n$matches" }
+          if ($LASTEXITCODE -gt 1) { exit $LASTEXITCODE }
+
+      - name: Compile Python sources
+        run: python -m compileall -q main.py database.py routes utils migrations
+
       - name: Run tests
         run: python -m unittest discover -s tests -v
