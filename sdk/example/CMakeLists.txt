@@ -14,9 +14,23 @@ add_executable(enauth-example
 
 target_include_directories(enauth-example PRIVATE ..)
 target_compile_features(enauth-example PRIVATE cxx_std_17)
-target_compile_definitions(enauth-example PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_definitions(enauth-example PRIVATE
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    $<$<CONFIG:Release>:ENAUTH_ENABLE_ANTI_DEBUG>
+)
 target_link_libraries(enauth-example PRIVATE winhttp bcrypt crypt32)
 
 if(MSVC)
-    target_compile_options(enauth-example PRIVATE /W4 /permissive-)
+    target_compile_options(enauth-example PRIVATE
+        /W4 /permissive- /GS /sdl
+        $<$<CONFIG:Release>:/O2>
+        $<$<CONFIG:Release>:/guard:cf>
+    )
+    target_link_options(enauth-example PRIVATE
+        $<$<CONFIG:Release>:/DYNAMICBASE>
+        $<$<CONFIG:Release>:/NXCOMPAT>
+        $<$<CONFIG:Release>:/HIGHENTROPYVA>
+        $<$<CONFIG:Release>:/guard:cf>
+    )
 endif()

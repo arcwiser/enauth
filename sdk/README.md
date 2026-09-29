@@ -204,7 +204,16 @@ $env:ENAUTH_APP_VERSION = "1.0.0"
 The program prompts for the license key so it is not stored in source code or
 shell history. For automated test environments only, it can also read
 `ENAUTH_LICENSE_KEY`. Optional product checks use `ENAUTH_PRODUCT_ID` and
-`ENAUTH_PRODUCT_LEVEL`.
+`ENAUTH_PRODUCT_LEVEL`. Set `ENAUTH_DOWNLOAD_NAME` to demonstrate a protected,
+integrity-checked file download. `ENAUTH_HEARTBEAT_SECONDS` controls continuous
+session checks and is clamped to 10–300 seconds.
+
+The example links every SDK implementation file. Its Release configuration
+enables the SDK anti-debug path, control-flow guard, stack checks, ASLR, DEP,
+and high-entropy ASLR. XOR-protected in-memory credentials, HWID collection,
+AES-256-GCM encryption, PBKDF2 derivation, HMAC signing, TLS validation, replay
+protection, and encrypted session storage are performed automatically inside
+the SDK rather than called separately by application code.
 
 Run `bootstrap.ps1 -SkipInstall` when dependency installation is managed by
 your organization and the script should fail instead of installing tools.
