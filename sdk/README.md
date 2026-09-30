@@ -193,10 +193,6 @@ Windows Package Manager when missing, and builds the SDK example.
 ```powershell
 cd sdk\example
 .\build.bat
-
-$env:ENAUTH_APP_ID = "your-app-id"
-$env:ENAUTH_APP_SECRET = "your-app-secret"
-$env:ENAUTH_APP_VERSION = "1.0.0"
 .\build\Release\enauth-example.exe
 ```
 
@@ -204,12 +200,12 @@ The example is preconfigured with the obfuscated production endpoint
 `https://auth.olsoftwares.com`. Change that literal in `example/main.cpp` when
 building for a different EnAuth deployment.
 
-The program prompts for the license key so it is not stored in source code or
-shell history. For automated test environments only, it can also read
-`ENAUTH_LICENSE_KEY`. Optional product checks use `ENAUTH_PRODUCT_ID` and
-`ENAUTH_PRODUCT_LEVEL`. Set `ENAUTH_DOWNLOAD_NAME` to demonstrate a protected,
-integrity-checked file download. `ENAUTH_HEARTBEAT_SECONDS` controls continuous
-session checks and is clamped to 10–300 seconds.
+Before building, replace `REPLACE_WITH_APPLICATION_ID` and
+`REPLACE_WITH_APPLICATION_SECRET` in `example/main.cpp` with the values from
+the admin panel. Version, optional product/level enforcement, protected
+download name, and heartbeat interval are compile-time settings in the same
+configuration block. The end user only enters their license key; the example
+does not read configuration from environment variables.
 
 The example links every SDK implementation file. Its Release configuration
 enables the SDK anti-debug path, control-flow guard, stack checks, ASLR, DEP,

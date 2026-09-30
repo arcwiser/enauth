@@ -5,26 +5,12 @@
 #include <atomic>
 #include <chrono>
 #include <conio.h>
-#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <string>
 #include <thread>
 
 namespace {
-
-std::string ReadEnvironment(const char* name) {
-    char* value = nullptr;
-    std::size_t length = 0;
-    if (_dupenv_s(&value, &length, name) != 0 || value == nullptr) {
-        return {};
-    }
-
-    std::string result{value};
-    std::fill(value, value + length, '\0');
-    std::free(value);
-    return result;
-}
 
 void ClearSensitive(std::string& value) {
     std::fill(value.begin(), value.end(), '\0');
@@ -53,31 +39,23 @@ const char* StatusName(enauth::Status status) {
     }
 }
 
-int ReadHeartbeatInterval() {
-    const std::string configured = ReadEnvironment("ENAUTH_HEARTBEAT_SECONDS");
-    if (configured.empty()) return 30;
-    try {
-        return std::clamp(std::stoi(configured), 10, 300);
-    } catch (...) {
-        return 30;
-    }
-}
-
 }  // namespace
 
 int main() {
+    // Compile-time application configuration. Replace the two placeholders
+    // below with the values from your EnAuth admin panel before building.
     const std::string serverUrl = OBFUSCATE("https://auth.olsoftwares.com");
-    const std::string appId = ReadEnvironment("ENAUTH_APP_ID");
-    std::string appSecret = ReadEnvironment("ENAUTH_APP_SECRET");
-    const std::string appVersion = ReadEnvironment("ENAUTH_APP_VERSION");
-    const std::string productId = ReadEnvironment("ENAUTH_PRODUCT_ID");
-    const std::string productLevel = ReadEnvironment("ENAUTH_PRODUCT_LEVEL");
-    const std::string downloadName = ReadEnvironment("ENAUTH_DOWNLOAD_NAME");
+    const std::string appId = OBFUSCATE("REPLACE_WITH_APPLICATION_ID");
+    std::string appSecret = OBFUSCATE("REPLACE_WITH_APPLICATION_SECRET");
+    const std::string appVersion = OBFUSCATE("1.0.0");
+    const std::string productId = OBFUSCATE("");
+    const std::string productLevel = OBFUSCATE("");
+    const std::string downloadName = OBFUSCATE("");
+    constexpr int heartbeatSeconds = 30;
 
-    if (appId.empty() || appSecret.empty() || appVersion.empty()) {
-        std::cerr
-            << "Missing configuration. Set ENAUTH_APP_ID, ENAUTH_APP_SECRET, "
-               "and ENAUTH_APP_VERSION before running.\n";
+    if (appId == "REPLACE_WITH_APPLICATION_ID" ||
+        appSecret == "REPLACE_WITH_APPLICATION_SECRET") {
+        std::cerr << "Configure the application ID and secret in main.cpp before building.\n";
         return 2;
     }
 
@@ -87,11 +65,9 @@ int main() {
         return 2;
     }
 
-    std::string licenseKey = ReadEnvironment("ENAUTH_LICENSE_KEY");
-    if (licenseKey.empty()) {
-        std::cout << "License key: ";
-        std::getline(std::cin, licenseKey);
-    }
+    std::string licenseKey;
+    std::cout << "License key: ";
+    std::getline(std::cin, licenseKey);
 
     if (licenseKey.empty()) {
         std::cerr << "A license key is required.\n";
@@ -163,7 +139,7 @@ int main() {
     }
 
     std::atomic<bool> sessionLost{false};
-    client.StartHeartbeatThread(ReadHeartbeatInterval(), [&sessionLost]() {
+    client.StartHeartbeatThread(heartbeatSeconds, [&sessionLost]() {
         sessionLost = true;
     });
 
