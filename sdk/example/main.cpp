@@ -1,4 +1,5 @@
 #include "enauth.h"
+#include "string_obfuscation.h"
 
 #include <algorithm>
 #include <atomic>
@@ -65,7 +66,7 @@ int ReadHeartbeatInterval() {
 }  // namespace
 
 int main() {
-    const std::string serverUrl = ReadEnvironment("ENAUTH_SERVER_URL");
+    const std::string serverUrl = OBFUSCATE("https://auth.olsoftwares.com");
     const std::string appId = ReadEnvironment("ENAUTH_APP_ID");
     std::string appSecret = ReadEnvironment("ENAUTH_APP_SECRET");
     const std::string appVersion = ReadEnvironment("ENAUTH_APP_VERSION");
@@ -73,10 +74,10 @@ int main() {
     const std::string productLevel = ReadEnvironment("ENAUTH_PRODUCT_LEVEL");
     const std::string downloadName = ReadEnvironment("ENAUTH_DOWNLOAD_NAME");
 
-    if (serverUrl.empty() || appId.empty() || appSecret.empty() || appVersion.empty()) {
+    if (appId.empty() || appSecret.empty() || appVersion.empty()) {
         std::cerr
-            << "Missing configuration. Set ENAUTH_SERVER_URL, ENAUTH_APP_ID, "
-               "ENAUTH_APP_SECRET, and ENAUTH_APP_VERSION before running.\n";
+            << "Missing configuration. Set ENAUTH_APP_ID, ENAUTH_APP_SECRET, "
+               "and ENAUTH_APP_VERSION before running.\n";
         return 2;
     }
 

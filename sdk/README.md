@@ -194,12 +194,15 @@ Windows Package Manager when missing, and builds the SDK example.
 cd sdk\example
 .\build.bat
 
-$env:ENAUTH_SERVER_URL = "https://auth.example.com"
 $env:ENAUTH_APP_ID = "your-app-id"
 $env:ENAUTH_APP_SECRET = "your-app-secret"
 $env:ENAUTH_APP_VERSION = "1.0.0"
 .\build\Release\enauth-example.exe
 ```
+
+The example is preconfigured with the obfuscated production endpoint
+`https://auth.olsoftwares.com`. Change that literal in `example/main.cpp` when
+building for a different EnAuth deployment.
 
 The program prompts for the license key so it is not stored in source code or
 shell history. For automated test environments only, it can also read
