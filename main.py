@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from database import init_db, get_db, DB_PATH
 from routes.client import router as client_router, limiter
 from routes.admin  import router as admin_router, cleanup_runtime_state
+from routes.integrations import router as integrations_router
 from utils.crypto  import generate_uid, hash_password, generate_app_secret
 from utils.logger import app_log
 
@@ -132,6 +133,7 @@ async def security_middleware(request: Request, call_next):
 
 app.include_router(client_router)
 app.include_router(admin_router)
+app.include_router(integrations_router)
 
 # Serve admin panel static files
 PUBLIC = Path(__file__).parent / "public"

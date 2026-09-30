@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Header, File, UploadFile, Form, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Literal, Optional
 import aiosqlite
 import re
 import secrets
@@ -2291,14 +2291,14 @@ class PasswordResetVerifyBody(BaseModel):
 
 
 class CreateApiKeyBody(BaseModel):
-    name: str
-    scopes: str = "read"
-    expires_days: Optional[int] = None
+    name: str = Field(min_length=1, max_length=100)
+    scopes: Literal["read", "write", "admin"] = "read"
+    expires_days: Optional[int] = Field(default=None, ge=1, le=3650)
 
 
 class UpdateApiKeyBody(BaseModel):
-    name: Optional[str] = None
-    scopes: Optional[str] = None
+    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    scopes: Optional[Literal["read", "write", "admin"]] = None
     is_active: Optional[bool] = None
 
 

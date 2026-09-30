@@ -1,0 +1,19 @@
+[Unit]
+Description=EnAuth Discord Bot
+After=network-online.target enauth.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/enauth/discord_bot
+EnvironmentFile=/root/enauth/discord_bot/.env
+ExecStart=/root/enauth/discord_bot/.venv/bin/python /root/enauth/discord_bot/bot.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/root/enauth/discord_bot
+
+[Install]
+WantedBy=multi-user.target
