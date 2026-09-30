@@ -193,6 +193,40 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(download_payload["name"], "payload.bin")
             self.assertEqual(base64.b64decode(download_payload["data"]), b"hello world")
 
+    async def test_paused_product_does_not_block_an_online_product(self):
+        seeded = await self._seed_app()
+        fake_request = _FakeRequest(headers={"User-Agent": "EnAuthTest/1.0"})
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute(
+                "INSERT INTO products(id, app_id, name, level, is_paused) VALUES(?,?,?,?,?)",
+                ("product-1", seeded["app_id"], "Product One", "one", 1),
+            )
+            await db.execute(
+                "INSERT INTO products(id, app_id, name, level, is_paused) VALUES(?,?,?,?,?)",
+                ("product-2", seeded["app_id"], "Product Two", "two", 0),
+            )
+            for product_id in ("product-1", "product-2"):
+                await db.execute(
+                    "INSERT INTO license_products(id, license_id, product_id, expires_at) VALUES(?,?,?,?)",
+                    (f"ent-{product_id}", seeded["license_id"], product_id, "2099-12-31 23:59:59"),
+                )
+            await db.commit()
+
+            paused_req = self._encrypted_request(
+                seeded["app_id"], seeded["secret"],
+                {"license_key": seeded["license_key"], "hwid": "b" * 64, "level": "one"},
+            )
+            paused_resp = await self.client.client_login.__wrapped__(fake_request, paused_req, db)
+            self.assertEqual(self._decrypt_response(paused_resp, seeded["secret"])["message"], "PRODUCT_PAUSED")
+
+            online_req = self._encrypted_request(
+                seeded["app_id"], seeded["secret"],
+                {"license_key": seeded["license_key"], "hwid": "b" * 64, "level": "two"},
+            )
+            online_resp = await self.client.client_login.__wrapped__(fake_request, online_req, db)
+            self.assertTrue(self._decrypt_response(online_resp, seeded["secret"])["success"])
+
 
 if __name__ == "__main__":
     unittest.main()

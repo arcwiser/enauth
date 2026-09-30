@@ -37,6 +37,8 @@ enum class Status {
     ReplayAttack,
     LevelRequired,
     LevelNotAllowed,
+    AppPaused,
+    ProductPaused,
     SuspiciousLogin,
     Unknown,
 };

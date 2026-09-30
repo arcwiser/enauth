@@ -274,6 +274,8 @@ Status Client::MessageToStatus(const std::string& msg) {
     if (msg == OBFUSCATE("SESSION_EXPIRED"))    return Status::SessionExpired;
     if (msg == OBFUSCATE("LEVEL_REQUIRED"))     return Status::LevelRequired;
     if (msg == OBFUSCATE("LEVEL_NOT_ALLOWED"))  return Status::LevelNotAllowed;
+    if (msg == OBFUSCATE("APP_PAUSED"))         return Status::AppPaused;
+    if (msg == OBFUSCATE("PRODUCT_PAUSED"))     return Status::ProductPaused;
     if (msg == OBFUSCATE("OK"))                 return Status::Success;
     return Status::Unknown;
 }

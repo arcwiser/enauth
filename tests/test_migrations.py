@@ -90,6 +90,23 @@ class DatabaseMigrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(version, self.database.LATEST_SCHEMA_VERSION)
         self.assertIsNotNone(temp_table)
 
+    async def test_outage_schema_supports_per_product_expiration(self):
+        await self.database.init_db()
+        async with self.database.aiosqlite.connect(self.db_path) as db:
+            async with db.execute("PRAGMA table_info(applications)") as cur:
+                app_columns = {row[1] for row in await cur.fetchall()}
+            async with db.execute("PRAGMA table_info(products)") as cur:
+                product_columns = {row[1] for row in await cur.fetchall()}
+            async with db.execute("PRAGMA table_info(license_products)") as cur:
+                entitlement_columns = {row[1] for row in await cur.fetchall()}
+            async with db.execute("PRAGMA table_info(sessions)") as cur:
+                session_columns = {row[1] for row in await cur.fetchall()}
+
+        self.assertTrue({"is_paused", "paused_at", "pause_reason"} <= app_columns)
+        self.assertTrue({"is_paused", "paused_at", "pause_reason"} <= product_columns)
+        self.assertIn("expires_at", entitlement_columns)
+        self.assertIn("product_id", session_columns)
+
 
 if __name__ == "__main__":
     unittest.main()

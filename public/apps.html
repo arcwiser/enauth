@@ -302,6 +302,7 @@
             <div style="flex:1;min-width:0">
               <div class="app-name">${escHtml(a.name)}</div>
               <div class="app-version">v${escHtml(a.version)}</div>
+              ${a.is_paused ? `<div><span class="badge badge-banned">Paused</span> <span style="font-size:11px;color:var(--text-dim)">${escHtml(a.pause_reason || '')}</span></div>` : ''}
             </div>
             <div style="display:flex;gap:6px;align-items:center">
               <label class="checkbox-row" style="margin:0 8px 0 0;font-size:12px">
@@ -336,6 +337,9 @@
           </div>
 
           <div class="app-actions">
+            ${a.is_paused
+              ? `<button class="btn btn-primary btn-sm" style="flex:1" onclick="resumeAll('${a.id}')">▶ Resume All</button>`
+              : `<button class="btn btn-warning btn-sm" style="flex:1" onclick="pauseAll('${a.id}')">⏸ Pause All</button>`}
             <button class="btn btn-warning btn-sm" style="flex:1" onclick="regenSecret('${a.id}')">🔄 Regen Secret</button>
             <button class="btn btn-ghost btn-sm" style="flex:1" onclick="openTimeline('${a.id}', ${JSON.stringify(a.name)})">🕒 Timeline</button>
             <a class="btn btn-ghost btn-sm" href="licenses.html" style="flex:1;justify-content:center">🔑 Licenses</a>
@@ -346,6 +350,23 @@
       toast(e.message, "error");
       grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--red)">${e.message}</div>`;
     }
+  }
+
+  async function pauseAll(id) {
+    const reason = prompt("Why is this application being paused?", "Application outage");
+    if (reason === null) return;
+    try { await API.pauseApp(id, reason); toast("All app keys paused; active sessions closed", "warning"); await load(); }
+    catch (e) { toast(e.message, "error"); }
+  }
+
+  async function resumeAll(id) {
+    const days = Number(prompt("Extra compensation days (paused time is restored automatically):", "0"));
+    if (!Number.isFinite(days) || days < 0) return toast("Enter zero or a positive number", "error");
+    try {
+      const r = await API.resumeApp(id, days * 24);
+      toast(`Application resumed; entitlements extended ${Math.round(r.extended_by_seconds / 3600)} hours`, "success");
+      await load();
+    } catch (e) { toast(e.message, "error"); }
   }
 
   function toggleAppSelect(id, checked) {

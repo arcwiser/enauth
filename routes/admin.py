@@ -3,6 +3,8 @@ import csv
 from pydantic import field_validator, model_validator
 import io
 import os
+import time
+from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Header, File, UploadFile, Form, Request, Response
@@ -15,7 +17,7 @@ import secrets
 import hashlib
 import pyotp
 
-from database import get_db
+from database import DB_PATH, get_db
 from routes.client import limiter
 from utils.crypto import (
     generate_license_key, generate_app_secret,
@@ -32,6 +34,7 @@ TEMP_2FA_TTL_MINUTES = int(os.getenv("TEMP_2FA_TTL_MINUTES", "5"))
 TEMP_2FA_SWEEP_SECONDS = int(os.getenv("TEMP_2FA_SWEEP_SECONDS", "60"))
 ADMIN_COOKIE_NAME = "enauth_admin_session"
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
+SERVER_STARTED_MONOTONIC = time.monotonic()
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -432,6 +435,33 @@ class ProductPricingBody(BaseModel):
     price: float
 
 
+class PauseBody(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+
+class ResumeBody(BaseModel):
+    compensation_hours: float = Field(default=0, ge=0, le=876000)
+
+
+async def _owned_product(product_id: str, owner_id: Optional[str], db):
+    sql = """SELECT p.*, a.owner_user_id FROM products p
+             JOIN applications a ON a.id = p.app_id WHERE p.id = ?"""
+    args = [product_id]
+    if owner_id:
+        sql += " AND a.owner_user_id = ?"
+        args.append(owner_id)
+    async with db.execute(sql, args) as cur:
+        row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Product not found")
+    return row
+
+
+def _paused_seconds(paused_at: str) -> int:
+    started = datetime.strptime(paused_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    return max(0, int((_utcnow_dt() - started).total_seconds()))
+
+
 @router.get("/products")
 async def list_products(user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
     owner_id = auth_owner_id(user)
@@ -510,6 +540,47 @@ async def delete_product(product_id: str, user=Depends(require_admin), db: aiosq
         await db.execute("DELETE FROM products WHERE id = ?", (product_id,))
     await db.commit()
     return {"ok": True}
+
+
+@router.post("/products/{product_id}/pause")
+async def pause_product(product_id: str, body: PauseBody, user=Depends(require_admin),
+                        db: aiosqlite.Connection = Depends(get_db)):
+    product = await _owned_product(product_id, auth_owner_id(user), db)
+    if product["is_paused"]:
+        return {"ok": True, "already_paused": True, "paused_at": product["paused_at"]}
+    now = utcnow()
+    reason = (body.reason or "Product outage").strip()
+    await db.execute(
+        "UPDATE products SET is_paused=1, paused_at=?, pause_reason=? WHERE id=?",
+        (now, reason, product_id),
+    )
+    await db.execute("DELETE FROM sessions WHERE product_id=?", (product_id,))
+    await log_action(db, "product_paused", app_id=product["app_id"], details=f"{product['level']}: {reason}")
+    await db.commit()
+    return {"ok": True, "paused_at": now}
+
+
+@router.post("/products/{product_id}/resume")
+async def resume_product(product_id: str, body: ResumeBody, user=Depends(require_admin),
+                         db: aiosqlite.Connection = Depends(get_db)):
+    product = await _owned_product(product_id, auth_owner_id(user), db)
+    if not product["is_paused"] or not product["paused_at"]:
+        raise HTTPException(409, "Product is not paused")
+    downtime = _paused_seconds(product["paused_at"])
+    compensation = int(body.compensation_hours * 3600)
+    extension = downtime + compensation
+    await db.execute(
+        "UPDATE license_products SET expires_at=datetime(expires_at, ?) WHERE product_id=? AND expires_at IS NOT NULL",
+        (f"+{extension} seconds", product_id),
+    )
+    await db.execute(
+        "UPDATE products SET is_paused=0, paused_at=NULL, pause_reason=NULL WHERE id=?", (product_id,)
+    )
+    await log_action(db, "product_resumed", app_id=product["app_id"],
+                     details=f"{product['level']}: extended {extension}s ({compensation}s compensation)")
+    await db.commit()
+    return {"ok": True, "downtime_seconds": downtime, "compensation_seconds": compensation,
+            "extended_by_seconds": extension}
 
 
 @router.get("/products/{product_id}/pricing")
@@ -1053,8 +1124,8 @@ async def reseller_buy_key(body: ResellerBuyBody, reseller=Depends(require_resel
             (license_id, mask_license_key(license_key), hash_license_key(license_key), target["app_id"], 1, expires, f"product_id={target['product_id']}"),
         )
         await db.execute(
-            "INSERT OR IGNORE INTO license_products (id, license_id, product_id) VALUES (?, ?, ?)",
-            (generate_uid(), license_id, target["product_id"]),
+            "INSERT OR IGNORE INTO license_products (id, license_id, product_id, expires_at) VALUES (?, ?, ?, ?)",
+            (generate_uid(), license_id, target["product_id"], expires),
         )
         await db.execute("UPDATE resellers SET balance = balance - ? WHERE id = ?", (target["price"], reseller["id"]))
         await db.execute(
@@ -1239,12 +1310,24 @@ async def dashboard(user=Depends(require_admin), db: aiosqlite.Connection = Depe
             utcnow(), owner_id,
         )
         total_apps = await scalar("SELECT COUNT(*) FROM applications WHERE owner_user_id = ?", owner_id)
+        paused_apps = await scalar("SELECT COUNT(*) FROM applications WHERE is_paused=1 AND owner_user_id=?", owner_id)
+        paused_products = await scalar(
+            """SELECT COUNT(*) FROM products p JOIN applications a ON a.id=p.app_id
+               WHERE p.is_paused=1 AND a.owner_user_id=?""", owner_id)
+        failed_logins = await scalar(
+            """SELECT COUNT(*) FROM logs lg JOIN applications a ON a.id=lg.app_id
+               WHERE lg.action LIKE '%fail%' AND lg.timestamp >= datetime('now','-1 hour')
+               AND a.owner_user_id=?""", owner_id)
     else:
         total_licenses  = await scalar("SELECT COUNT(*) FROM licenses")
         active_licenses = await scalar("SELECT COUNT(*) FROM licenses WHERE status='active'")
         banned_licenses = await scalar("SELECT COUNT(*) FROM licenses WHERE status='banned'")
         active_sessions = await scalar("SELECT COUNT(*) FROM sessions WHERE expires_at > ?", utcnow())
         total_apps      = await scalar("SELECT COUNT(*) FROM applications")
+        paused_apps = await scalar("SELECT COUNT(*) FROM applications WHERE is_paused=1")
+        paused_products = await scalar("SELECT COUNT(*) FROM products WHERE is_paused=1")
+        failed_logins = await scalar(
+            "SELECT COUNT(*) FROM logs WHERE action LIKE '%fail%' AND timestamp >= datetime('now','-1 hour')")
     today           = utcnow()[:10]
     if owner_id:
         logins_today = await scalar(
@@ -1288,6 +1371,15 @@ async def dashboard(user=Depends(require_admin), db: aiosqlite.Connection = Depe
         ) as cur:
             traffic = rows_to_list(await cur.fetchall())
 
+    async with db.execute("PRAGMA quick_check") as cur:
+        integrity_row = await cur.fetchone()
+    db_file = Path(DB_PATH)
+    configuration = {
+        "secure_cookies": COOKIE_SECURE,
+        "restricted_cors": os.getenv("CORS_ORIGINS", "*").strip() != "*",
+        "license_pepper_set": bool(os.getenv("LICENSE_KEY_PEPPER", "").strip()),
+        "debug_disabled": os.getenv("DEBUG", "false").lower() != "true",
+    }
     return {
         "total_licenses":  total_licenses,
         "active_licenses": active_licenses,
@@ -1297,6 +1389,15 @@ async def dashboard(user=Depends(require_admin), db: aiosqlite.Connection = Depe
         "logins_today":    logins_today,
         "recent_logs":     recent_logs,
         "traffic":         traffic,
+        "monitoring": {
+            "database_ok": bool(integrity_row and integrity_row[0] == "ok"),
+            "database_size_bytes": db_file.stat().st_size if db_file.exists() else 0,
+            "uptime_seconds": int(time.monotonic() - SERVER_STARTED_MONOTONIC),
+            "paused_apps": paused_apps,
+            "paused_products": paused_products,
+            "failed_logins_last_hour": failed_logins,
+            "configuration": configuration,
+        },
     }
 
 
@@ -1442,8 +1543,8 @@ async def create_license(body: CreateLicenseBody,
         )
         for pid in unique_pids:
             await db.execute(
-                "INSERT OR IGNORE INTO license_products (id, license_id, product_id) VALUES (?, ?, ?)",
-                (generate_uid(), lid, pid),
+                "INSERT OR IGNORE INTO license_products (id, license_id, product_id, expires_at) VALUES (?, ?, ?, ?)",
+                (generate_uid(), lid, pid, expires),
             )
         created.append({"id": lid, "key": key, "products": product_rows})
 
@@ -1497,6 +1598,9 @@ async def update_license(license_id: str, body: UpdateLicenseBody,
         raise HTTPException(400, "Nothing to update")
     args.append(license_id)
     await db.execute(f"UPDATE licenses SET {', '.join(updates)} WHERE id = ?", args)
+    if body.expires_at is not None:
+        await db.execute("UPDATE license_products SET expires_at=? WHERE license_id=?",
+                         (body.expires_at or None, license_id))
     await db.commit()
     return {"ok": True}
 
@@ -1682,6 +1786,18 @@ async def extend_license(body: ExtendLicenseBody, user=Depends(require_admin),
             )
         else:
             await db.execute("UPDATE licenses SET expires_at = datetime(expires_at, ?) WHERE id = ? AND expires_at IS NOT NULL", (modifier, body.license_id))
+        if owner_id:
+            await db.execute(
+                """UPDATE license_products SET expires_at=datetime(expires_at, ?)
+                   WHERE license_id=? AND expires_at IS NOT NULL AND license_id IN
+                   (SELECT l.id FROM licenses l JOIN applications a ON a.id=l.app_id WHERE a.owner_user_id=?)""",
+                (modifier, body.license_id, owner_id),
+            )
+        else:
+            await db.execute(
+                "UPDATE license_products SET expires_at=datetime(expires_at, ?) WHERE license_id=? AND expires_at IS NOT NULL",
+                (modifier, body.license_id),
+            )
     else:
         if owner_id:
             await db.execute(
@@ -1692,6 +1808,17 @@ async def extend_license(body: ExtendLicenseBody, user=Depends(require_admin),
             )
         else:
             await db.execute("UPDATE licenses SET expires_at = datetime(expires_at, ?) WHERE expires_at IS NOT NULL AND status='active'", (modifier,))
+        if owner_id:
+            await db.execute(
+                """UPDATE license_products SET expires_at=datetime(expires_at, ?)
+                   WHERE expires_at IS NOT NULL AND license_id IN
+                   (SELECT l.id FROM licenses l JOIN applications a ON a.id=l.app_id
+                    WHERE l.status='active' AND a.owner_user_id=?)""", (modifier, owner_id))
+        else:
+            await db.execute(
+                """UPDATE license_products SET expires_at=datetime(expires_at, ?)
+                   WHERE expires_at IS NOT NULL AND license_id IN
+                   (SELECT id FROM licenses WHERE status='active')""", (modifier,))
     await db.commit()
     return {"ok": True}
 
@@ -2091,6 +2218,19 @@ class UpdateAppBody(BaseModel):
     name:    Optional[str] = None
     version: Optional[str] = None
 
+
+async def _owned_app(app_id: str, owner_id: Optional[str], db):
+    sql = "SELECT * FROM applications WHERE id = ?"
+    args = [app_id]
+    if owner_id:
+        sql += " AND owner_user_id = ?"
+        args.append(owner_id)
+    async with db.execute(sql, args) as cur:
+        row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "App not found")
+    return row
+
 @router.get("/apps")
 async def list_apps(search: Optional[str] = None,
                     limit: int = 100, offset: int = 0,
@@ -2191,6 +2331,52 @@ async def regen_secret(app_id: str, user=Depends(require_admin),
         await db.execute("UPDATE applications SET secret_key=? WHERE id=?", (new_secret, app_id))
     await db.commit()
     return {"secret_key": new_secret}
+
+
+@router.post("/apps/{app_id}/pause")
+async def pause_app(app_id: str, body: PauseBody, user=Depends(require_admin),
+                    db: aiosqlite.Connection = Depends(get_db)):
+    app = await _owned_app(app_id, auth_owner_id(user), db)
+    if app["is_paused"]:
+        return {"ok": True, "already_paused": True, "paused_at": app["paused_at"]}
+    now = utcnow()
+    reason = (body.reason or "Application outage").strip()
+    await db.execute(
+        "UPDATE applications SET is_paused=1, paused_at=?, pause_reason=? WHERE id=?",
+        (now, reason, app_id),
+    )
+    await db.execute("DELETE FROM sessions WHERE app_id=?", (app_id,))
+    await log_action(db, "app_paused", app_id=app_id, details=reason)
+    await db.commit()
+    return {"ok": True, "paused_at": now}
+
+
+@router.post("/apps/{app_id}/resume")
+async def resume_app(app_id: str, body: ResumeBody, user=Depends(require_admin),
+                     db: aiosqlite.Connection = Depends(get_db)):
+    app = await _owned_app(app_id, auth_owner_id(user), db)
+    if not app["is_paused"] or not app["paused_at"]:
+        raise HTTPException(409, "Application is not paused")
+    downtime = _paused_seconds(app["paused_at"])
+    compensation = int(body.compensation_hours * 3600)
+    extension = downtime + compensation
+    await db.execute(
+        "UPDATE licenses SET expires_at=datetime(expires_at, ?) WHERE app_id=? AND expires_at IS NOT NULL",
+        (f"+{extension} seconds", app_id),
+    )
+    await db.execute(
+        """UPDATE license_products SET expires_at=datetime(expires_at, ?)
+           WHERE expires_at IS NOT NULL AND product_id IN (SELECT id FROM products WHERE app_id=?)""",
+        (f"+{extension} seconds", app_id),
+    )
+    await db.execute(
+        "UPDATE applications SET is_paused=0, paused_at=NULL, pause_reason=NULL WHERE id=?", (app_id,)
+    )
+    await log_action(db, "app_resumed", app_id=app_id,
+                     details=f"Extended {extension}s ({compensation}s compensation)")
+    await db.commit()
+    return {"ok": True, "downtime_seconds": downtime, "compensation_seconds": compensation,
+            "extended_by_seconds": extension}
 
 
 # ─── Admin Users ──────────────────────────────────────────────────────────────

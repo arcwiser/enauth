@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS applications (
     secret_key  TEXT NOT NULL UNIQUE,
     version     TEXT NOT NULL DEFAULT '1.0.0',
     owner_user_id TEXT REFERENCES auth_users(id) ON DELETE SET NULL,
+    is_paused   INTEGER NOT NULL DEFAULT 0,
+    paused_at   DATETIME,
+    pause_reason TEXT,
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -39,6 +42,7 @@ CREATE TABLE IF NOT EXISTS license_products (
     id          TEXT PRIMARY KEY,
     license_id  TEXT NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
     product_id  TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    expires_at  DATETIME,
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(license_id, product_id)
 );
@@ -59,6 +63,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     hwid            TEXT NOT NULL,
     ip              TEXT NOT NULL,
     app_id          TEXT NOT NULL,
+    product_id      TEXT,
     started_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
     last_heartbeat  DATETIME DEFAULT CURRENT_TIMESTAMP,
     expires_at      DATETIME NOT NULL
@@ -176,6 +181,9 @@ CREATE TABLE IF NOT EXISTS products (
     name        TEXT NOT NULL,
     level       TEXT NOT NULL,
     is_active   INTEGER NOT NULL DEFAULT 1,
+    is_paused   INTEGER NOT NULL DEFAULT 0,
+    paused_at   DATETIME,
+    pause_reason TEXT,
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(app_id, level)
 );

@@ -136,6 +136,21 @@
         </div>
       </div>
 
+      <!-- Operational Monitoring -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">🩺 Operational Monitoring</div>
+          <span class="badge" id="monitor-overall">Checking…</span>
+        </div>
+        <div class="stats-grid" style="margin-bottom:16px">
+          <div class="stat-card green"><div class="stat-value" id="m-db">—</div><div class="stat-label">Database</div></div>
+          <div class="stat-card orange"><div class="stat-value" id="m-paused">—</div><div class="stat-label">Paused Services</div></div>
+          <div class="stat-card red"><div class="stat-value" id="m-fails">—</div><div class="stat-label">Failed Logins (1h)</div></div>
+          <div class="stat-card cyan"><div class="stat-value" id="m-uptime">—</div><div class="stat-label">Server Uptime</div></div>
+        </div>
+        <div id="monitor-checks" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px"></div>
+      </div>
+
       <!-- Recent Activity -->
       <div class="card">
         <div class="card-header">
@@ -216,6 +231,28 @@
       document.getElementById("s-sessions").textContent = d.active_sessions;
       document.getElementById("s-apps").textContent     = d.total_apps;
       document.getElementById("s-today").textContent    = d.logins_today;
+
+      const m = d.monitoring || {};
+      const config = m.configuration || {};
+      const checks = [
+        ["Database integrity", !!m.database_ok],
+        ["Secure cookies", !!config.secure_cookies],
+        ["Restricted CORS", !!config.restricted_cors],
+        ["License pepper", !!config.license_pepper_set],
+        ["Production mode", !!config.debug_disabled],
+      ];
+      const allGood = checks.every(([, ok]) => ok);
+      const overall = document.getElementById("monitor-overall");
+      overall.textContent = allGood ? "Healthy" : "Needs attention";
+      overall.className = `badge ${allGood ? 'badge-active' : 'badge-banned'}`;
+      document.getElementById("m-db").textContent = m.database_ok ? "Healthy" : "Error";
+      document.getElementById("m-paused").textContent = Number(m.paused_apps || 0) + Number(m.paused_products || 0);
+      document.getElementById("m-fails").textContent = m.failed_logins_last_hour || 0;
+      const uptimeHours = Math.floor(Number(m.uptime_seconds || 0) / 3600);
+      document.getElementById("m-uptime").textContent = uptimeHours >= 24 ? `${Math.floor(uptimeHours / 24)}d` : `${uptimeHours}h`;
+      document.getElementById("monitor-checks").innerHTML = checks.map(([name, ok]) =>
+        `<div style="padding:10px 12px;border:1px solid var(--border);border-radius:8px;display:flex;justify-content:space-between"><span>${name}</span><span style="color:var(${ok ? '--accent-green' : '--accent-red'})">${ok ? 'PASS' : 'CHECK'}</span></div>`
+      ).join("");
 
       // Update Donut Chart breakdown
       const total = d.total_licenses || 0;

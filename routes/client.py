@@ -244,6 +244,10 @@ async def client_login(request: Request, req: EncryptedRequest,
     if not license_key or not hwid:
         return enc_resp({"success": False, "message": "MISSING_FIELDS"}, secret, req.app_id)
 
+    if app["is_paused"]:
+        return enc_resp({"success": False, "message": "APP_PAUSED",
+                         "reason": app["pause_reason"] or "Temporarily unavailable"}, secret, req.app_id)
+
     # ── HWID format validation ──
     # Clients must send a SHA-256 or SHA-512 hex digest — no raw strings
     if not is_valid_hwid(hwid):
@@ -270,26 +274,35 @@ async def client_login(request: Request, req: EncryptedRequest,
         return enc_resp({"success": False, "message": "KEY_LOCKED_STRIKES"}, secret, req.app_id)
 
     # ── Level enforcement ──
+    entitlement = None
     if product_id:
         async with db.execute(
-            "SELECT 1 FROM license_products WHERE license_id = ? AND product_id = ?",
-            (lic["id"], product_id),
+            """SELECT lp.expires_at, p.id AS product_id, p.is_paused, p.pause_reason
+               FROM license_products lp JOIN products p ON p.id=lp.product_id
+               WHERE lp.license_id = ? AND lp.product_id = ? AND p.app_id = ?""",
+            (lic["id"], product_id, app["id"]),
         ) as cur:
-            if not await cur.fetchone():
+            entitlement = await cur.fetchone()
+            if not entitlement:
                 await db.execute("UPDATE licenses SET login_strikes = login_strikes + 1 WHERE id = ?", (lic["id"],))
                 await db.commit()
                 return enc_resp({"success": False, "message": "LEVEL_NOT_ALLOWED"}, secret, req.app_id)
     elif level:
         async with db.execute(
-            """SELECT 1 FROM license_products lp
+            """SELECT lp.expires_at, p.id AS product_id, p.is_paused, p.pause_reason FROM license_products lp
                JOIN products p ON lp.product_id = p.id
-               WHERE lp.license_id = ? AND LOWER(p.level) = ?""",
-            (lic["id"], level),
+               WHERE lp.license_id = ? AND LOWER(p.level) = ? AND p.app_id = ?""",
+            (lic["id"], level, app["id"]),
         ) as cur:
-            if not await cur.fetchone():
+            entitlement = await cur.fetchone()
+            if not entitlement:
                 await db.execute("UPDATE licenses SET login_strikes = login_strikes + 1 WHERE id = ?", (lic["id"],))
                 await db.commit()
                 return enc_resp({"success": False, "message": "LEVEL_NOT_ALLOWED"}, secret, req.app_id)
+
+    if entitlement and entitlement["is_paused"]:
+        return enc_resp({"success": False, "message": "PRODUCT_PAUSED",
+                         "reason": entitlement["pause_reason"] or "Temporarily unavailable"}, secret, req.app_id)
 
     # ── App-specific HWID ban check ──
     async with db.execute(
@@ -311,7 +324,8 @@ async def client_login(request: Request, req: EncryptedRequest,
                          ip=ip, hwid=hwid)
         return enc_resp({"success": False, "message": "BANNED_KEY"}, secret, req.app_id)
 
-    if lic["status"] == "expired" or (lic["expires_at"] and lic["expires_at"] < utcnow()):
+    effective_expiry = entitlement["expires_at"] if entitlement else lic["expires_at"]
+    if lic["status"] == "expired" or (effective_expiry and effective_expiry < utcnow()):
         await log_action(db, "login_expired", license_key=mask_license_key(license_key), app_id=app["id"],
                          ip=ip, hwid=hwid)
         return enc_resp({"success": False, "message": "EXPIRED_KEY"}, secret, req.app_id)
@@ -353,8 +367,13 @@ async def client_login(request: Request, req: EncryptedRequest,
                          ip=ip, hwid=hwid, details="New device fingerprint detected (multiple devices in short period)")
         # Don't block login, just log it for security monitoring
 
-    # ── Kill any existing session for this license ──
-    await db.execute("DELETE FROM sessions WHERE license_id = ?", (lic["id"],))
+    # ── Kill only the existing session for this license/product pair ──
+    selected_product_id = entitlement["product_id"] if entitlement else None
+    if selected_product_id:
+        await db.execute("DELETE FROM sessions WHERE license_id = ? AND product_id = ?",
+                         (lic["id"], selected_product_id))
+    else:
+        await db.execute("DELETE FROM sessions WHERE license_id = ? AND product_id IS NULL", (lic["id"],))
 
     # ── Create session ──
     token      = generate_session_token()
@@ -362,8 +381,8 @@ async def client_login(request: Request, req: EncryptedRequest,
     expires    = future(SESSION_DURATION)
 
     await db.execute(
-        "INSERT INTO sessions (id, token, license_id, hwid, ip, app_id, expires_at) VALUES (?,?,?,?,?,?,?)",
-        (session_id, token, lic["id"], hwid, ip, app["id"], expires),
+        "INSERT INTO sessions (id, token, license_id, hwid, ip, app_id, product_id, expires_at) VALUES (?,?,?,?,?,?,?,?)",
+        (session_id, token, lic["id"], hwid, ip, app["id"], selected_product_id, expires),
     )
 
     # ── Reset strikes on successful login ──

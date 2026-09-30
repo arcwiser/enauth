@@ -351,6 +351,19 @@ Check:
 - Logs are written to `server.log` with rotation enabled.
 - The app exposes `/health` for basic health monitoring.
 
+### Product outage controls
+
+- Open **Applications** and use **Pause All** when an entire application is unavailable.
+- Open **Product levels** and use **Pause** when only one product/level is unavailable.
+- Pausing immediately closes only the affected client sessions and blocks new affected logins.
+- On resume, EnAuth automatically restores the exact paused duration. Enter optional extra
+  compensation days when prompted (for example, enter `2` after a four-day outage to grant
+  six days total).
+- Lifetime entitlements remain lifetime. Other product levels keep running and their expiry
+  dates are not changed during a product-level outage.
+- The dashboard's **Operational Monitoring** panel checks database integrity, recent login
+  failures, paused services, uptime, and important production configuration settings.
+
 ## Configuration
 
 Environment variables (see `.env.example`):
@@ -452,7 +465,10 @@ For issues and questions, please refer to the project documentation or contact t
 
 ### Unreleased
 
-- No unreleased changes yet.
+- Added application-wide and per-product outage pause/resume controls.
+- Added automatic downtime restoration plus optional compensation for affected entitlements.
+- Added operational monitoring and production configuration checks to the dashboard.
+- Added product-aware client sessions and SDK pause status values.
 
 ### 1.1.0
 

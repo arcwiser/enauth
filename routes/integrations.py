@@ -143,8 +143,8 @@ async def generate(app_id: str, body: GenerateBody, key=Depends(require_scope("w
              body.max_hwids, expires_at, body.notes),
         )
         await db.execute(
-            "INSERT INTO license_products (id, license_id, product_id) VALUES (?, ?, ?)",
-            (generate_uid(), license_id, product["id"]),
+            "INSERT INTO license_products (id, license_id, product_id, expires_at) VALUES (?, ?, ?, ?)",
+            (generate_uid(), license_id, product["id"], expires_at),
         )
         created.append({"id": license_id, "key": raw_key, "expires_at": expires_at})
     await log_action(db, "integration_generate", app_id=app_id,

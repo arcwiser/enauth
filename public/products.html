@@ -19,10 +19,10 @@
         <div class="table-wrap">
           <table>
             <thead><tr>
-              <th>App</th><th>Level</th><th>Name</th><th>Pricing Points</th><th>Actions</th>
+              <th>App</th><th>Level</th><th>Name</th><th>Status</th><th>Pricing Points</th><th>Actions</th>
             </tr></thead>
             <tbody id="tbody">
-              <tr class="loading-row"><td colspan="5"><span class="spinner"></span></td></tr>
+              <tr class="loading-row"><td colspan="6"><span class="spinner"></span></td></tr>
             </tbody>
           </table>
         </div>
@@ -120,13 +120,30 @@
     } catch (e) { toast(e.message, "error"); }
   }
 
+  async function pauseLevel(id) {
+    const reason = prompt("Why is this product being paused?", "Product outage");
+    if (reason === null) return;
+    try { await API.pauseProduct(id, reason); toast("Product paused; its sessions were closed", "warning"); await load(); }
+    catch (e) { toast(e.message, "error"); }
+  }
+
+  async function resumeLevel(id) {
+    const days = Number(prompt("Extra compensation days (paused time is restored automatically):", "0"));
+    if (!Number.isFinite(days) || days < 0) return toast("Enter zero or a positive number", "error");
+    try {
+      const r = await API.resumeProduct(id, days * 24);
+      toast(`Product resumed; keys extended ${Math.round(r.extended_by_seconds / 3600)} hours`, "success");
+      await load();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
   async function load() {
     const tbody = document.getElementById("tbody");
-    tbody.innerHTML = `<tr class="loading-row"><td colspan="5"><span class="spinner"></span></td></tr>`;
+    tbody.innerHTML = `<tr class="loading-row"><td colspan="6"><span class="spinner"></span></td></tr>`;
     try {
       products = await API.getProducts();
       if (!products.length) {
-        tbody.innerHTML = `<tr><td colspan="5"><div class="empty"><div class="empty-icon">🧩</div><div class="empty-text">No levels yet</div></div></td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6"><div class="empty"><div class="empty-icon">🧩</div><div class="empty-text">No levels yet</div></div></td></tr>`;
         return;
       }
       // Fetch all pricing in parallel instead of sequentially
@@ -145,10 +162,14 @@
             <td>${p.app_name}</td>
             <td><b>${p.level}</b></td>
             <td>${p.name}</td>
+            <td><span class="badge ${p.is_paused ? 'badge-banned' : 'badge-active'}">${p.is_paused ? 'Paused' : 'Online'}</span>${p.pause_reason ? `<div style="font-size:11px;color:var(--text-dim);margin-top:4px">${escapeHtml(p.pause_reason)}</div>` : ''}</td>
             <td style="max-width:320px">${pricingHtml}</td>
             <td>
               <div class="action-group">
                 <button class="btn btn-sm btn-outline" onclick="addPricing('${p.id}')">+ Pricing</button>
+                ${p.is_paused
+                  ? `<button class="btn btn-sm btn-primary" onclick="resumeLevel('${p.id}')">Resume + Comp</button>`
+                  : `<button class="btn btn-sm btn-warning" onclick="pauseLevel('${p.id}')">Pause</button>`}
                 <button class="btn btn-sm btn-danger" onclick="deleteLevel('${p.id}','${p.level}')">Delete</button>
               </div>
             </td>
