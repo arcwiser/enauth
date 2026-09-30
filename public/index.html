@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>EnAuth - Login / Sign Up</title>
+  <title>EnAuth - Sign In</title>
   <meta name="description" content="EnAuth authentication">
   <link rel="stylesheet" href="css/style.css">
   <style>
@@ -18,22 +18,6 @@
         linear-gradient(180deg, #06080d, #0b1017 60%, #05070a 100%);
     }
     .login-box { width: 100%; max-width: 470px; }
-    .auth-tabs { display: flex; gap: 10px; margin-bottom: 18px; }
-    .auth-tab {
-      flex: 1;
-      border: 1px solid var(--border);
-      background: rgba(255,255,255,0.03);
-      color: var(--text-dim);
-      padding: 12px 14px;
-      border-radius: var(--radius-md);
-      font-weight: 700;
-      cursor: pointer;
-    }
-    .auth-tab.active {
-      color: #fff;
-      border-color: var(--primary);
-      background: linear-gradient(135deg, rgba(0,242,255,0.18), rgba(112,0,255,0.12));
-    }
     .panel-note {
       margin-top: 10px;
       font-size: 12px;
@@ -73,15 +57,10 @@
       <div class="logo-icon">E</div>
       <div class="logo-text">ENAUTH</div>
     </div>
-    <p class="login-subtitle" id="login-subtitle">Admin/User Sign In</p>
+    <p class="login-subtitle" id="login-subtitle">Admin Sign In</p>
 
     <div class="auth-error" id="login-error"></div>
     <div class="auth-success" id="login-success"></div>
-
-    <div class="auth-tabs">
-      <button class="auth-tab active" id="tab-signin" type="button">Sign In</button>
-      <button class="auth-tab" id="tab-signup" type="button">Sign Up</button>
-    </div>
 
     <form id="login-form" autocomplete="off">
       <div id="credentials-fields">
@@ -94,15 +73,6 @@
           <input class="input" id="password" type="password" placeholder="Enter password" required>
         </div>
         <button class="btn btn-primary" type="submit" id="login-btn" style="width:100%; justify-content:center;">Sign In</button>
-        <div id="signup-requirements" class="panel-note" style="display:none;">
-          Password requirements:
-          <ul style="margin:8px 0 0 16px; padding:0">
-            <li>At least 10 characters</li>
-            <li>At least one letter</li>
-            <li>At least one number</li>
-            <li>At least one special character</li>
-          </ul>
-        </div>
         <div class="helper-row">
           <button class="btn btn-secondary" type="button" id="reseller-btn">Reseller Sign In</button>
         </div>
@@ -128,7 +98,7 @@
     return localStorage.getItem("enauth_base_url") || "http://127.0.0.1:8080";
   })();
 
-  const state = { mode: "signin", tempToken: null };
+  const state = { tempToken: null };
 
   function $id(id) { return document.getElementById(id); }
   function showError(message) {
@@ -179,11 +149,8 @@
   async function authMe(token) {
     return requestJson("/api/admin/auth/me", null, "GET", token);
   }
-  async function authSignup(username, password) {
-    return requestJson("/api/admin/auth/signup", { username, password });
-  }
   async function authSignin(username, password) {
-    return requestJson("/api/admin/auth/signin", { username, password });
+    return requestJson("/api/admin/auth/login", { username, password });
   }
   async function authVerify2FA(temp_token, code) {
     return requestJson("/api/admin/auth/2fa/verify", { temp_token, code });
@@ -191,11 +158,8 @@
 
   function applyMode() {
     clearAlerts();
-    $id("tab-signin").classList.toggle("active", state.mode === "signin");
-    $id("tab-signup").classList.toggle("active", state.mode === "signup");
-    $id("login-subtitle").textContent = state.mode === "signup" ? "Create Auth User Account" : "Admin/User Sign In";
-    $id("login-btn").textContent = state.mode === "signup" ? "Sign Up" : "Sign In";
-    $id("signup-requirements").style.display = state.mode === "signup" ? "block" : "none";
+    $id("login-subtitle").textContent = "Admin Sign In";
+    $id("login-btn").textContent = "Sign In";
   }
 
   function show2FA() {
@@ -224,13 +188,8 @@
       return;
     }
 
-    setBusy(button, true, state.mode === "signup" ? "Creating account..." : "Signing in...");
+    setBusy(button, true, "Signing in...");
     try {
-      if (state.mode === "signup") {
-        await authSignup(username, password);
-        showSuccess("Account created. Signing you in...");
-      }
-
       const res = await authSignin(username, password);
       if (res.two_factor_required) {
         state.tempToken = res.temp_token;
@@ -244,7 +203,7 @@
     } catch (err) {
       showError(err.message || "Login failed");
     } finally {
-      setBusy(button, false, state.mode === "signup" ? "Sign Up" : "Sign In");
+      setBusy(button, false, "Sign In");
       if (!state.tempToken) applyMode();
     }
   }
@@ -286,14 +245,6 @@
       return;
     }
 
-    $id("tab-signin").addEventListener("click", () => {
-      state.mode = "signin";
-      applyMode();
-    });
-    $id("tab-signup").addEventListener("click", () => {
-      state.mode = "signup";
-      applyMode();
-    });
     $id("login-form").addEventListener("submit", handleSubmit);
     $id("twofactor-btn").addEventListener("click", handle2FA);
     $id("back-btn").addEventListener("click", hide2FA);

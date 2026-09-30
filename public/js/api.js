@@ -111,8 +111,6 @@ const API = {
   // Auth
   login:   (u, p)     => api("POST", "/api/admin/auth/login",  { username: u, password: p }),
   logout:  ()          => api("POST", "/api/admin/auth/logout"),
-  signup:  (u, p)      => api("POST", "/api/admin/auth/signup", { username: u, password: p }),
-  signin:  (u, p)      => api("POST", "/api/admin/auth/signin", { username: u, password: p }),
   me:      ()          => api("GET",  "/api/admin/auth/me"),
 
   // Dashboard

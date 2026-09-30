@@ -228,10 +228,6 @@ class LoginBody(BaseModel):
     username: str
     password: str
 
-class SignupBody(BaseModel):
-    username: str
-    password: str
-
 
 def set_admin_cookie(response: Response, token: str) -> None:
     response.set_cookie(
@@ -294,77 +290,6 @@ async def admin_me(user=Depends(require_admin)):
         "two_factor_enabled": user.get("two_factor_enabled", 0),
         "theme": user.get("theme", "dark"),
     }
-
-
-@router.post("/auth/signup")
-@limiter.limit("5/minute")
-async def auth_signup(request: Request = None, body: SignupBody = None, db: aiosqlite.Connection = Depends(get_db)):
-    if body is None:
-        raise HTTPException(400, "Invalid request")
-    username = body.username.strip()
-    if len(username) < 3:
-        raise HTTPException(400, "Username too short")
-    validate_password_policy(body.password)
-
-    # Check both tables for uniqueness
-    async with db.execute("SELECT 1 FROM admin_users WHERE username = ?", (username,)) as cur:
-        if await cur.fetchone():
-            raise HTTPException(409, "Username already taken")
-    async with db.execute("SELECT 1 FROM auth_users WHERE username = ?", (username,)) as cur:
-        if await cur.fetchone():
-            raise HTTPException(409, "Username already taken")
-
-    uid = generate_uid()
-    try:
-        await db.execute(
-            "INSERT INTO auth_users (id, username, password_hash, role) VALUES (?,?,?,?)",
-            (uid, username, hash_password(body.password), "user"),
-        )
-        await db.commit()
-    except aiosqlite.IntegrityError:
-        raise HTTPException(409, "Username already taken")
-    return {"id": uid, "username": username}
-
-
-@router.post("/auth/signin")
-@limiter.limit("8/minute")
-async def auth_signin(response: Response, request: Request, body: LoginBody, db: aiosqlite.Connection = Depends(get_db)):
-    # Security: check both user tables but always return a generic 401 to prevent
-    # username enumeration. Never reveal which table or field was wrong.
-    async with db.execute("SELECT * FROM auth_users WHERE username = ?", (body.username,)) as cur:
-        auth_user = await cur.fetchone()
-    if auth_user and verify_password(body.password, auth_user["password_hash"]):
-        token = generate_session_token()
-        await db.execute(
-            "INSERT INTO auth_sessions (id, user_id, token, expires_at) VALUES (?, ?, ?, ?)",
-            (generate_uid(), auth_user["id"], token, future_hours(ADMIN_SESSION_HOURS)),
-        )
-        await db.commit()
-        set_admin_cookie(response, token)
-        return {"username": auth_user["username"], "role": auth_user["role"]}
-
-    async with db.execute("SELECT * FROM admin_users WHERE username = ?", (body.username,)) as cur:
-        admin_user = await cur.fetchone()
-    if admin_user and verify_password(body.password, admin_user["password_hash"]):
-        # 2FA Check
-        if admin_user["two_factor_enabled"] == 1:
-            temp_token = await create_temp_2fa_session(db, admin_user["id"], admin_user["role"])
-            return {
-                "two_factor_required": True,
-                "temp_token": temp_token,
-                "username": admin_user["username"]
-            }
-
-        token = generate_session_token()
-        await db.execute(
-            "INSERT INTO admin_sessions (id, user_id, token, expires_at) VALUES (?, ?, ?, ?)",
-            (generate_uid(), admin_user["id"], token, future_hours(ADMIN_SESSION_HOURS)),
-        )
-        await db.commit()
-        set_admin_cookie(response, token)
-        return {"username": admin_user["username"], "role": admin_user["role"]}
-
-    raise HTTPException(401, "Invalid credentials")
 
 
 # ─── Two-Factor Authentication (TOTP) Endpoints ─────────────────────────────
