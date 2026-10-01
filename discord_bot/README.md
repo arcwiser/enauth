@@ -2,8 +2,8 @@
 
 The bot provides private slash commands for license, session, build, news,
 variable, and HWID management. Operational commands require a Discord role
-named exactly `keygen` (matching is case-insensitive). Discord server members
-trusted with that role can run `/setup` or `/disconnect`.
+named `keygen` (matching ignores capitalization and surrounding spaces).
+Members trusted with that role can run `/setup` or `/disconnect`.
 
 License operations include `/bulkgen` (up to 500 keys), `/deletekey`,
 `/revealkey`, `/license`, `/keyhistory`, and `/extendproduct`. Use
