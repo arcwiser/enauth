@@ -115,8 +115,10 @@ class SetupModal(discord.ui.Modal, title="Connect EnAuth"):
     api_key = discord.ui.TextInput(label="EnAuth API key", placeholder="enauth_...", max_length=200)
 
     async def on_submit(self, interaction: discord.Interaction):
-        if interaction.user.id != interaction.guild.owner_id:
-            await interaction.response.send_message("Only the Discord server owner can configure the bot.", ephemeral=True)
+        if not isinstance(interaction.user, discord.Member) or not any(
+            role.name.lower() == KEYGEN_ROLE for role in interaction.user.roles
+        ):
+            await interaction.response.send_message("You need the keygen role to configure the bot.", ephemeral=True)
             return
         server = str(self.server_url).rstrip("/")
         if not server.startswith("https://") or not str(self.api_key).startswith("enauth_"):
@@ -145,19 +147,15 @@ bot = EnAuthBot()
 
 @bot.tree.command(description="Connect this Discord server to EnAuth")
 @app_commands.guild_only()
+@keygen
 async def setup(interaction: discord.Interaction):
-    if interaction.user.id != interaction.guild.owner_id:
-        await interaction.response.send_message("Only the Discord server owner can run setup.", ephemeral=True)
-        return
     await interaction.response.send_modal(SetupModal())
 
 
 @bot.tree.command(description="Remove this server's stored EnAuth integration")
 @app_commands.guild_only()
+@keygen
 async def disconnect(interaction: discord.Interaction):
-    if interaction.user.id != interaction.guild.owner_id:
-        await interaction.response.send_message("Only the Discord server owner can disconnect EnAuth.", ephemeral=True)
-        return
     delete_config(interaction.guild_id)
     await interaction.response.send_message("Integration removed.", ephemeral=True)
 

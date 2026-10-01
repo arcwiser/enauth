@@ -2,8 +2,8 @@
 
 The bot provides private slash commands for license, session, build, news,
 variable, and HWID management. Operational commands require a Discord role
-named exactly `keygen` (matching is case-insensitive). Only the Discord server
-owner can run `/setup` or `/disconnect`.
+named exactly `keygen` (matching is case-insensitive). Discord server members
+trusted with that role can run `/setup` or `/disconnect`.
 
 License operations include `/bulkgen` (up to 500 keys), `/deletekey`,
 `/revealkey`, `/license`, `/keyhistory`, and `/extendproduct`. Use
@@ -15,7 +15,8 @@ Operational controls include `/pauseapp` and `/resumeapp`. Resuming first shows
 a compensation preview unless `confirm:true` is supplied. `/resellers` lists
 reseller IDs and `/creditreseller` credits a balance after explicit
 confirmation. These higher-impact commands require an `admin`-scope EnAuth API
-key in addition to the Discord `keygen` role.
+key in addition to the Discord `keygen` role. Treat that role as privileged:
+members who have it can replace or remove the Discord server's EnAuth connection.
 
 The bot intentionally uses a revocable EnAuth API key instead of an application
 secret. Create an `admin`-scope API key in the EnAuth dashboard. `/setup` opens
