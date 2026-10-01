@@ -1,10 +1,9 @@
 # EnAuth Discord Bot
 
 The bot provides private slash commands for license, session, build, news,
-variable, and HWID management. Operational commands require a Discord role
-named `keygen` (matching ignores capitalization and surrounding spaces).
-Members with that role or Discord's Administrator permission can run `/setup`
-or `/disconnect` and use the protected bot commands.
+variable, and HWID management. Every protected command requires the exact role
+configured through `BOT_ALLOWED_ROLE_ID`. Members holding that role can run
+`/setup`, `/disconnect`, and the operational commands.
 
 License operations include `/bulkgen` (up to 500 keys), `/deletekey`,
 `/revealkey`, `/license`, `/keyhistory`, and `/extendproduct`. Use
@@ -16,7 +15,7 @@ Operational controls include `/pauseapp` and `/resumeapp`. Resuming first shows
 a compensation preview unless `confirm:true` is supplied. `/resellers` lists
 reseller IDs and `/creditreseller` credits a balance after explicit
 confirmation. These higher-impact commands require an `admin`-scope EnAuth API
-key in addition to the Discord `keygen` role. Treat that role as privileged:
+key in addition to the configured Discord role. Treat that role as privileged:
 members who have it can replace or remove the Discord server's EnAuth connection.
 
 The bot intentionally uses a revocable EnAuth API key instead of an application
@@ -37,6 +36,10 @@ python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().
 Put the Discord bot token and generated encryption key in `.env`, then install
 the service:
 
+Enable Discord Developer Mode, right-click the role that should control the bot,
+choose **Copy Role ID**, and put that number in `.env` as
+`BOT_ALLOWED_ROLE_ID=...`.
+
 ```bash
 cp enauth-bot.service.example /etc/systemd/system/enauth-bot.service
 systemctl daemon-reload
@@ -44,6 +47,6 @@ systemctl enable --now enauth-bot
 journalctl -u enauth-bot -f
 ```
 
-Invite the bot with `bot` and `applications.commands` scopes. Create the
-`keygen` role, assign it only to trusted staff, then have the Discord server
-owner run `/setup`.
+Invite the bot with `bot` and `applications.commands` scopes. Assign the
+configured role only to trusted staff, then have a member holding it run
+`/setup`.

@@ -1,5 +1,6 @@
 import io
 import json
+import logging
 import os
 import sqlite3
 from datetime import datetime
@@ -16,7 +17,11 @@ load_dotenv()
 TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 FERNET = Fernet(os.environ["BOT_CONFIG_KEY"].encode())
 DB_PATH = os.getenv("BOT_DB_PATH", "bot-config.db")
-KEYGEN_ROLE = "keygen"
+ALLOWED_ROLE_ID_TEXT = os.getenv("BOT_ALLOWED_ROLE_ID", "").strip()
+if not ALLOWED_ROLE_ID_TEXT.isdigit():
+    raise RuntimeError("BOT_ALLOWED_ROLE_ID must be set to a Discord role ID")
+ALLOWED_ROLE_ID = int(ALLOWED_ROLE_ID_TEXT)
+logger = logging.getLogger("enauth.discord_bot")
 
 
 def db():
@@ -98,19 +103,17 @@ def configured_app(interaction: discord.Interaction):
     return config[1]
 
 
-def has_keygen_access(interaction: discord.Interaction) -> bool:
+def has_bot_access(interaction: discord.Interaction) -> bool:
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
         return False
-    if interaction.user.guild_permissions.administrator:
-        return True
-    return any(role.name.strip().casefold() == KEYGEN_ROLE for role in interaction.user.roles)
+    return any(role.id == ALLOWED_ROLE_ID for role in interaction.user.roles)
 
 
 async def require_keygen(interaction: discord.Interaction):
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
         raise app_commands.CheckFailure("Commands can only be used inside a Discord server.")
-    if not has_keygen_access(interaction):
-        raise app_commands.CheckFailure("You need the keygen role or Administrator permission to use this command.")
+    if not has_bot_access(interaction):
+        raise app_commands.CheckFailure(f"You need the configured bot role (`{ALLOWED_ROLE_ID}`) to use this command.")
     return True
 
 
@@ -123,9 +126,9 @@ class SetupModal(discord.ui.Modal, title="Connect EnAuth"):
     api_key = discord.ui.TextInput(label="EnAuth API key", placeholder="enauth_...", max_length=200)
 
     async def on_submit(self, interaction: discord.Interaction):
-        if not has_keygen_access(interaction):
+        if not has_bot_access(interaction):
             await interaction.response.send_message(
-                "You need the keygen role or Administrator permission to configure the bot.", ephemeral=True
+                f"You need the configured bot role (`{ALLOWED_ROLE_ID}`) to configure the bot.", ephemeral=True
             )
             return
         server = str(self.server_url).rstrip("/")
@@ -148,6 +151,9 @@ class EnAuthBot(commands.Bot):
 
     async def setup_hook(self):
         await self.tree.sync()
+
+    async def on_ready(self):
+        logger.info("Connected to Discord as %s (%s)", self.user, self.user.id if self.user else "unknown")
 
 
 bot = EnAuthBot()
@@ -184,7 +190,7 @@ async def help_command(interaction: discord.Interaction):
 **Integration**
 `/config`, `/whoami`, `/setup`, `/disconnect`
 
-Every operational command requires the `keygen` role."""
+Every operational command requires the configured Discord role."""
     await interaction.response.send_message(commands_text, ephemeral=True)
 
 
@@ -338,9 +344,9 @@ class AddProductSelect(discord.ui.Select):
         super().__init__(placeholder="Choose a product to add", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        if not has_keygen_access(interaction):
+        if not has_bot_access(interaction):
             await interaction.response.send_message(
-                "You need the keygen role or Administrator permission.", ephemeral=True
+                f"You need the configured bot role (`{ALLOWED_ROLE_ID}`).", ephemeral=True
             )
             return
         await interaction.response.defer(ephemeral=True)
@@ -483,13 +489,15 @@ async def creditreseller(interaction: discord.Interaction, reseller_id: str, amo
 @keygen
 async def config(interaction: discord.Interaction):
     server, app_id, _ = get_config(interaction.guild_id)
-    await interaction.response.send_message(f"Server: `{server}`\nApp: `{app_id}`\nRequired role: `{KEYGEN_ROLE}`", ephemeral=True)
+    await interaction.response.send_message(f"Server: `{server}`\nApp: `{app_id}`\nRequired role ID: `{ALLOWED_ROLE_ID}`", ephemeral=True)
 
 
 @bot.tree.command(description="Show your bot authorization")
 @keygen
 async def whoami(interaction: discord.Interaction):
-    await interaction.response.send_message(f"Authorized as {interaction.user.mention} with the `{KEYGEN_ROLE}` role.", ephemeral=True)
+    await interaction.response.send_message(
+        f"Authorized as {interaction.user.mention} with role ID `{ALLOWED_ROLE_ID}`.", ephemeral=True
+    )
 
 
 @bot.tree.command(description="Show recent authentication logs")
@@ -614,6 +622,12 @@ async def unbanhwid(interaction: discord.Interaction, hwid: str):
 @bot.tree.error
 async def command_error(interaction: discord.Interaction, error):
     original = getattr(error, "original", error)
+    logger.error(
+        "Slash command %s failed: %r",
+        interaction.command.name if interaction.command else "unknown",
+        original,
+        exc_info=(type(original), original, original.__traceback__),
+    )
     message = str(original) or "Command failed."
     if interaction.response.is_done():
         await interaction.followup.send(message[:1900], ephemeral=True)
@@ -622,4 +636,4 @@ async def command_error(interaction: discord.Interaction, error):
 
 
 if __name__ == "__main__":
-    bot.run(TOKEN, log_handler=None)
+    bot.run(TOKEN, log_level=logging.INFO)
