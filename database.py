@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS licenses (
     id           TEXT PRIMARY KEY,
     key          TEXT NOT NULL UNIQUE,
     key_hash     TEXT UNIQUE,
+    key_ciphertext TEXT,
     app_id       TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
     status       TEXT NOT NULL DEFAULT 'active',
     created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,

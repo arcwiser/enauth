@@ -449,7 +449,8 @@
       // The server stores only a one-way hash and returns a safe display mask.
       const rawKey = lic.key;
       document.getElementById("d-key").textContent = rawKey;
-      document.getElementById("d-key").title = "Full license keys are shown only when generated";
+      document.getElementById("d-key").title = rawKey.includes('…') ? "Legacy masked key" : "Double click to copy";
+      document.getElementById("d-key").ondblclick = rawKey.includes('…') ? null : () => copyText(rawKey);
 
       document.getElementById("d-status").innerHTML = statusBadge(lic.status);
       document.getElementById("d-expiry").textContent = fmtDate(lic.expires_at) || "Lifetime";

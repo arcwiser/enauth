@@ -23,7 +23,7 @@ from utils.crypto import (
     generate_license_key, generate_app_secret,
     generate_session_token, generate_uid,
     hash_password, verify_password,
-    hash_license_key, mask_license_key,
+    hash_license_key, mask_license_key, encrypt_license_key, display_license_key,
 )
 from utils.logger import app_log, log_action
 
@@ -1197,8 +1197,10 @@ async def reseller_buy_key(body: ResellerBuyBody, reseller=Depends(require_resel
         license_id = generate_uid()
         license_key = generate_license_key()
         await db.execute(
-            "INSERT INTO licenses (id, key, key_hash, app_id, max_hwids, expires_at, notes) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (license_id, mask_license_key(license_key), hash_license_key(license_key), target["app_id"], 1, expires, f"product_id={target['product_id']}"),
+            """INSERT INTO licenses (id, key, key_hash, key_ciphertext, app_id, max_hwids, expires_at, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (license_id, mask_license_key(license_key), hash_license_key(license_key),
+             encrypt_license_key(license_key), target["app_id"], 1, expires, f"product_id={target['product_id']}"),
         )
         await db.execute(
             "INSERT OR IGNORE INTO license_products (id, license_id, product_id, expires_at) VALUES (?, ?, ?, ?)",
@@ -1243,6 +1245,9 @@ async def reseller_list_keys(reseller=Depends(require_reseller), db: aiosqlite.C
         (reseller["id"],),
     ) as cur:
         rows = rows_to_list(await cur.fetchall())
+    for row in rows:
+        row["key"] = display_license_key(row["key"], row.get("key_ciphertext"))
+        row.pop("key_ciphertext", None)
     return {"keys": rows}
 
 
@@ -1565,6 +1570,9 @@ async def list_licenses(app_id: Optional[str] = None,
 
     async with db.execute(sql, args) as cur:
         rows = rows_to_list(await cur.fetchall())
+    for row in rows:
+        row["key"] = display_license_key(row["key"], row.get("key_ciphertext"))
+        row.pop("key_ciphertext", None)
 
     if rows:
         ids = [r["id"] for r in rows]
@@ -1648,8 +1656,10 @@ async def create_license(body: CreateLicenseBody,
         lid = generate_uid()
         notes = body.notes
         await db.execute(
-            "INSERT INTO licenses (id, key, key_hash, app_id, max_hwids, expires_at, notes, metadata) VALUES (?,?,?,?,?,?,?,?)",
-            (lid, mask_license_key(key), hash_license_key(key), body.app_id, body.max_hwids, expires, notes, body.metadata),
+            """INSERT INTO licenses (id, key, key_hash, key_ciphertext, app_id, max_hwids, expires_at, notes, metadata)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (lid, mask_license_key(key), hash_license_key(key), encrypt_license_key(key),
+             body.app_id, body.max_hwids, expires, notes, body.metadata),
         )
         for pid in unique_pids:
             await db.execute(
@@ -1676,6 +1686,8 @@ async def get_license(license_id: str, user=Depends(require_admin),
     if not lic:
         raise HTTPException(404, "License not found")
     lic = dict(lic)
+    lic["key"] = display_license_key(lic["key"], lic.get("key_ciphertext"))
+    lic.pop("key_ciphertext", None)
     async with db.execute("SELECT * FROM hwids WHERE license_id = ?", (license_id,)) as cur:
         lic["hwids"] = rows_to_list(await cur.fetchall())
     async with db.execute(
@@ -3431,7 +3443,7 @@ async def get_portal_license(lic=Depends(require_portal_user), db: aiosqlite.Con
     
     return {
         "app_name": lic["app_name"],
-        "key": lic["key"],
+        "key": display_license_key(lic["key"], lic.get("key_ciphertext")),
         "status": lic["status"],
         "expires_at": lic["expires_at"],
         "max_hwids": lic["max_hwids"],

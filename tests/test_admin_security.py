@@ -12,7 +12,7 @@ import pyotp
 from fastapi import HTTPException
 from fastapi import Response
 
-from utils.crypto import hash_password
+from utils.crypto import hash_password, encrypt_license_key, decrypt_license_key
 
 
 MODULES_TO_RESET = [
@@ -220,6 +220,15 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(valid.status_color, "#12abef")
         with self.assertRaises(ValueError):
             self.admin.UpdateProductBody(service_status="Online", status_color="red; background:url(x)")
+
+    async def test_license_keys_use_authenticated_reversible_storage(self):
+        original = "ABCDEF-123456-ABCDEF-123456-ABCDEF-123456"
+        encrypted = encrypt_license_key(original)
+        self.assertNotIn(original, encrypted)
+        self.assertEqual(decrypt_license_key(encrypted), original)
+        tampered = encrypted[:-2] + ("AA" if encrypted[-2:] != "AA" else "BB")
+        with self.assertRaises(Exception):
+            decrypt_license_key(tampered)
 
     async def test_reseller_signin_returns_a_working_session(self):
         async with aiosqlite.connect(self.db_path) as db:

@@ -116,12 +116,15 @@ class DatabaseMigrationTests(unittest.IsolatedAsyncioTestCase):
                 entitlement_columns = {row[1] for row in await cur.fetchall()}
             async with db.execute("PRAGMA table_info(app_files)") as cur:
                 file_columns = {row[1] for row in await cur.fetchall()}
+            async with db.execute("PRAGMA table_info(licenses)") as cur:
+                license_columns = {row[1] for row in await cur.fetchall()}
             async with db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='outage_events'") as cur:
                 outage_table = await cur.fetchone()
 
         self.assertTrue({"service_status", "status_message", "status_color"} <= product_columns)
         self.assertTrue({"is_paused", "paused_at", "pause_reason", "total_compensation_seconds"} <= entitlement_columns)
         self.assertTrue({"portal_visible", "product_id"} <= file_columns)
+        self.assertIn("key_ciphertext", license_columns)
         self.assertIsNotNone(outage_table)
 
 

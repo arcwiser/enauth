@@ -376,9 +376,10 @@ Check:
 - The customer portal displays owned products, separate expiration dates, service status,
   compensation received, and the configured HWID-reset cooldown.
 - Resellers sign in from the main login page using **Reseller Sign In**.
-- A complete license key is shown only at generation time. Later lists show a safe mask
-  because EnAuth stores a one-way hash and cannot recover the original key; save generated
-  keys immediately.
+- New license keys are stored as both a one-way lookup hash and AES-GCM authenticated
+  ciphertext, allowing authorized admins, the issuing reseller, and the owning customer
+  portal to copy them later without plaintext database storage. Keys created before this
+  upgrade remain masked because their original values cannot be recovered retroactively.
 
 ## Configuration
 

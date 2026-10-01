@@ -121,6 +121,43 @@ def mask_license_key(value: str) -> str:
     return f"{normalized[:8]}…{normalized[-4:]}"
 
 
+def _license_encryption_key() -> bytes:
+    """Derive a separate AES-256 key from the required server pepper."""
+    pepper = os.getenv("LICENSE_KEY_PEPPER", "")
+    if not pepper:
+        raise RuntimeError("LICENSE_KEY_PEPPER is required")
+    return hashlib.sha256(b"enauth-license-storage-v1\0" + pepper.encode("utf-8")).digest()
+
+
+def encrypt_license_key(value: str) -> str:
+    """Encrypt a license for authorized later display; never store it as plaintext."""
+    nonce = os.urandom(_NONCE_LEN)
+    ciphertext = AESGCM(_license_encryption_key()).encrypt(
+        nonce, normalize_license_key(value).encode("utf-8"), b"enauth-license-key-v1"
+    )
+    return base64.urlsafe_b64encode(nonce + ciphertext).decode("ascii")
+
+
+def decrypt_license_key(value: str) -> str:
+    raw = base64.urlsafe_b64decode(value.encode("ascii"))
+    if len(raw) < _NONCE_LEN + 17:
+        raise ValueError("Invalid stored license ciphertext")
+    plaintext = AESGCM(_license_encryption_key()).decrypt(
+        raw[:_NONCE_LEN], raw[_NONCE_LEN:], b"enauth-license-key-v1"
+    )
+    return plaintext.decode("utf-8")
+
+
+def display_license_key(masked: str, ciphertext: str | None) -> str:
+    """Return the authorized full key when available, otherwise its legacy mask."""
+    if not ciphertext:
+        return masked
+    try:
+        return decrypt_license_key(ciphertext)
+    except Exception:
+        return masked
+
+
 def generate_app_secret() -> str:
     """64 hex chars = 256 bits of entropy."""
     return secrets.token_hex(64)

@@ -316,7 +316,9 @@
           <td>
             <div class="key-cell">
               <span class="key-text mono">${r.key}</span>
-              <span title="Full keys are shown once when generated" style="font-size:10px;color:var(--text-dim)">shown once</span>
+              ${r.key.includes('…')
+                ? `<span title="This legacy key predates encrypted storage" style="font-size:10px;color:var(--text-dim)">legacy masked</span>`
+                : `<button class="copy-btn" onclick="copyText(decodeURIComponent('${encodeURIComponent(r.key)}'))" title="Copy full key">⧉</button>`}
             </div>
             ${r.notes ? `<div style="font-size:11px;color:var(--text3);margin-top:2px">📝 ${r.notes}</div>` : ""}
             ${r.metadata ? `<div style="font-size:11px;color:var(--blue);margin-top:1px">🏷️ ${r.metadata}</div>` : ""}

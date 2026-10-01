@@ -290,7 +290,9 @@
       tbody.innerHTML = keys.map(k => `
         <tr>
           <td style="width:46px"><input type="checkbox" class="key-check" value="${k.id}"></td>
-          <td><span class="mono">${k.key}</span> <span title="Full keys are shown once when generated" style="font-size:10px;color:var(--text3)">shown once</span></td>
+          <td><span class="mono">${k.key}</span> ${k.key.includes('…')
+            ? `<span title="This legacy key predates encrypted storage" style="font-size:10px;color:var(--text3)">legacy masked</span>`
+            : `<button class="copy-btn" onclick="copyText(decodeURIComponent('${encodeURIComponent(k.key)}'))">⧉</button>`}</td>
           <td>${k.product_level || "—"}</td>
           <td>${statusBadge(k.status)}</td>
           <td style="color:var(--text2)">${k.expires_at ? fmtDate(k.expires_at) : "—"}</td>

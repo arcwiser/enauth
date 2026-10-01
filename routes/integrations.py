@@ -9,7 +9,8 @@ from pydantic import BaseModel, Field
 
 from database import get_db
 from routes.admin import require_api_key
-from utils.crypto import generate_license_key, generate_uid, hash_license_key, mask_license_key
+from utils.crypto import (generate_license_key, generate_uid, hash_license_key,
+                          mask_license_key, encrypt_license_key, display_license_key)
 from utils.logger import log_action
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
@@ -50,7 +51,10 @@ async def find_license(db: aiosqlite.Connection, app_id: str, identifier: str):
         row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "License not found")
-    return dict(row)
+    result = dict(row)
+    result["key"] = display_license_key(result["key"], result.get("key_ciphertext"))
+    result.pop("key_ciphertext", None)
+    return result
 
 
 class GenerateBody(BaseModel):
@@ -107,7 +111,7 @@ async def licenses(app_id: str, search: Optional[str] = None, limit: int = 25,
                    _key=Depends(require_scope("read")), db=Depends(get_db)):
     await require_app(db, app_id)
     limit = max(1, min(limit, 50))
-    sql = "SELECT id, key, status, expires_at, max_hwids, notes, created_at FROM licenses WHERE app_id = ?"
+    sql = "SELECT id, key, key_ciphertext, status, expires_at, max_hwids, notes, created_at FROM licenses WHERE app_id = ?"
     args = [app_id]
     if search:
         sql += " AND (id = ? OR key_hash = ? OR notes LIKE ?)"
@@ -115,7 +119,11 @@ async def licenses(app_id: str, search: Optional[str] = None, limit: int = 25,
     sql += " ORDER BY created_at DESC LIMIT ?"
     args.append(limit)
     async with db.execute(sql, args) as cur:
-        return [dict(row) for row in await cur.fetchall()]
+        rows = [dict(row) for row in await cur.fetchall()]
+    for row in rows:
+        row["key"] = display_license_key(row["key"], row.get("key_ciphertext"))
+        row.pop("key_ciphertext", None)
+    return rows
 
 
 @router.post("/apps/{app_id}/licenses")
@@ -139,9 +147,9 @@ async def generate(app_id: str, body: GenerateBody, key=Depends(require_scope("w
         license_id = generate_uid()
         await db.execute(
             """INSERT INTO licenses
-               (id, key, key_hash, app_id, max_hwids, expires_at, notes)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (license_id, mask_license_key(raw_key), hash_license_key(raw_key), app_id,
+               (id, key, key_hash, key_ciphertext, app_id, max_hwids, expires_at, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (license_id, mask_license_key(raw_key), hash_license_key(raw_key), encrypt_license_key(raw_key), app_id,
              body.max_hwids, expires_at, body.notes),
         )
         await db.execute(
