@@ -109,11 +109,21 @@ def has_bot_access(interaction: discord.Interaction) -> bool:
     return any(role.id == ALLOWED_ROLE_ID for role in interaction.user.roles)
 
 
+def detected_role_ids(interaction: discord.Interaction) -> str:
+    if not isinstance(interaction.user, discord.Member):
+        return "Discord did not resolve your account as a server member"
+    role_ids = [str(role.id) for role in interaction.user.roles if not role.is_default()]
+    return ", ".join(role_ids) if role_ids else "none"
+
+
 async def require_keygen(interaction: discord.Interaction):
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
         raise app_commands.CheckFailure("Commands can only be used inside a Discord server.")
     if not has_bot_access(interaction):
-        raise app_commands.CheckFailure(f"You need the configured bot role (`{ALLOWED_ROLE_ID}`) to use this command.")
+        raise app_commands.CheckFailure(
+            f"Required role ID: `{ALLOWED_ROLE_ID}`\n"
+            f"Role IDs Discord detected on your account: `{detected_role_ids(interaction)}`"
+        )
     return True
 
 
@@ -147,7 +157,9 @@ class SetupModal(discord.ui.Modal, title="Connect EnAuth"):
 
 class EnAuthBot(commands.Bot):
     def __init__(self):
-        super().__init__(command_prefix=commands.when_mentioned, intents=discord.Intents.none())
+        intents = discord.Intents.none()
+        intents.guilds = True
+        super().__init__(command_prefix=commands.when_mentioned, intents=intents)
 
     async def setup_hook(self):
         await self.tree.sync()
