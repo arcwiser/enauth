@@ -39,6 +39,7 @@ enum class Status {
     LevelNotAllowed,
     AppPaused,
     ProductPaused,
+    EntitlementPaused,
     SuspiciousLogin,
     Unknown,
 };

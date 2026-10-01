@@ -107,6 +107,23 @@ class DatabaseMigrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("expires_at", entitlement_columns)
         self.assertIn("product_id", session_columns)
 
+    async def test_status_portal_and_entitlement_schema(self):
+        await self.database.init_db()
+        async with self.database.aiosqlite.connect(self.db_path) as db:
+            async with db.execute("PRAGMA table_info(products)") as cur:
+                product_columns = {row[1] for row in await cur.fetchall()}
+            async with db.execute("PRAGMA table_info(license_products)") as cur:
+                entitlement_columns = {row[1] for row in await cur.fetchall()}
+            async with db.execute("PRAGMA table_info(app_files)") as cur:
+                file_columns = {row[1] for row in await cur.fetchall()}
+            async with db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='outage_events'") as cur:
+                outage_table = await cur.fetchone()
+
+        self.assertTrue({"service_status", "status_message"} <= product_columns)
+        self.assertTrue({"is_paused", "paused_at", "pause_reason", "total_compensation_seconds"} <= entitlement_columns)
+        self.assertTrue({"portal_visible", "product_id"} <= file_columns)
+        self.assertIsNotNone(outage_table)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS license_products (
     license_id  TEXT NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
     product_id  TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
     expires_at  DATETIME,
+    is_paused   INTEGER NOT NULL DEFAULT 0,
+    paused_at   DATETIME,
+    pause_reason TEXT,
+    total_compensation_seconds INTEGER NOT NULL DEFAULT 0,
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(license_id, product_id)
 );
@@ -155,6 +159,8 @@ CREATE TABLE IF NOT EXISTS app_files (
     content     BLOB NOT NULL,
     file_sha256 TEXT,
     is_secret   BOOLEAN DEFAULT 0,
+    portal_visible INTEGER NOT NULL DEFAULT 0,
+    product_id  TEXT REFERENCES products(id) ON DELETE SET NULL,
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(app_id, name)
 );
@@ -184,6 +190,8 @@ CREATE TABLE IF NOT EXISTS products (
     is_paused   INTEGER NOT NULL DEFAULT 0,
     paused_at   DATETIME,
     pause_reason TEXT,
+    service_status TEXT NOT NULL DEFAULT 'operational',
+    status_message TEXT,
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(app_id, level)
 );
@@ -262,6 +270,21 @@ CREATE INDEX IF NOT EXISTS idx_reseller_price_reseller   ON reseller_pricing_acc
 CREATE INDEX IF NOT EXISTS idx_reseller_price_point      ON reseller_pricing_access(pricing_point_id);
 CREATE INDEX IF NOT EXISTS idx_orders_reseller           ON key_orders(reseller_id);
 CREATE INDEX IF NOT EXISTS idx_orders_license            ON key_orders(license_id);
+
+CREATE TABLE IF NOT EXISTS outage_events (
+    id TEXT PRIMARY KEY,
+    app_id TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    product_id TEXT REFERENCES products(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    service_status TEXT NOT NULL,
+    public_message TEXT,
+    started_at DATETIME,
+    ended_at DATETIME,
+    downtime_seconds INTEGER NOT NULL DEFAULT 0,
+    compensation_seconds INTEGER NOT NULL DEFAULT 0,
+    affected_licenses INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
 
 CREATE TABLE IF NOT EXISTS panels (
     id          TEXT PRIMARY KEY,

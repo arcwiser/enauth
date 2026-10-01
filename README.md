@@ -363,6 +363,17 @@ Check:
   dates are not changed during a product-level outage.
 - The dashboard's **Operational Monitoring** panel checks database integrity, recent login
   failures, paused services, uptime, and important production configuration settings.
+- Each application has a public status page at `/panel/status.html?app=YOUR_APP_ID` with
+  current product health and sanitized incident history.
+- Product status can be set to operational, degraded, maintenance, or offline from
+  **Product levels**.
+- Use **Licenses → Products** to add, remove, extend, pause, or resume one product
+  entitlement without changing the other products on that license.
+- Files are private in the customer portal unless the owner explicitly enables
+  **Allow customers to download this file**. Downloads may be restricted to licenses
+  that own one selected product. Existing files remain private after upgrading.
+- The customer portal displays owned products, separate expiration dates, service status,
+  compensation received, and the configured HWID-reset cooldown.
 
 ## Configuration
 

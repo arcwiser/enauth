@@ -341,6 +341,7 @@
               ? `<button class="btn btn-primary btn-sm" style="flex:1" onclick="resumeAll('${a.id}')">▶ Resume All</button>`
               : `<button class="btn btn-warning btn-sm" style="flex:1" onclick="pauseAll('${a.id}')">⏸ Pause All</button>`}
             <button class="btn btn-warning btn-sm" style="flex:1" onclick="regenSecret('${a.id}')">🔄 Regen Secret</button>
+            <a class="btn btn-ghost btn-sm" href="status.html?app=${encodeURIComponent(a.id)}" target="_blank" style="flex:1;justify-content:center">📡 Status Page</a>
             <button class="btn btn-ghost btn-sm" style="flex:1" onclick="openTimeline('${a.id}', ${JSON.stringify(a.name)})">🕒 Timeline</button>
             <a class="btn btn-ghost btn-sm" href="licenses.html" style="flex:1;justify-content:center">🔑 Licenses</a>
             <button class="btn btn-danger btn-sm btn-icon" onclick="deleteApp('${a.id}', '${escHtml(a.name)}')" title="Delete App">🗑</button>
@@ -363,6 +364,9 @@
     const days = Number(prompt("Extra compensation days (paused time is restored automatically):", "0"));
     if (!Number.isFinite(days) || days < 0) return toast("Enter zero or a positive number", "error");
     try {
+      const preview = await API.previewAppResume(id, days * 24);
+      const totalHours = Math.round(preview.extended_by_seconds / 3600 * 10) / 10;
+      if (!confirm(`Resume all products?\n\nAffected licenses: ${preview.affected_licenses}\nExpiring: ${preview.expiring_licenses}\nLifetime: ${preview.lifetime_licenses}\nTotal extension: ${totalHours} hours`)) return;
       const r = await API.resumeApp(id, days * 24);
       toast(`Application resumed; entitlements extended ${Math.round(r.extended_by_seconds / 3600)} hours`, "success");
       await load();

@@ -227,6 +227,25 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
             online_resp = await self.client.client_login.__wrapped__(fake_request, online_req, db)
             self.assertTrue(self._decrypt_response(online_resp, seeded["secret"])["success"])
 
+    async def test_paused_entitlement_blocks_only_that_license_product(self):
+        seeded = await self._seed_app()
+        fake_request = _FakeRequest(headers={"User-Agent": "EnAuthTest/1.0"})
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("INSERT INTO products(id,app_id,name,level) VALUES(?,?,?,?)",
+                             ("product-1", seeded["app_id"], "Product", "one"))
+            await db.execute(
+                """INSERT INTO license_products(id,license_id,product_id,expires_at,is_paused)
+                   VALUES(?,?,?,?,1)""",
+                ("ent-1", seeded["license_id"], "product-1", "2099-12-31 23:59:59"),
+            )
+            await db.commit()
+            req = self._encrypted_request(seeded["app_id"], seeded["secret"], {
+                "license_key": seeded["license_key"], "hwid": "c" * 64, "level": "one"
+            })
+            response = await self.client.client_login.__wrapped__(fake_request, req, db)
+            self.assertEqual(self._decrypt_response(response, seeded["secret"])["message"], "ENTITLEMENT_PAUSED")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -216,6 +216,12 @@
       <button class="tab-btn" id="tab-register" onclick="switchTab('register')">Register Key</button>
     </div>
 
+    <div style="margin-top:24px">
+      <div class="user-welcome" style="font-size:15px;margin-bottom:12px">🧩 Owned Products</div>
+      <div id="owned-products" style="display:flex;flex-direction:column;gap:10px"></div>
+      <div id="compensation-total" style="font-size:12px;color:var(--text-dim);margin-top:10px"></div>
+    </div>
+
     <!-- Login Form -->
     <form id="login-form">
       <div class="form-group">
@@ -312,6 +318,7 @@
 
   let currentTab = "login";
   let sessionToken = localStorage.getItem(`portal_token_${panelId}`);
+  let portalCooldownHours = 24;
 
   async function init() {
     const errorBox = document.getElementById("error-box");
@@ -452,6 +459,16 @@
       document.getElementById("d-expiry").textContent = fmtDate(lic.expires_at) || "Lifetime";
       document.getElementById("d-hwid").textContent = `${lic.hwid_count} / ${lic.max_hwids}`;
       document.getElementById("d-reset").textContent = fmtDate(lic.hwid_reset_at) || "Never";
+      portalCooldownHours = Number(lic.hwid_reset_cooldown_hours ?? 24);
+      const products = lic.products || [];
+      document.getElementById("owned-products").innerHTML = products.length ? products.map(p => `
+        <div style="border:1px solid var(--border);border-radius:10px;padding:12px;text-align:left">
+          <div style="display:flex;justify-content:space-between;gap:10px"><strong>${escapeHtml(p.name)}</strong>${statusBadge(p.is_paused ? 'paused' : 'active')}</div>
+          <div style="font-size:12px;color:var(--text2);margin-top:6px">Level: ${escapeHtml(p.level)} · Expires: ${p.expires_at ? fmtDate(p.expires_at) : 'Lifetime'}</div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:4px">Service: ${escapeHtml(p.service_status || 'operational')}${p.status_message ? ` — ${escapeHtml(p.status_message)}` : ''}</div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:4px">Outage compensation: ${Math.round(Number(p.total_compensation_seconds || 0)/3600*10)/10} hours</div>
+        </div>`).join('') : '<div style="color:var(--text-dim)">No product entitlements.</div>';
+      document.getElementById("compensation-total").textContent = `Total extra outage compensation: ${Math.round(Number(lic.total_compensation_seconds || 0)/3600*10)/10} hours`;
 
       dash.style.display = "block";
 
@@ -525,7 +542,7 @@
     // Convert ISO string to proper date object
     const dateStr = lastResetStr.includes("Z") ? lastResetStr : lastResetStr.replace(" ", "T") + "Z";
     const lastReset = new Date(dateStr);
-    const cooldownDuration = 24 * 60 * 60 * 1000; // 24 hours
+    const cooldownDuration = portalCooldownHours * 60 * 60 * 1000;
 
     function tick() {
       const now = new Date();

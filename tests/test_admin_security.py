@@ -20,6 +20,7 @@ MODULES_TO_RESET = [
     "database",
     "routes.admin",
     "routes.client",
+    "routes.status",
     "utils.logger",
 ]
 
@@ -45,6 +46,7 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
 
         self.database = importlib.import_module("database")
         self.admin = importlib.import_module("routes.admin")
+        self.status_routes = importlib.import_module("routes.status")
         await self.database.init_db()
 
     async def asyncTearDown(self):
@@ -167,6 +169,51 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
         log_text = self.log_path.read_text(encoding="utf-8")
         self.assertNotIn("Password reset token for", log_text)
         self.assertIn("Password reset requested for admin", log_text)
+
+    async def test_portal_downloads_are_opt_in_and_product_scoped(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("INSERT INTO applications(id,name,secret_key) VALUES(?,?,?)", ("app-1", "App", "s" * 64))
+            await db.execute("INSERT INTO products(id,app_id,name,level) VALUES(?,?,?,?)", ("p-1", "app-1", "Loader", "loader"))
+            await db.execute("INSERT INTO licenses(id,key,key_hash,app_id) VALUES(?,?,?,?)", ("l-1", "masked", "h" * 64, "app-1"))
+            await db.execute(
+                "INSERT INTO app_files(id,app_id,name,content,portal_visible,product_id) VALUES(?,?,?,?,?,?)",
+                ("f-1", "app-1", "loader.exe", b"safe", 0, "p-1"),
+            )
+            await db.commit()
+            lic = {"id": "l-1", "app_id": "app-1"}
+
+            with self.assertRaises(HTTPException) as private_error:
+                await self.admin.portal_download_file("f-1", lic=lic, db=db)
+            self.assertEqual(private_error.exception.status_code, 404)
+
+            await db.execute("UPDATE app_files SET portal_visible=1 WHERE id='f-1'")
+            await db.commit()
+            with self.assertRaises(HTTPException) as unowned_error:
+                await self.admin.portal_download_file("f-1", lic=lic, db=db)
+            self.assertEqual(unowned_error.exception.status_code, 404)
+
+            await db.execute(
+                "INSERT INTO license_products(id,license_id,product_id) VALUES(?,?,?)",
+                ("e-1", "l-1", "p-1"),
+            )
+            await db.commit()
+            response = await self.admin.portal_download_file("f-1", lic=lic, db=db)
+            self.assertEqual(response.headers["content-disposition"].split(";")[0], 'attachment')
+
+    async def test_public_status_does_not_expose_application_secrets(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("INSERT INTO applications(id,name,secret_key) VALUES(?,?,?)", ("app-1", "Public App", "top-secret"))
+            await db.execute(
+                "INSERT INTO products(id,app_id,name,level,service_status,status_message) VALUES(?,?,?,?,?,?)",
+                ("p-1", "app-1", "Loader", "loader", "maintenance", "Updating safely"),
+            )
+            await db.commit()
+            result = await self.status_routes.public_status("app-1", db)
+        encoded = str(result)
+        self.assertNotIn("top-secret", encoded)
+        self.assertEqual(result["overall_status"], "maintenance")
 
 
 if __name__ == "__main__":

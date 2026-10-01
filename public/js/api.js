@@ -129,6 +129,11 @@ const API = {
   unbanLicense:  (id)  => api("POST", `/api/admin/licenses/${encodeURIComponent(id)}/unban`),
   resetHwid:     (id)  => api("POST", `/api/admin/licenses/${encodeURIComponent(id)}/reset-hwid`),
   extendLicense: (b)   => api("POST", "/api/admin/licenses/extend", b),
+  addEntitlement: (licenseId, b) => api("POST", `/api/admin/licenses/${licenseId}/products`, b),
+  removeEntitlement: (licenseId, productId) => api("DELETE", `/api/admin/licenses/${licenseId}/products/${productId}`),
+  pauseEntitlement: (licenseId, productId, reason) => api("POST", `/api/admin/licenses/${licenseId}/products/${productId}/pause`, { reason }),
+  resumeEntitlement: (licenseId, productId, compensation_hours = 0) => api("POST", `/api/admin/licenses/${licenseId}/products/${productId}/resume`, { compensation_hours }),
+  extendEntitlement: (licenseId, productId, hours) => api("POST", `/api/admin/licenses/${licenseId}/products/${productId}/extend`, { hours }),
 
   // Password Reset
   requestPasswordReset: (username) => api("POST", "/api/admin/auth/password-reset/request", { username }),
@@ -199,10 +204,13 @@ const API = {
   regenSecret:   (id)      => api("POST",   `/api/admin/apps/${id}/regenerate-secret`),
   pauseApp:      (id, reason) => api("POST", `/api/admin/apps/${id}/pause`, { reason }),
   resumeApp:     (id, compensation_hours = 0) => api("POST", `/api/admin/apps/${id}/resume`, { compensation_hours }),
+  previewAppResume:(id, compensation_hours = 0) => api("GET", `/api/admin/apps/${id}/resume-preview?compensation_hours=${encodeURIComponent(compensation_hours)}`),
   getProducts:   ()        => api("GET",    "/api/admin/products"),
   createProduct: (b)       => api("POST",   "/api/admin/products", b),
   pauseProduct:  (id, reason) => api("POST", `/api/admin/products/${id}/pause`, { reason }),
   resumeProduct: (id, compensation_hours = 0) => api("POST", `/api/admin/products/${id}/resume`, { compensation_hours }),
+  previewProductResume:(id, compensation_hours = 0) => api("GET", `/api/admin/products/${id}/resume-preview?compensation_hours=${encodeURIComponent(compensation_hours)}`),
+  updateProduct: (id, b) => api("PUT", `/api/admin/products/${id}`, b),
   getProductPricing:(id)   => api("GET",    `/api/admin/products/${id}/pricing`),
   addProductPricing:(id,b) => api("POST",   `/api/admin/products/${id}/pricing`, b),
   deleteProductPricing:(productId, pricingId) => api("DELETE", `/api/admin/products/${productId}/pricing/${pricingId}`),
@@ -267,6 +275,7 @@ const API = {
     });
   },
   deleteFile: (id) => api("DELETE", `/api/admin/files/${id}`),
+  updateFileVisibility: (id, b) => api("PUT", `/api/admin/files/${id}/visibility`, b),
   bulkDeleteFiles: (ids) => api("POST", "/api/admin/files/bulk-delete", { ids }),
 
   // Panels

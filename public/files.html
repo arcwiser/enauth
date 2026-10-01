@@ -27,10 +27,10 @@
           <table>
             <thead><tr>
               <th style="width:40px"><input type="checkbox" id="files-select-all" onchange="toggleAllFiles(this.checked)"></th>
-              <th>File Name</th><th>Application</th><th>Secret</th><th>Uploaded</th><th>Actions</th>
+              <th>File Name</th><th>Application</th><th>Portal Access</th><th>Product</th><th>Uploaded</th><th>Actions</th>
             </tr></thead>
             <tbody id="tbody">
-              <tr class="loading-row"><td colspan="6"><span class="spinner"></span></td></tr>
+              <tr class="loading-row"><td colspan="7"><span class="spinner"></span></td></tr>
             </tbody>
           </table>
         </div>
@@ -50,6 +50,14 @@
       <div class="form-group">
         <label class="form-label">Application</label>
         <select class="select" id="u-app"></select>
+      </div>
+      <div class="form-group">
+        <label class="checkbox-row"><input type="checkbox" id="u-portal"> Allow customers to download this file</label>
+        <div style="font-size:11px;color:var(--text-dim);margin-top:5px">Off by default. Enable this for loaders, never private builds.</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Limit download to product (optional)</label>
+        <select class="select" id="u-product"><option value="">All products in this app</option></select>
       </div>
       <div class="form-group">
         <label class="form-label">Internal Name (used in SDK)</label>
@@ -78,6 +86,7 @@
   requireAuth();
   buildSidebar("files");
   const selectedFiles = new Set();
+  let products = [];
 
   async function loadApps() {
     const apps = await API.getApps().catch(() => []);
@@ -89,16 +98,25 @@
       fSel.innerHTML += `<option value="${a.id}">${a.name}</option>`;
       uSel.innerHTML += `<option value="${a.id}">${a.name}</option>`;
     });
+    products = await API.getProducts().catch(() => []);
+    refreshProductOptions();
   }
+
+  function refreshProductOptions() {
+    const appId = document.getElementById("u-app").value;
+    document.getElementById("u-product").innerHTML = `<option value="">All products in this app</option>` +
+      products.filter(p => p.app_id === appId).map(p => `<option value="${p.id}">${escapeHtml(p.name)} (${escapeHtml(p.level)})</option>`).join("");
+  }
+  document.getElementById("u-app").addEventListener("change", refreshProductOptions);
 
   async function load() {
     const tbody = document.getElementById("tbody");
-    tbody.innerHTML = `<tr class="loading-row"><td colspan="6"><span class="spinner"></span></td></tr>`;
+    tbody.innerHTML = `<tr class="loading-row"><td colspan="7"><span class="spinner"></span></td></tr>`;
     try {
       const appId = document.getElementById("filter-app").value;
       const files = await API.searchFiles(document.getElementById("file-search").value, { app_id: appId });
       if (!files.length) {
-        tbody.innerHTML = `<tr><td colspan="6"><div class="empty"><div class="empty-icon">📁</div><div class="empty-text">No files uploaded yet</div></div></td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="7"><div class="empty"><div class="empty-icon">📁</div><div class="empty-text">No files uploaded yet</div></div></td></tr>`;
         return;
       }
       tbody.innerHTML = files.map(f => `
@@ -106,9 +124,11 @@
           <td><input type="checkbox" class="file-select" value="${f.id}" ${selectedFiles.has(f.id) ? "checked" : ""} onchange="toggleFileSelect('${f.id}', this.checked)"></td>
           <td><span class="mono">${f.name}</span></td>
           <td style="color:var(--text2)">${f.app_name}</td>
-          <td>${f.is_secret ? '<span class="badge badge-banned">Secret</span>' : '<span class="badge badge-active">Public</span>'}</td>
+          <td>${f.portal_visible ? '<span class="badge badge-active">Customer download</span>' : '<span class="badge">Private</span>'}</td>
+          <td>${escapeHtml(f.product_name || 'All owned products')}</td>
           <td style="color:var(--text3);font-size:12px">${fmtDate(f.created_at)}</td>
           <td>
+            <button class="btn btn-outline btn-sm" onclick="setVisibility('${f.id}',${f.portal_visible ? 'false' : 'true'},'${f.product_id || ''}')">${f.portal_visible ? 'Make Private' : 'Allow Download'}</button>
             <button class="btn btn-ghost btn-sm" onclick="deleteFile('${f.id}')">🗑</button>
           </td>
         </tr>
@@ -144,6 +164,9 @@
     formData.append("app_id", appId);
     formData.append("name", name);
     formData.append("is_secret", isSecret);
+    formData.append("portal_visible", document.getElementById("u-portal").checked);
+    const productId = document.getElementById("u-product").value;
+    if (productId) formData.append("product_id", productId);
     formData.append("file", fileInput.files[0]);
 
     btn.disabled = true;
@@ -158,6 +181,12 @@
       btn.disabled = false;
       btn.innerHTML = "Upload";
     }
+  }
+
+  async function setVisibility(id, visible, productId) {
+    if (visible && !confirm("Allow customers with the selected product to download this file? Only enable this for a loader or another customer-safe file.")) return;
+    try { await API.updateFileVisibility(id, { portal_visible: visible, product_id: productId || null }); toast(visible ? "Customer download enabled" : "File is private", "success"); load(); }
+    catch (e) { toast(e.message, "error"); }
   }
 
   async function deleteFile(id) {

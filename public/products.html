@@ -131,10 +131,23 @@
     const days = Number(prompt("Extra compensation days (paused time is restored automatically):", "0"));
     if (!Number.isFinite(days) || days < 0) return toast("Enter zero or a positive number", "error");
     try {
+      const preview = await API.previewProductResume(id, days * 24);
+      const totalHours = Math.round(preview.extended_by_seconds / 3600 * 10) / 10;
+      if (!confirm(`Resume this product?\n\nAffected licenses: ${preview.affected_licenses}\nExpiring: ${preview.expiring_licenses}\nLifetime: ${preview.lifetime_licenses}\nTotal extension: ${totalHours} hours`)) return;
       const r = await API.resumeProduct(id, days * 24);
       toast(`Product resumed; keys extended ${Math.round(r.extended_by_seconds / 3600)} hours`, "success");
       await load();
     } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function setProductStatus(id, current) {
+    const status = prompt("Set status: operational, degraded, maintenance, or offline", current);
+    if (!status) return;
+    const normalized = status.trim().toLowerCase();
+    if (!["operational","degraded","maintenance","offline"].includes(normalized)) return toast("Invalid status", "error");
+    const message = prompt("Public status message (optional):", "") ?? "";
+    try { await API.updateProduct(id, { service_status: normalized, status_message: message }); toast("Public status updated", "success"); await load(); }
+    catch (e) { toast(e.message, "error"); }
   }
 
   async function load() {
@@ -162,11 +175,12 @@
             <td>${p.app_name}</td>
             <td><b>${p.level}</b></td>
             <td>${p.name}</td>
-            <td><span class="badge ${p.is_paused ? 'badge-banned' : 'badge-active'}">${p.is_paused ? 'Paused' : 'Online'}</span>${p.pause_reason ? `<div style="font-size:11px;color:var(--text-dim);margin-top:4px">${escapeHtml(p.pause_reason)}</div>` : ''}</td>
+            <td><span class="badge ${p.service_status === 'operational' ? 'badge-active' : 'badge-banned'}">${escapeHtml(p.service_status || 'operational')}</span>${p.status_message ? `<div style="font-size:11px;color:var(--text-dim);margin-top:4px">${escapeHtml(p.status_message)}</div>` : ''}</td>
             <td style="max-width:320px">${pricingHtml}</td>
             <td>
               <div class="action-group">
                 <button class="btn btn-sm btn-outline" onclick="addPricing('${p.id}')">+ Pricing</button>
+                <button class="btn btn-sm btn-outline" onclick="setProductStatus('${p.id}','${p.service_status || 'operational'}')">Set Status</button>
                 ${p.is_paused
                   ? `<button class="btn btn-sm btn-primary" onclick="resumeLevel('${p.id}')">Resume + Comp</button>`
                   : `<button class="btn btn-sm btn-warning" onclick="pauseLevel('${p.id}')">Pause</button>`}

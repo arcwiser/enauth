@@ -277,7 +277,9 @@ async def client_login(request: Request, req: EncryptedRequest,
     entitlement = None
     if product_id:
         async with db.execute(
-            """SELECT lp.expires_at, p.id AS product_id, p.is_paused, p.pause_reason
+            """SELECT lp.expires_at, lp.is_paused AS entitlement_paused,
+                      lp.pause_reason AS entitlement_pause_reason,
+                      p.id AS product_id, p.is_paused, p.pause_reason
                FROM license_products lp JOIN products p ON p.id=lp.product_id
                WHERE lp.license_id = ? AND lp.product_id = ? AND p.app_id = ?""",
             (lic["id"], product_id, app["id"]),
@@ -289,7 +291,9 @@ async def client_login(request: Request, req: EncryptedRequest,
                 return enc_resp({"success": False, "message": "LEVEL_NOT_ALLOWED"}, secret, req.app_id)
     elif level:
         async with db.execute(
-            """SELECT lp.expires_at, p.id AS product_id, p.is_paused, p.pause_reason FROM license_products lp
+            """SELECT lp.expires_at, lp.is_paused AS entitlement_paused,
+                      lp.pause_reason AS entitlement_pause_reason,
+                      p.id AS product_id, p.is_paused, p.pause_reason FROM license_products lp
                JOIN products p ON lp.product_id = p.id
                WHERE lp.license_id = ? AND LOWER(p.level) = ? AND p.app_id = ?""",
             (lic["id"], level, app["id"]),
@@ -303,6 +307,9 @@ async def client_login(request: Request, req: EncryptedRequest,
     if entitlement and entitlement["is_paused"]:
         return enc_resp({"success": False, "message": "PRODUCT_PAUSED",
                          "reason": entitlement["pause_reason"] or "Temporarily unavailable"}, secret, req.app_id)
+    if entitlement and entitlement["entitlement_paused"]:
+        return enc_resp({"success": False, "message": "ENTITLEMENT_PAUSED",
+                         "reason": entitlement["entitlement_pause_reason"] or "License temporarily paused"}, secret, req.app_id)
 
     # ── App-specific HWID ban check ──
     async with db.execute(

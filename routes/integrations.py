@@ -93,7 +93,9 @@ async def apps(_key=Depends(require_scope("read")), db=Depends(get_db)):
 async def app_details(app_id: str, _key=Depends(require_scope("read")), db=Depends(get_db)):
     app = await require_app(db, app_id)
     async with db.execute(
-        "SELECT id, name, level, is_active FROM products WHERE app_id = ? ORDER BY name",
+        """SELECT id, name, level, is_active, service_status, status_message,
+                  is_paused, paused_at, pause_reason
+           FROM products WHERE app_id = ? ORDER BY name""",
         (app_id,),
     ) as cur:
         app["products"] = [dict(row) for row in await cur.fetchall()]
@@ -259,6 +261,8 @@ async def extend(app_id: str, identifier: str, body: ExtendBody,
         base = max(base, current)
     expires_at = (base + timedelta(hours=body.hours)).strftime("%Y-%m-%d %H:%M:%S")
     await db.execute("UPDATE licenses SET expires_at = ? WHERE id = ?", (expires_at, item["id"]))
+    await db.execute("UPDATE license_products SET expires_at = ? WHERE license_id = ?",
+                     (expires_at, item["id"]))
     await log_action(db, "integration_extend", app_id=app_id, license_key=item["key"],
                      details=f"Extended through API key {key['id']}")
     await db.commit()

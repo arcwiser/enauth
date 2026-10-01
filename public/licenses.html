@@ -338,6 +338,7 @@
                 ? `<button class="btn btn-danger btn-sm" onclick="banLic('${r.id}')">Ban</button>`
                 : `<button class="btn btn-success btn-sm" onclick="unbanLic('${r.id}')">Unban</button>`}
               ${r.expires_at ? `<button class="btn btn-outline btn-sm" onclick="openExtendModal('${r.id}')">Extend</button>` : ''}
+              <button class="btn btn-outline btn-sm" onclick="manageProducts('${r.id}')">Products</button>
               <button class="btn btn-warning btn-sm" onclick="resetHwid('${r.id}')">Reset HWID</button>
               <button class="btn btn-ghost btn-sm" onclick="openTimeline('${r.id}', '${r.key}')">Timeline</button>
               <button class="btn btn-ghost btn-sm" onclick="deleteLic('${r.id}')">🗑</button>
@@ -528,6 +529,42 @@
     if (!confirm("Reset all HWIDs for this license?")) return;
     try { await API.resetHwid(id); toast("HWIDs reset", "success"); load(); }
     catch (e) { toast(e.message, "error"); }
+  }
+
+  async function manageProducts(licenseId) {
+    try {
+      const lic = await API.getLicense(licenseId);
+      const owned = lic.products || [];
+      const menu = owned.map((p, i) => `${i + 1}. ${p.name} (${p.level}) — ${p.is_paused ? 'PAUSED' : (p.expires_at ? fmtDate(p.expires_at) : 'Lifetime')}`).join('\n');
+      const action = prompt(`Owned products:\n${menu || 'None'}\n\nEnter: add, extend N, pause N, resume N, or remove N`);
+      if (!action) return;
+      const [verb, indexText] = action.trim().toLowerCase().split(/\s+/);
+      if (verb === 'add') {
+        const available = products.filter(p => p.app_id === lic.app_id && !owned.some(o => o.product_id === p.id));
+        if (!available.length) return toast("No additional products available", "info");
+        const choice = Number(prompt(available.map((p, i) => `${i + 1}. ${p.name} (${p.level})`).join('\n')));
+        const product = available[choice - 1]; if (!product) return;
+        const days = prompt("Expiry in days, or type lifetime:", "30"); if (days === null) return;
+        const expires_at = days.trim().toLowerCase() === 'lifetime' ? null : new Date(Date.now() + Number(days) * 86400000).toISOString().slice(0,19).replace('T',' ');
+        await API.addEntitlement(licenseId, { product_id: product.id, expires_at });
+      } else {
+        const ent = owned[Number(indexText) - 1]; if (!ent) return toast("Invalid product number", "error");
+        if (verb === 'extend') {
+          const hours = Number(prompt("Hours to extend:", "24")); if (!(hours > 0)) return;
+          await API.extendEntitlement(licenseId, ent.product_id, hours);
+        } else if (verb === 'pause') {
+          const reason = prompt("Pause reason:", "Customer license paused"); if (reason === null) return;
+          await API.pauseEntitlement(licenseId, ent.product_id, reason);
+        } else if (verb === 'resume') {
+          const hours = Number(prompt("Extra compensation hours (paused time is automatic):", "0")); if (hours < 0) return;
+          await API.resumeEntitlement(licenseId, ent.product_id, hours);
+        } else if (verb === 'remove') {
+          if (!confirm(`Remove ${ent.name} from this license?`)) return;
+          await API.removeEntitlement(licenseId, ent.product_id);
+        } else return toast("Unknown action", "error");
+      }
+      toast("Product entitlement updated", "success"); load();
+    } catch (e) { toast(e.message, "error"); }
   }
 
   async function deleteLic(id) {

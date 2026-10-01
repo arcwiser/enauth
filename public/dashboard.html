@@ -149,6 +149,9 @@
           <div class="stat-card cyan"><div class="stat-value" id="m-uptime">—</div><div class="stat-label">Server Uptime</div></div>
         </div>
         <div id="monitor-checks" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px"></div>
+        <div class="card-header" style="margin-top:20px"><div class="card-title">🛡️ Security Events (24 hours)</div></div>
+        <div id="security-events" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px"></div>
+        <div id="targeted-apps" style="margin-top:12px;color:var(--text2);font-size:12px"></div>
       </div>
 
       <!-- Recent Activity -->
@@ -253,6 +256,20 @@
       document.getElementById("monitor-checks").innerHTML = checks.map(([name, ok]) =>
         `<div style="padding:10px 12px;border:1px solid var(--border);border-radius:8px;display:flex;justify-content:space-between"><span>${name}</span><span style="color:var(${ok ? '--accent-green' : '--accent-red'})">${ok ? 'PASS' : 'CHECK'}</span></div>`
       ).join("");
+      const sec = m.security_events || {};
+      const securityMetrics = [
+        ["Suspicious IP changes", sec.suspicious_ip_changes || 0],
+        ["Invalid keys", sec.invalid_key_attempts || 0],
+        ["HWID violations", sec.hwid_limit_violations || 0],
+        ["Replay attempts", sec.replay_attempts || 0],
+      ];
+      document.getElementById("security-events").innerHTML = securityMetrics.map(([name, value]) =>
+        `<div style="padding:12px;border:1px solid var(--border);border-radius:8px"><div style="font-size:22px;font-weight:700">${value}</div><div style="font-size:11px;color:var(--text-dim)">${name}</div></div>`
+      ).join("");
+      const targets = sec.most_targeted_apps || [];
+      document.getElementById("targeted-apps").innerHTML = targets.length
+        ? `<strong>Most targeted:</strong> ${targets.map(x => `${escapeHtml(x.name)} (${x.attempts})`).join(' · ')}`
+        : "No failed authentication targets in the last 24 hours.";
 
       // Update Donut Chart breakdown
       const total = d.total_licenses || 0;
