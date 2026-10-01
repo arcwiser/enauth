@@ -140,13 +140,14 @@
     } catch (e) { toast(e.message, "error"); }
   }
 
-  async function setProductStatus(id, current) {
-    const status = prompt("Set status: operational, degraded, maintenance, or offline", current);
+  async function setProductStatus(id, current, currentColor) {
+    const status = prompt("Set any public status (examples: Operational, Updating, Delayed, Offline):", current);
     if (!status) return;
-    const normalized = status.trim().toLowerCase();
-    if (!["operational","degraded","maintenance","offline"].includes(normalized)) return toast("Invalid status", "error");
+    const normalized = status.trim();
+    const color = (prompt("Status color as a hex value:", currentColor || "#22c55e") || "").trim();
+    if (!/^#[0-9a-fA-F]{6}$/.test(color)) return toast("Use a color like #22c55e", "error");
     const message = prompt("Public status message (optional):", "") ?? "";
-    try { await API.updateProduct(id, { service_status: normalized, status_message: message }); toast("Public status updated", "success"); await load(); }
+    try { await API.updateProduct(id, { service_status: normalized, status_color: color, status_message: message }); toast("Public status updated", "success"); await load(); }
     catch (e) { toast(e.message, "error"); }
   }
 
@@ -175,12 +176,12 @@
             <td>${p.app_name}</td>
             <td><b>${p.level}</b></td>
             <td>${p.name}</td>
-            <td><span class="badge ${p.service_status === 'operational' ? 'badge-active' : 'badge-banned'}">${escapeHtml(p.service_status || 'operational')}</span>${p.status_message ? `<div style="font-size:11px;color:var(--text-dim);margin-top:4px">${escapeHtml(p.status_message)}</div>` : ''}</td>
+            <td><span class="badge" style="color:${p.status_color || '#22c55e'};border-color:${p.status_color || '#22c55e'}"><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${p.status_color || '#22c55e'};margin-right:5px"></span>${escapeHtml(p.service_status || 'operational')}</span>${p.status_message ? `<div style="font-size:11px;color:var(--text-dim);margin-top:4px">${escapeHtml(p.status_message)}</div>` : ''}</td>
             <td style="max-width:320px">${pricingHtml}</td>
             <td>
               <div class="action-group">
                 <button class="btn btn-sm btn-outline" onclick="addPricing('${p.id}')">+ Pricing</button>
-                <button class="btn btn-sm btn-outline" onclick="setProductStatus('${p.id}','${p.service_status || 'operational'}')">Set Status</button>
+                <button class="btn btn-sm btn-outline" onclick="setProductStatus('${p.id}','${p.service_status || 'operational'}','${p.status_color || '#22c55e'}')">Set Status</button>
                 ${p.is_paused
                   ? `<button class="btn btn-sm btn-primary" onclick="resumeLevel('${p.id}')">Resume + Comp</button>`
                   : `<button class="btn btn-sm btn-warning" onclick="pauseLevel('${p.id}')">Pause</button>`}

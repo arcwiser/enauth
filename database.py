@@ -192,6 +192,7 @@ CREATE TABLE IF NOT EXISTS products (
     pause_reason TEXT,
     service_status TEXT NOT NULL DEFAULT 'operational',
     status_message TEXT,
+    status_color TEXT NOT NULL DEFAULT '#22c55e',
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(app_id, level)
 );
@@ -277,6 +278,7 @@ CREATE TABLE IF NOT EXISTS outage_events (
     product_id TEXT REFERENCES products(id) ON DELETE CASCADE,
     event_type TEXT NOT NULL,
     service_status TEXT NOT NULL,
+    status_color TEXT NOT NULL DEFAULT '#22c55e',
     public_message TEXT,
     started_at DATETIME,
     ended_at DATETIME,

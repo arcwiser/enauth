@@ -428,8 +428,29 @@ class UpdateProductBody(BaseModel):
     name: Optional[str] = None
     level: Optional[str] = None
     is_active: Optional[bool] = None
-    service_status: Optional[Literal["operational", "degraded", "maintenance", "offline"]] = None
+    service_status: Optional[str] = None
     status_message: Optional[str] = Field(default=None, max_length=500)
+    status_color: Optional[str] = None
+
+    @field_validator("service_status")
+    @classmethod
+    def validate_service_status(cls, value):
+        if value is None:
+            return value
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 _/\-]{0,39}", value):
+            raise ValueError("Status must be 1-40 letters, numbers, spaces, /, _ or -")
+        return value
+
+    @field_validator("status_color")
+    @classmethod
+    def validate_status_color(cls, value):
+        if value is None:
+            return value
+        value = value.strip()
+        if not re.fullmatch(r"#[0-9A-Fa-f]{6}", value):
+            raise ValueError("Status color must be a six-digit hex color such as #22c55e")
+        return value.lower()
 
 
 class ProductPricingBody(BaseModel):
@@ -523,6 +544,8 @@ async def update_product(product_id: str, body: UpdateProductBody, user=Depends(
         updates.append("service_status = ?"); args.append(body.service_status)
     if body.status_message is not None:
         updates.append("status_message = ?"); args.append(body.status_message.strip() or None)
+    if body.status_color is not None:
+        updates.append("status_color = ?"); args.append(body.status_color)
     if not updates:
         raise HTTPException(400, "Nothing to update")
     args.append(product_id)
@@ -530,10 +553,11 @@ async def update_product(product_id: str, body: UpdateProductBody, user=Depends(
         await db.execute(f"UPDATE products SET {', '.join(updates)} WHERE id = ?", args)
         if body.service_status is not None:
             await db.execute(
-                """INSERT INTO outage_events(id,app_id,product_id,event_type,service_status,public_message)
-                   VALUES(?,?,?,?,?,?)""",
+                """INSERT INTO outage_events(id,app_id,product_id,event_type,service_status,status_color,public_message)
+                   VALUES(?,?,?,?,?,?,?)""",
                 (generate_uid(), product["app_id"], product_id, "status_update",
-                 body.service_status, (body.status_message or "").strip() or None),
+                 body.service_status, body.status_color or product["status_color"],
+                 (body.status_message or "").strip() or None),
             )
         await db.commit()
     except aiosqlite.IntegrityError:
@@ -571,11 +595,11 @@ async def pause_product(product_id: str, body: PauseBody, user=Depends(require_a
     async with db.execute("SELECT COUNT(*) FROM license_products WHERE product_id=?", (product_id,)) as cur:
         affected = (await cur.fetchone())[0]
     await db.execute(
-        """INSERT INTO outage_events(id,app_id,product_id,event_type,service_status,public_message,started_at,affected_licenses)
-           VALUES(?,?,?,?,?,?,?,?)""",
-        (generate_uid(), product["app_id"], product_id, "started", "offline", reason, now, affected),
+        """INSERT INTO outage_events(id,app_id,product_id,event_type,service_status,status_color,public_message,started_at,affected_licenses)
+           VALUES(?,?,?,?,?,?,?,?,?)""",
+        (generate_uid(), product["app_id"], product_id, "started", "offline", "#ef4444", reason, now, affected),
     )
-    await db.execute("UPDATE products SET service_status='offline', status_message=? WHERE id=?", (reason, product_id))
+    await db.execute("UPDATE products SET service_status='offline', status_color='#ef4444', status_message=? WHERE id=?", (reason, product_id))
     await db.execute("DELETE FROM sessions WHERE product_id=?", (product_id,))
     await log_action(db, "product_paused", app_id=product["app_id"], details=f"{product['level']}: {reason}")
     await db.commit()
@@ -600,7 +624,7 @@ async def resume_product(product_id: str, body: ResumeBody, user=Depends(require
     )
     await db.execute(
         """UPDATE products SET is_paused=0, paused_at=NULL, pause_reason=NULL,
-           service_status='operational', status_message=NULL WHERE id=?""", (product_id,)
+           service_status='operational', status_color='#22c55e', status_message=NULL WHERE id=?""", (product_id,)
     )
     await db.execute(
         """INSERT INTO outage_events(id,app_id,product_id,event_type,service_status,public_message,started_at,ended_at,downtime_seconds,compensation_seconds,affected_licenses)
@@ -1071,13 +1095,12 @@ async def revoke_reseller_pricing(reseller_id: str, pricing_point_id: str, user=
 
 
 @router.post("/reseller/auth/signin")
-async def reseller_signin(body: LoginBody, db: aiosqlite.Connection = Depends(get_db)):
+@limiter.limit("8/minute")
+async def reseller_signin(request: Request, body: LoginBody, db: aiosqlite.Connection = Depends(get_db)):
     async with db.execute("SELECT * FROM resellers WHERE username = ? AND is_active = 1", (body.username,)) as cur:
         reseller = await cur.fetchone()
-    if not reseller:
-        raise HTTPException(404, "Username not found")
-    if not verify_password(body.password, reseller["password_hash"]):
-        raise HTTPException(401, "Wrong password")
+    if not reseller or not verify_password(body.password, reseller["password_hash"]):
+        raise HTTPException(401, "Invalid reseller credentials")
     token = generate_session_token()
     await db.execute(
         "INSERT INTO reseller_sessions (id, reseller_id, token, expires_at) VALUES (?, ?, ?, ?)",
@@ -2559,8 +2582,8 @@ async def pause_app(app_id: str, body: PauseBody, user=Depends(require_admin),
     async with db.execute("SELECT COUNT(*) FROM licenses WHERE app_id=?", (app_id,)) as cur:
         affected = (await cur.fetchone())[0]
     await db.execute(
-        """INSERT INTO outage_events(id,app_id,event_type,service_status,public_message,started_at,affected_licenses)
-           VALUES(?,?,?,?,?,?,?)""", (generate_uid(), app_id, "started", "offline", reason, now, affected)
+        """INSERT INTO outage_events(id,app_id,event_type,service_status,status_color,public_message,started_at,affected_licenses)
+           VALUES(?,?,?,?,?,?,?,?)""", (generate_uid(), app_id, "started", "offline", "#ef4444", reason, now, affected)
     )
     await db.execute("DELETE FROM sessions WHERE app_id=?", (app_id,))
     await log_action(db, "app_paused", app_id=app_id, details=reason)
@@ -3391,7 +3414,7 @@ async def get_portal_license(lic=Depends(require_portal_user), db: aiosqlite.Con
     async with db.execute("SELECT COUNT(*) FROM hwids WHERE license_id = ?", (lic["id"],)) as cur:
         hwid_count = (await cur.fetchone())[0]
     async with db.execute(
-        """SELECT p.id AS product_id,p.name,p.level,p.service_status,p.status_message,
+        """SELECT p.id AS product_id,p.name,p.level,p.service_status,p.status_color,p.status_message,
                   lp.expires_at,lp.is_paused,lp.pause_reason,lp.total_compensation_seconds
            FROM license_products lp JOIN products p ON p.id=lp.product_id
            WHERE lp.license_id=? ORDER BY p.name""", (lic["id"],)

@@ -115,7 +115,11 @@
 <script src="js/api.js"></script>
 <script>
   function requireResellerAuth() {
-    if (!getResellerToken()) window.location.href = "/panel/index.html";
+    if (!getResellerToken()) {
+      window.location.href = "/panel/index.html";
+      return false;
+    }
+    return true;
   }
 
   function buildResellerSidebar() {
@@ -153,7 +157,7 @@
   }
 
   async function load() {
-    requireResellerAuth();
+    if (!requireResellerAuth()) return;
     buildResellerSidebar();
     const token = getResellerToken();
     const data = await API.resellerProducts(token);
@@ -286,7 +290,7 @@
       tbody.innerHTML = keys.map(k => `
         <tr>
           <td style="width:46px"><input type="checkbox" class="key-check" value="${k.id}"></td>
-          <td><span class="mono">${k.key}</span> <button class="copy-btn" onclick="copyText('${k.key}')">⧉</button></td>
+          <td><span class="mono">${k.key}</span> <span title="Full keys are shown once when generated" style="font-size:10px;color:var(--text3)">shown once</span></td>
           <td>${k.product_level || "—"}</td>
           <td>${statusBadge(k.status)}</td>
           <td style="color:var(--text2)">${k.expires_at ? fmtDate(k.expires_at) : "—"}</td>
@@ -376,7 +380,15 @@
     window.location.href = "/panel/index.html";
   }
 
-  load().catch(e => { toast(e.message, "error"); });
+  load().catch(e => {
+    if (/unauthorized|expired/i.test(e.message || "")) {
+      localStorage.removeItem("enauth_reseller_token");
+      localStorage.removeItem("enauth_reseller");
+      window.location.href = "/panel/index.html";
+      return;
+    }
+    toast(e.message, "error");
+  });
 </script>
 </body>
 </html>

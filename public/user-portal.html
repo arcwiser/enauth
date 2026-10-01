@@ -446,14 +446,10 @@
       document.getElementById("portal-username").textContent = lic.client_username;
       document.getElementById("d-app").textContent = lic.app_name;
       
-      // Mask key beautifully
+      // The server stores only a one-way hash and returns a safe display mask.
       const rawKey = lic.key;
-      const masked = rawKey.slice(0, 5) + "-••••-••••-" + rawKey.slice(-4);
-      document.getElementById("d-key").textContent = masked;
-      document.getElementById("d-key").title = "Double click to copy";
-      
-      // Double click to copy raw key
-      document.getElementById("d-key").ondblclick = () => copyText(rawKey);
+      document.getElementById("d-key").textContent = rawKey;
+      document.getElementById("d-key").title = "Full license keys are shown only when generated";
 
       document.getElementById("d-status").innerHTML = statusBadge(lic.status);
       document.getElementById("d-expiry").textContent = fmtDate(lic.expires_at) || "Lifetime";
@@ -465,7 +461,7 @@
         <div style="border:1px solid var(--border);border-radius:10px;padding:12px;text-align:left">
           <div style="display:flex;justify-content:space-between;gap:10px"><strong>${escapeHtml(p.name)}</strong>${statusBadge(p.is_paused ? 'paused' : 'active')}</div>
           <div style="font-size:12px;color:var(--text2);margin-top:6px">Level: ${escapeHtml(p.level)} · Expires: ${p.expires_at ? fmtDate(p.expires_at) : 'Lifetime'}</div>
-          <div style="font-size:11px;color:var(--text-dim);margin-top:4px">Service: ${escapeHtml(p.service_status || 'operational')}${p.status_message ? ` — ${escapeHtml(p.status_message)}` : ''}</div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:4px">Service: <span style="color:${p.status_color || '#22c55e'}">● ${escapeHtml(p.service_status || 'operational')}</span>${p.status_message ? ` — ${escapeHtml(p.status_message)}` : ''}</div>
           <div style="font-size:11px;color:var(--text-dim);margin-top:4px">Outage compensation: ${Math.round(Number(p.total_compensation_seconds || 0)/3600*10)/10} hours</div>
         </div>`).join('') : '<div style="color:var(--text-dim)">No product entitlements.</div>';
       document.getElementById("compensation-total").textContent = `Total extra outage compensation: ${Math.round(Number(lic.total_compensation_seconds || 0)/3600*10)/10} hours`;

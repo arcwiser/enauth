@@ -98,7 +98,7 @@
     return localStorage.getItem("enauth_base_url") || "http://127.0.0.1:8080";
   })();
 
-  const state = { tempToken: null };
+  const state = { tempToken: null, mode: "admin" };
 
   function $id(id) { return document.getElementById(id); }
   function showError(message) {
@@ -152,14 +152,19 @@
   async function authSignin(username, password) {
     return requestJson("/api/admin/auth/login", { username, password });
   }
+  async function resellerSignin(username, password) {
+    return requestJson("/api/admin/reseller/auth/signin", { username, password });
+  }
   async function authVerify2FA(temp_token, code) {
     return requestJson("/api/admin/auth/2fa/verify", { temp_token, code });
   }
 
   function applyMode() {
     clearAlerts();
-    $id("login-subtitle").textContent = "Admin Sign In";
-    $id("login-btn").textContent = "Sign In";
+    const reseller = state.mode === "reseller";
+    $id("login-subtitle").textContent = reseller ? "Reseller Sign In" : "Admin Sign In";
+    $id("login-btn").textContent = reseller ? "Sign In as Reseller" : "Sign In";
+    $id("reseller-btn").textContent = reseller ? "Back to Admin Sign In" : "Reseller Sign In";
   }
 
   function show2FA() {
@@ -190,6 +195,15 @@
 
     setBusy(button, true, "Signing in...");
     try {
+      if (state.mode === "reseller") {
+        const reseller = await resellerSignin(username, password);
+        localStorage.setItem("enauth_reseller_token", reseller.token);
+        localStorage.setItem("enauth_reseller", JSON.stringify({
+          reseller_id: reseller.reseller_id, username: reseller.username, balance: reseller.balance
+        }));
+        window.location.href = "reseller.html";
+        return;
+      }
       const res = await authSignin(username, password);
       if (res.two_factor_required) {
         state.tempToken = res.temp_token;
@@ -249,7 +263,10 @@
     $id("twofactor-btn").addEventListener("click", handle2FA);
     $id("back-btn").addEventListener("click", hide2FA);
     $id("reseller-btn").addEventListener("click", () => {
-      window.location.href = "reseller.html";
+      state.mode = state.mode === "reseller" ? "admin" : "reseller";
+      $id("password").value = "";
+      applyMode();
+      $id("username").focus();
     });
 
     applyMode();

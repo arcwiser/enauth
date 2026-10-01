@@ -365,8 +365,9 @@ Check:
   failures, paused services, uptime, and important production configuration settings.
 - Each application has a public status page at `/panel/status.html?app=YOUR_APP_ID` with
   current product health and sanitized incident history.
-- Product status can be set to operational, degraded, maintenance, or offline from
-  **Product levels**.
+- Product status can use any short owner-defined label and a six-digit hex color from
+  **Product levels → Set Status**. Common examples are Operational, Degraded,
+  Maintenance, Updating, Delayed, or Offline.
 - Use **Licenses → Products** to add, remove, extend, pause, or resume one product
   entitlement without changing the other products on that license.
 - Files are private in the customer portal unless the owner explicitly enables
@@ -374,6 +375,10 @@ Check:
   that own one selected product. Existing files remain private after upgrading.
 - The customer portal displays owned products, separate expiration dates, service status,
   compensation received, and the configured HWID-reset cooldown.
+- Resellers sign in from the main login page using **Reseller Sign In**.
+- A complete license key is shown only at generation time. Later lists show a safe mask
+  because EnAuth stores a one-way hash and cannot recover the original key; save generated
+  keys immediately.
 
 ## Configuration
 

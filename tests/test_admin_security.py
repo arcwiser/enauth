@@ -215,6 +215,28 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("top-secret", encoded)
         self.assertEqual(result["overall_status"], "maintenance")
 
+    async def test_custom_status_color_is_strictly_validated(self):
+        valid = self.admin.UpdateProductBody(service_status="Updating servers", status_color="#12aBef")
+        self.assertEqual(valid.status_color, "#12abef")
+        with self.assertRaises(ValueError):
+            self.admin.UpdateProductBody(service_status="Online", status_color="red; background:url(x)")
+
+    async def test_reseller_signin_returns_a_working_session(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute(
+                "INSERT INTO resellers(id,username,password_hash,balance) VALUES(?,?,?,?)",
+                ("reseller-1", "seller", hash_password("Password123!"), 25),
+            )
+            await db.commit()
+            result = await self.admin.reseller_signin.__wrapped__(
+                request=None,
+                body=self.admin.LoginBody(username="seller", password="Password123!"), db=db,
+            )
+            self.assertTrue(result["token"])
+            async with db.execute("SELECT 1 FROM reseller_sessions WHERE token=?", (result["token"],)) as cur:
+                self.assertIsNotNone(await cur.fetchone())
+
 
 if __name__ == "__main__":
     unittest.main()

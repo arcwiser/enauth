@@ -93,7 +93,7 @@ async def apps(_key=Depends(require_scope("read")), db=Depends(get_db)):
 async def app_details(app_id: str, _key=Depends(require_scope("read")), db=Depends(get_db)):
     app = await require_app(db, app_id)
     async with db.execute(
-        """SELECT id, name, level, is_active, service_status, status_message,
+        """SELECT id, name, level, is_active, service_status, status_color, status_message,
                   is_paused, paused_at, pause_reason
            FROM products WHERE app_id = ? ORDER BY name""",
         (app_id,),
