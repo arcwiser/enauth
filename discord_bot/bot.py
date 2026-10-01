@@ -166,11 +166,13 @@ async def disconnect(interaction: discord.Interaction):
 @keygen
 async def help_command(interaction: discord.Interaction):
     commands_text = """**Licenses**
-`/gen`, `/bulkgen`, `/license`, `/licenses`, `/ban`, `/unban`, `/extend`, `/deletekey`, `/resethwid`
+`/gen`, `/bulkgen`, `/license`, `/revealkey`, `/licenses`, `/keyhistory`, `/ban`, `/unban`, `/extend`, `/extendproduct`, `/addproduct`, `/deletekey`, `/resethwid`
 **Sessions and security**
 `/sessions`, `/killsession`, `/killallsessions`, `/hwids`, `/banhwid`, `/unbanhwid`, `/logs`
 **Application**
-`/status`, `/stats`, `/levels`, `/apps`, `/setapp`, `/builds`, `/uploadbuild`, `/deletebuild`
+`/status`, `/stats`, `/levels`, `/apps`, `/setapp`, `/pauseapp`, `/resumeapp`, `/builds`, `/uploadbuild`, `/deletebuild`
+**Resellers**
+`/resellers`, `/creditreseller`
 **Content**
 `/news`, `/addnews`, `/deletenews`, `/variables`, `/setvariable`, `/deletevariable`
 **Integration**
@@ -194,7 +196,7 @@ async def gen(interaction: discord.Interaction, level: str, time: str, notes: st
 
 @bot.tree.command(description="Generate multiple license keys")
 @keygen
-async def bulkgen(interaction: discord.Interaction, level: str, time: str, count: app_commands.Range[int, 1, 50], notes: str = ""):
+async def bulkgen(interaction: discord.Interaction, level: str, time: str, count: app_commands.Range[int, 1, 500], notes: str = ""):
     await interaction.response.defer(ephemeral=True)
     result = await api(interaction, "POST", f"/api/integrations/apps/{configured_app(interaction)}/licenses",
                        json={"product_level": level, "duration_hours": parse_duration(time), "notes": notes, "count": count})
@@ -264,6 +266,108 @@ async def license(interaction: discord.Interaction, identifier: str):
     await interaction.response.send_message(f"```json\n{json.dumps(item, indent=2)[:1800]}\n```", ephemeral=True)
 
 
+@bot.tree.command(description="Reveal a stored license key")
+@keygen
+async def revealkey(interaction: discord.Interaction, key: str):
+    item = await api(interaction, "GET", f"/api/integrations/apps/{configured_app(interaction)}/licenses/{key}")
+    await interaction.response.send_message(
+        f"License ID: `{item['id']}`\nFull key: `{item['key']}`\nStatus: `{item['status']}`", ephemeral=True
+    )
+
+
+@bot.tree.command(description="Show a license's audit history")
+@keygen
+async def keyhistory(interaction: discord.Interaction, key: str, limit: app_commands.Range[int, 1, 100] = 50):
+    result = await api(
+        interaction, "GET", f"/api/integrations/apps/{configured_app(interaction)}/licenses/{key}/history",
+        params={"limit": limit},
+    )
+    await interaction.response.send_message(
+        render_rows(result["events"], ["timestamp", "action", "ip", "details"]), ephemeral=True
+    )
+
+
+async def product_choices(interaction: discord.Interaction, current: str):
+    try:
+        item = await api(interaction, "GET", f"/api/integrations/apps/{configured_app(interaction)}")
+    except Exception:
+        return []
+    query = current.lower()
+    return [
+        app_commands.Choice(name=f"{row['name']} ({row['level']})"[:100], value=row["id"])
+        for row in item.get("products", [])
+        if query in row["name"].lower() or query in row["level"].lower()
+    ][:25]
+
+
+@bot.tree.command(description="Extend one product on one key, or use key=all")
+@app_commands.autocomplete(product=product_choices)
+@keygen
+async def extendproduct(interaction: discord.Interaction, key: str, product: str, duration: str, confirm: bool = False):
+    if key.lower() == "all" and not confirm:
+        await interaction.response.send_message("Set confirm to true when key is `all`.", ephemeral=True)
+        return
+    hours = parse_duration(duration)
+    if hours is None:
+        raise RuntimeError("Extension must have a duration")
+    await interaction.response.defer(ephemeral=True)
+    result = await api(
+        interaction, "POST",
+        f"/api/integrations/apps/{configured_app(interaction)}/products/{product}/licenses/{key}/extend",
+        json={"hours": hours},
+    )
+    await interaction.followup.send(
+        f"Extended `{result['product']}` for `{result['affected']}` license(s).", ephemeral=True
+    )
+
+
+class AddProductSelect(discord.ui.Select):
+    def __init__(self, license_key: str, duration_hours, products):
+        self.license_key = license_key
+        self.duration_hours = duration_hours
+        options = [
+            discord.SelectOption(label=row["name"][:100], description=f"Level: {row['level']}"[:100], value=row["id"])
+            for row in products[:25]
+        ]
+        super().__init__(placeholder="Choose a product to add", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not isinstance(interaction.user, discord.Member) or not any(
+            role.name.lower() == KEYGEN_ROLE for role in interaction.user.roles
+        ):
+            await interaction.response.send_message("You need the keygen role.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        result = await api(
+            interaction, "POST",
+            f"/api/integrations/apps/{configured_app(interaction)}/licenses/{self.license_key}/products",
+            json={"product_id": self.values[0], "duration_hours": self.duration_hours},
+        )
+        await interaction.followup.send(
+            f"Added `{result['product']}`. Expires: `{result['expires_at'] or 'lifetime'}`", ephemeral=True
+        )
+
+
+class AddProductView(discord.ui.View):
+    def __init__(self, license_key: str, duration_hours, products):
+        super().__init__(timeout=120)
+        self.add_item(AddProductSelect(license_key, duration_hours, products))
+
+
+@bot.tree.command(description="Add another product to a license using a dropdown")
+@keygen
+async def addproduct(interaction: discord.Interaction, key: str, duration: str = "lifetime"):
+    hours = parse_duration(duration)
+    item = await api(interaction, "GET", f"/api/integrations/apps/{configured_app(interaction)}")
+    products = [row for row in item.get("products", []) if row.get("is_active")]
+    if not products:
+        await interaction.response.send_message("This application has no active products.", ephemeral=True)
+        return
+    await interaction.response.send_message(
+        "Choose the product to add:", view=AddProductView(key, hours, products), ephemeral=True
+    )
+
+
 @bot.tree.command(description="Show product levels")
 @keygen
 async def levels(interaction: discord.Interaction):
@@ -301,6 +405,72 @@ async def setapp(interaction: discord.Interaction, app_id: str):
     await api(interaction, "GET", f"/api/integrations/apps/{app_id}")
     save_config(interaction.guild_id, server, app_id, api_key, interaction.user.id)
     await interaction.response.send_message("Application updated.", ephemeral=True)
+
+
+@bot.tree.command(description="Pause the configured application and stop its sessions")
+@keygen
+async def pauseapp(interaction: discord.Interaction, reason: str = "Application outage", confirm: bool = False):
+    if not confirm:
+        await interaction.response.send_message("Set confirm to true to pause the application.", ephemeral=True)
+        return
+    result = await api(
+        interaction, "POST", f"/api/integrations/apps/{configured_app(interaction)}/pause",
+        json={"reason": reason},
+    )
+    await interaction.response.send_message(f"Application paused at `{result['paused_at']}`.", ephemeral=True)
+
+
+@bot.tree.command(description="Resume the app and restore downtime plus compensation")
+@keygen
+async def resumeapp(interaction: discord.Interaction, compensation: str = "0h", confirm: bool = False):
+    hours = 0 if compensation.strip().lower() in {"0", "0h"} else parse_duration(compensation)
+    if hours is None:
+        raise RuntimeError("Compensation must have a duration")
+    app_id = configured_app(interaction)
+    preview = await api(
+        interaction, "GET", f"/api/integrations/apps/{app_id}/resume-preview",
+        params={"compensation_hours": hours},
+    )
+    if not confirm:
+        await interaction.response.send_message(
+            f"Preview: `{preview['affected_licenses']}` licenses; downtime `{preview['downtime_seconds']}` seconds; "
+            f"extra compensation `{preview['compensation_seconds']}` seconds. Run again with confirm=true.",
+            ephemeral=True,
+        )
+        return
+    result = await api(
+        interaction, "POST", f"/api/integrations/apps/{app_id}/resume",
+        json={"compensation_hours": hours},
+    )
+    await interaction.response.send_message(
+        f"Application resumed. Extended `{result['affected_licenses']}` licenses by "
+        f"`{result['extended_by_seconds']}` seconds.", ephemeral=True
+    )
+
+
+@bot.tree.command(description="List resellers and balances")
+@keygen
+async def resellers(interaction: discord.Interaction):
+    rows = await api(interaction, "GET", "/api/integrations/resellers")
+    await interaction.response.send_message(render_rows(rows, ["id", "username", "balance", "is_active"]), ephemeral=True)
+
+
+@bot.tree.command(description="Credit a reseller balance")
+@keygen
+async def creditreseller(interaction: discord.Interaction, reseller_id: str, amount: float,
+                         reason: str = "Discord bot credit", confirm: bool = False):
+    if amount <= 0:
+        raise RuntimeError("Amount must be positive")
+    if not confirm:
+        await interaction.response.send_message(
+            f"This will credit `{amount:.2f}` to `{reseller_id}`. Run again with confirm=true.", ephemeral=True
+        )
+        return
+    result = await api(
+        interaction, "POST", f"/api/integrations/resellers/{reseller_id}/credit",
+        json={"amount": amount, "reason": reason},
+    )
+    await interaction.response.send_message(f"Balance credited. New balance: `{result['balance']}`", ephemeral=True)
 
 
 @bot.tree.command(description="Show this server's non-secret integration settings")

@@ -5,6 +5,18 @@ variable, and HWID management. Operational commands require a Discord role
 named exactly `keygen` (matching is case-insensitive). Only the Discord server
 owner can run `/setup` or `/disconnect`.
 
+License operations include `/bulkgen` (up to 500 keys), `/deletekey`,
+`/revealkey`, `/license`, `/keyhistory`, and `/extendproduct`. Use
+`/extendproduct key:all ... confirm:true` to extend every non-lifetime license
+that owns the selected product. `/addproduct` asks for the license and duration,
+then displays a product dropdown instead of requiring a product ID.
+
+Operational controls include `/pauseapp` and `/resumeapp`. Resuming first shows
+a compensation preview unless `confirm:true` is supplied. `/resellers` lists
+reseller IDs and `/creditreseller` credits a balance after explicit
+confirmation. These higher-impact commands require an `admin`-scope EnAuth API
+key in addition to the Discord `keygen` role.
+
 The bot intentionally uses a revocable EnAuth API key instead of an application
 secret. Create an `admin`-scope API key in the EnAuth dashboard. `/setup` opens
 a private modal and stores that key encrypted with `BOT_CONFIG_KEY`.

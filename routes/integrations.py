@@ -61,12 +61,30 @@ class GenerateBody(BaseModel):
     product_level: str = Field(min_length=1, max_length=64)
     duration_hours: Optional[float] = Field(default=None, gt=0, le=876000)
     notes: Optional[str] = Field(default=None, max_length=500)
-    count: int = Field(default=1, ge=1, le=50)
+    count: int = Field(default=1, ge=1, le=500)
     max_hwids: int = Field(default=1, ge=1, le=100)
 
 
 class ExtendBody(BaseModel):
     hours: float = Field(gt=0, le=876000)
+
+
+class PauseBody(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+
+class ResumeBody(BaseModel):
+    compensation_hours: float = Field(default=0, ge=0, le=876000)
+
+
+class EntitlementAddBody(BaseModel):
+    product_id: str = Field(min_length=1, max_length=100)
+    duration_hours: Optional[float] = Field(default=None, gt=0, le=876000)
+
+
+class CreditResellerBody(BaseModel):
+    amount: float = Field(gt=0, le=100000000)
+    reason: Optional[str] = Field(default=None, max_length=500)
 
 
 class NamedValueBody(BaseModel):
@@ -156,6 +174,9 @@ async def generate(app_id: str, body: GenerateBody, key=Depends(require_scope("w
             "INSERT INTO license_products (id, license_id, product_id, expires_at) VALUES (?, ?, ?, ?)",
             (generate_uid(), license_id, product["id"], expires_at),
         )
+        await log_action(db, "integration_generated", app_id=app_id,
+                         license_key=mask_license_key(raw_key),
+                         details=f"Level {product['level']}; API key {key['id']}")
         created.append({"id": license_id, "key": raw_key, "expires_at": expires_at})
     await log_action(db, "integration_generate", app_id=app_id,
                      details=f"Generated {body.count} key(s) through API key {key['id']}")
@@ -169,7 +190,7 @@ async def set_license_state(app_id: str, identifier: str, state: str, key: dict,
     if state == "banned":
         await db.execute("DELETE FROM sessions WHERE license_id = ?", (license_row["id"],))
     await log_action(db, f"integration_{state}", app_id=app_id,
-                     license_key=license_row["key"], details=f"API key {key['id']}")
+                     license_key=mask_license_key(license_row["key"]), details=f"API key {key['id']}")
     await db.commit()
     return {"ok": True, "id": license_row["id"], "status": state}
 
@@ -191,7 +212,7 @@ async def reset_hwid(app_id: str, identifier: str, key=Depends(require_scope("wr
     await db.execute("DELETE FROM sessions WHERE license_id = ?", (license_row["id"],))
     await db.execute("UPDATE licenses SET hwid_reset_at = CURRENT_TIMESTAMP WHERE id = ?", (license_row["id"],))
     await log_action(db, "integration_reset_hwid", app_id=app_id,
-                     license_key=license_row["key"], details=f"API key {key['id']}")
+                     license_key=mask_license_key(license_row["key"]), details=f"API key {key['id']}")
     await db.commit()
     return {"ok": True, "id": license_row["id"]}
 
@@ -256,7 +277,99 @@ async def license_details(app_id: str, identifier: str, _key=Depends(require_sco
     item.pop("key_hash", None)
     async with db.execute("SELECT hwid_hash, first_seen, last_seen FROM hwids WHERE license_id = ?", (item["id"],)) as cur:
         item["hwids"] = [dict(row) for row in await cur.fetchall()]
+    async with db.execute(
+        """SELECT lp.product_id, p.name, p.level, lp.expires_at, lp.is_paused,
+                  lp.paused_at, lp.pause_reason, lp.total_compensation_seconds
+           FROM license_products lp JOIN products p ON p.id = lp.product_id
+           WHERE lp.license_id = ? ORDER BY p.name""",
+        (item["id"],),
+    ) as cur:
+        item["products"] = [dict(row) for row in await cur.fetchall()]
     return item
+
+
+@router.get("/apps/{app_id}/licenses/{identifier}/history")
+async def license_history(app_id: str, identifier: str, limit: int = 50,
+                          _key=Depends(require_scope("read")), db=Depends(get_db)):
+    item = await find_license(db, app_id, identifier)
+    async with db.execute(
+        """SELECT action, ip, hwid, details, timestamp FROM logs
+           WHERE app_id = ? AND license_key IN (?, ?)
+           ORDER BY timestamp DESC LIMIT ?""",
+        (app_id, item["key"], mask_license_key(item["key"]), max(1, min(limit, 100))),
+    ) as cur:
+        events = [dict(row) for row in await cur.fetchall()]
+    return {"license_id": item["id"], "key": item["key"], "events": events}
+
+
+@router.post("/apps/{app_id}/licenses/{identifier}/products")
+async def add_license_product(app_id: str, identifier: str, body: EntitlementAddBody,
+                              key=Depends(require_scope("admin")), db=Depends(get_db)):
+    item = await find_license(db, app_id, identifier)
+    async with db.execute(
+        "SELECT id, name, level FROM products WHERE id = ? AND app_id = ? AND is_active = 1",
+        (body.product_id, app_id),
+    ) as cur:
+        product = await cur.fetchone()
+    if not product:
+        raise HTTPException(404, "Active product not found for this application")
+    expires_at = None
+    if body.duration_hours is not None:
+        expires_at = (datetime.now(timezone.utc) + timedelta(hours=body.duration_hours)).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        await db.execute(
+            "INSERT INTO license_products(id, license_id, product_id, expires_at) VALUES(?, ?, ?, ?)",
+            (generate_uid(), item["id"], body.product_id, expires_at),
+        )
+    except aiosqlite.IntegrityError:
+        raise HTTPException(409, "License already owns this product")
+    await log_action(db, "integration_entitlement_added", app_id=app_id, license_key=mask_license_key(item["key"]),
+                     details=f"{product['level']} via API key {key['id']}")
+    await db.commit()
+    return {"ok": True, "license_id": item["id"], "product_id": product["id"],
+            "product": product["name"], "expires_at": expires_at}
+
+
+@router.post("/apps/{app_id}/products/{product_id}/licenses/{identifier}/extend")
+async def extend_product_license(app_id: str, product_id: str, identifier: str, body: ExtendBody,
+                                 key=Depends(require_scope("admin")), db=Depends(get_db)):
+    async with db.execute("SELECT id, name, level FROM products WHERE id = ? AND app_id = ?", (product_id, app_id)) as cur:
+        product = await cur.fetchone()
+    if not product:
+        raise HTTPException(404, "Product not found for this application")
+    seconds = int(body.hours * 3600)
+    if identifier.lower() == "all":
+        cursor = await db.execute(
+            """UPDATE license_products SET expires_at=datetime(
+                   CASE WHEN expires_at < CURRENT_TIMESTAMP THEN CURRENT_TIMESTAMP ELSE expires_at END, ?)
+               WHERE product_id = ? AND expires_at IS NOT NULL""",
+            (f"+{seconds} seconds", product_id),
+        )
+        affected = cursor.rowcount
+        async with db.execute(
+            """SELECT l.key FROM licenses l JOIN license_products lp ON lp.license_id=l.id
+               WHERE lp.product_id=? AND lp.expires_at IS NOT NULL""", (product_id,)
+        ) as cur:
+            extended_licenses = await cur.fetchall()
+        for row in extended_licenses:
+            await log_action(db, "integration_product_extended", app_id=app_id,
+                             license_key=row["key"],
+                             details=f"{product['level']}; extended={seconds}s; bulk; API key {key['id']}")
+        await db.commit()
+        return {"ok": True, "affected": affected, "product": product["name"]}
+    item = await find_license(db, app_id, identifier)
+    cursor = await db.execute(
+        """UPDATE license_products SET expires_at=datetime(
+               CASE WHEN expires_at < CURRENT_TIMESTAMP THEN CURRENT_TIMESTAMP ELSE expires_at END, ?)
+           WHERE license_id = ? AND product_id = ? AND expires_at IS NOT NULL""",
+        (f"+{seconds} seconds", item["id"], product_id),
+    )
+    if cursor.rowcount == 0:
+        raise HTTPException(409, "Entitlement not found or is lifetime")
+    await log_action(db, "integration_entitlement_extended", app_id=app_id, license_key=mask_license_key(item["key"]),
+                     details=f"{product['level']}; extended={seconds}s; API key {key['id']}")
+    await db.commit()
+    return {"ok": True, "affected": 1, "product": product["name"]}
 
 
 @router.post("/apps/{app_id}/licenses/{identifier}/extend")
@@ -271,7 +384,7 @@ async def extend(app_id: str, identifier: str, body: ExtendBody,
     await db.execute("UPDATE licenses SET expires_at = ? WHERE id = ?", (expires_at, item["id"]))
     await db.execute("UPDATE license_products SET expires_at = ? WHERE license_id = ?",
                      (expires_at, item["id"]))
-    await log_action(db, "integration_extend", app_id=app_id, license_key=item["key"],
+    await log_action(db, "integration_extend", app_id=app_id, license_key=mask_license_key(item["key"]),
                      details=f"Extended through API key {key['id']}")
     await db.commit()
     return {"ok": True, "expires_at": expires_at}
@@ -280,6 +393,8 @@ async def extend(app_id: str, identifier: str, body: ExtendBody,
 @router.delete("/apps/{app_id}/licenses/{identifier}")
 async def delete_license(app_id: str, identifier: str, _key=Depends(require_scope("admin")), db=Depends(get_db)):
     item = await find_license(db, app_id, identifier)
+    await log_action(db, "integration_deleted", app_id=app_id,
+                     license_key=mask_license_key(item["key"]), details=f"License {item['id']} deleted")
     await db.execute("DELETE FROM licenses WHERE id = ?", (item["id"],))
     await db.commit()
     return {"ok": True}
@@ -312,6 +427,117 @@ async def kill_all_sessions(app_id: str, _key=Depends(require_scope("admin")), d
     cursor = await db.execute("DELETE FROM sessions WHERE app_id = ?", (app_id,))
     await db.commit()
     return {"ok": True, "deleted": cursor.rowcount}
+
+
+@router.post("/apps/{app_id}/pause")
+async def pause_app(app_id: str, body: PauseBody, key=Depends(require_scope("admin")), db=Depends(get_db)):
+    await require_app(db, app_id)
+    async with db.execute("SELECT is_paused, paused_at FROM applications WHERE id = ?", (app_id,)) as cur:
+        state = await cur.fetchone()
+    if state["is_paused"]:
+        return {"ok": True, "already_paused": True, "paused_at": state["paused_at"]}
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    reason = (body.reason or "Application outage").strip()
+    async with db.execute("SELECT COUNT(*) FROM licenses WHERE app_id=?", (app_id,)) as cur:
+        affected = (await cur.fetchone())[0]
+    await db.execute("UPDATE applications SET is_paused=1, paused_at=?, pause_reason=? WHERE id=?", (now, reason, app_id))
+    await db.execute(
+        """INSERT INTO outage_events(id,app_id,event_type,service_status,status_color,public_message,started_at,affected_licenses)
+           VALUES(?,?,?,?,?,?,?,?)""",
+        (generate_uid(), app_id, "started", "offline", "#ef4444", reason, now, affected),
+    )
+    await db.execute("DELETE FROM sessions WHERE app_id=?", (app_id,))
+    await log_action(db, "integration_app_paused", app_id=app_id,
+                     details=f"{reason}; API key {key['id']}")
+    await db.commit()
+    return {"ok": True, "paused_at": now}
+
+
+@router.get("/apps/{app_id}/resume-preview")
+async def resume_app_preview(app_id: str, compensation_hours: float = 0,
+                             _key=Depends(require_scope("admin")), db=Depends(get_db)):
+    if compensation_hours < 0 or compensation_hours > 876000:
+        raise HTTPException(400, "Invalid compensation")
+    async with db.execute("SELECT is_paused, paused_at FROM applications WHERE id = ?", (app_id,)) as cur:
+        state = await cur.fetchone()
+    if not state or not state["is_paused"] or not state["paused_at"]:
+        raise HTTPException(409, "Application is not paused")
+    paused_at = datetime.strptime(state["paused_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    downtime = max(0, int((datetime.now(timezone.utc) - paused_at).total_seconds()))
+    async with db.execute(
+        """SELECT COUNT(DISTINCT l.id) total,
+                  COUNT(DISTINCT CASE WHEN lp.expires_at IS NOT NULL THEN l.id END) expiring
+           FROM licenses l LEFT JOIN license_products lp ON lp.license_id=l.id WHERE l.app_id=?""",
+        (app_id,),
+    ) as cur:
+        counts = await cur.fetchone()
+    extra = int(compensation_hours * 3600)
+    return {"affected_licenses": counts["total"], "expiring_licenses": counts["expiring"],
+            "downtime_seconds": downtime, "compensation_seconds": extra,
+            "extended_by_seconds": downtime + extra}
+
+
+@router.post("/apps/{app_id}/resume")
+async def resume_app(app_id: str, body: ResumeBody, key=Depends(require_scope("admin")), db=Depends(get_db)):
+    preview = await resume_app_preview(app_id, body.compensation_hours, key, db)
+    async with db.execute("SELECT paused_at FROM applications WHERE id=?", (app_id,)) as cur:
+        paused_at = (await cur.fetchone())["paused_at"]
+    seconds = preview["extended_by_seconds"]
+    await db.execute(
+        "UPDATE licenses SET expires_at=datetime(expires_at, ?) WHERE app_id=? AND expires_at IS NOT NULL",
+        (f"+{seconds} seconds", app_id),
+    )
+    await db.execute(
+        """UPDATE license_products SET expires_at=datetime(expires_at, ?),
+                  total_compensation_seconds=total_compensation_seconds+?
+           WHERE expires_at IS NOT NULL AND product_id IN (SELECT id FROM products WHERE app_id=?)""",
+        (f"+{seconds} seconds", preview["compensation_seconds"], app_id),
+    )
+    await db.execute("UPDATE applications SET is_paused=0, paused_at=NULL, pause_reason=NULL WHERE id=?", (app_id,))
+    await db.execute(
+        """INSERT INTO outage_events(id,app_id,event_type,service_status,public_message,started_at,ended_at,
+                  downtime_seconds,compensation_seconds,affected_licenses)
+           VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (generate_uid(), app_id, "resolved", "operational", "Service restored", paused_at,
+         datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), preview["downtime_seconds"],
+         preview["compensation_seconds"], preview["affected_licenses"]),
+    )
+    async with db.execute("SELECT key FROM licenses WHERE app_id=?", (app_id,)) as cur:
+        compensated_licenses = await cur.fetchall()
+    for row in compensated_licenses:
+        await log_action(db, "integration_compensation", app_id=app_id, license_key=row["key"],
+                         details=f"downtime={preview['downtime_seconds']}s; extra={preview['compensation_seconds']}s")
+    await log_action(db, "integration_app_resumed", app_id=app_id,
+                     details=f"affected={preview['affected_licenses']}; extended={seconds}s; API key {key['id']}")
+    await db.commit()
+    return {"ok": True, **preview}
+
+
+@router.get("/resellers")
+async def resellers(_key=Depends(require_scope("read")), db=Depends(get_db)):
+    async with db.execute(
+        "SELECT id, username, balance, is_active, created_at FROM resellers ORDER BY username LIMIT 200"
+    ) as cur:
+        return [dict(row) for row in await cur.fetchall()]
+
+
+@router.post("/resellers/{reseller_id}/credit")
+async def credit_reseller(reseller_id: str, body: CreditResellerBody,
+                          key=Depends(require_scope("admin")), db=Depends(get_db)):
+    cursor = await db.execute("UPDATE resellers SET balance=balance+? WHERE id=?", (body.amount, reseller_id))
+    if cursor.rowcount == 0:
+        raise HTTPException(404, "Reseller not found")
+    reason = (body.reason or "Discord bot credit").strip()
+    await db.execute(
+        "INSERT INTO reseller_balance_ledger(id, reseller_id, amount, reason, created_by) VALUES(?, ?, ?, ?, ?)",
+        (generate_uid(), reseller_id, body.amount, reason, f"api:{key['id']}"),
+    )
+    async with db.execute("SELECT balance FROM resellers WHERE id=?", (reseller_id,)) as cur:
+        balance = (await cur.fetchone())["balance"]
+    await log_action(db, "integration_reseller_credit",
+                     details=f"reseller={reseller_id}; amount={body.amount}; API key {key['id']}")
+    await db.commit()
+    return {"ok": True, "balance": balance}
 
 
 @router.get("/apps/{app_id}/builds")
