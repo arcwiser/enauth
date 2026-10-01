@@ -101,6 +101,8 @@ def configured_app(interaction: discord.Interaction):
 def has_keygen_access(interaction: discord.Interaction) -> bool:
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
         return False
+    if interaction.user.guild_permissions.administrator:
+        return True
     return any(role.name.strip().casefold() == KEYGEN_ROLE for role in interaction.user.roles)
 
 
@@ -108,7 +110,7 @@ async def require_keygen(interaction: discord.Interaction):
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
         raise app_commands.CheckFailure("Commands can only be used inside a Discord server.")
     if not has_keygen_access(interaction):
-        raise app_commands.CheckFailure("You need the keygen role to use this command.")
+        raise app_commands.CheckFailure("You need the keygen role or Administrator permission to use this command.")
     return True
 
 
@@ -122,7 +124,9 @@ class SetupModal(discord.ui.Modal, title="Connect EnAuth"):
 
     async def on_submit(self, interaction: discord.Interaction):
         if not has_keygen_access(interaction):
-            await interaction.response.send_message("You need the keygen role to configure the bot.", ephemeral=True)
+            await interaction.response.send_message(
+                "You need the keygen role or Administrator permission to configure the bot.", ephemeral=True
+            )
             return
         server = str(self.server_url).rstrip("/")
         if not server.startswith("https://") or not str(self.api_key).startswith("enauth_"):
@@ -335,7 +339,9 @@ class AddProductSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         if not has_keygen_access(interaction):
-            await interaction.response.send_message("You need the keygen role.", ephemeral=True)
+            await interaction.response.send_message(
+                "You need the keygen role or Administrator permission.", ephemeral=True
+            )
             return
         await interaction.response.defer(ephemeral=True)
         result = await api(
