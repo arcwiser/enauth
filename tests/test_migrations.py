@@ -142,6 +142,32 @@ class DatabaseMigrationTests(unittest.IsolatedAsyncioTestCase):
                          "file_size", "is_active", "is_archived", "download_limit"} <= columns)
         self.assertEqual(tables, {"app_file_products", "file_download_events"})
 
+    async def test_version_8_database_receives_release_repair(self):
+        await self.database.init_db()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DROP TABLE file_download_events")
+            await db.execute("DROP TABLE app_file_products")
+            await db.execute("ALTER TABLE app_files RENAME TO app_files_current")
+            await db.execute(
+                """CREATE TABLE app_files (
+                       id TEXT PRIMARY KEY, app_id TEXT NOT NULL, name TEXT NOT NULL,
+                       content BLOB NOT NULL, file_sha256 TEXT, is_secret INTEGER DEFAULT 0,
+                       portal_visible INTEGER NOT NULL DEFAULT 0, product_id TEXT,
+                       created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(app_id,name)
+                   )"""
+            )
+            await db.execute("DROP TABLE app_files_current")
+            await db.execute("PRAGMA user_version=8")
+            await db.commit()
+        await self.database.init_db()
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("PRAGMA user_version") as cur:
+                version = (await cur.fetchone())[0]
+            async with db.execute("PRAGMA table_info(app_files)") as cur:
+                columns = {row[1] for row in await cur.fetchall()}
+        self.assertEqual(version, 9)
+        self.assertTrue({"release_version", "channel", "file_type", "is_archived"} <= columns)
+
 
 if __name__ == "__main__":
     unittest.main()
