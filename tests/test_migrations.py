@@ -8,6 +8,8 @@ import unittest
 import uuid
 from pathlib import Path
 
+import aiosqlite
+
 
 class DatabaseMigrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -126,6 +128,19 @@ class DatabaseMigrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue({"portal_visible", "product_id"} <= file_columns)
         self.assertIn("key_ciphertext", license_columns)
         self.assertIsNotNone(outage_table)
+
+    async def test_release_file_schema(self):
+        await self.database.init_db()
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("PRAGMA table_info(app_files)") as cur:
+                columns = {row[1] for row in await cur.fetchall()}
+            async with db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('app_file_products','file_download_events')"
+            ) as cur:
+                tables = {row[0] for row in await cur.fetchall()}
+        self.assertTrue({"release_version", "channel", "file_type", "platform", "architecture",
+                         "file_size", "is_active", "is_archived", "download_limit"} <= columns)
+        self.assertEqual(tables, {"app_file_products", "file_download_events"})
 
 
 if __name__ == "__main__":

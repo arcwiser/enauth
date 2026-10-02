@@ -542,22 +542,49 @@ async def killallsessions(interaction: discord.Interaction, confirm: bool):
 
 
 @bot.tree.command(description="Upload or replace a protected application build")
+@app_commands.autocomplete(product=product_choices)
+@app_commands.choices(
+    file_type=[app_commands.Choice(name=x.title(), value=x) for x in ("loader", "payload", "update", "config", "symbols", "documentation")],
+    channel=[app_commands.Choice(name=x.title(), value=x) for x in ("stable", "beta", "nightly", "private")],
+    platform=[app_commands.Choice(name=x.title(), value=x) for x in ("windows", "linux", "macos", "any")],
+    architecture=[app_commands.Choice(name=x.upper(), value=x) for x in ("x64", "x86", "arm64", "any")],
+)
 @keygen
-async def uploadbuild(interaction: discord.Interaction, file: discord.Attachment, name: str = ""):
+async def uploadbuild(interaction: discord.Interaction, file: discord.Attachment, version: str,
+                      product: str = "", file_type: str = "payload", channel: str = "stable",
+                      platform: str = "windows", architecture: str = "x64",
+                      auto_replace: bool = False, customer_download: bool = False,
+                      mandatory: bool = False, name: str = "", release_notes: str = ""):
     await interaction.response.defer(ephemeral=True)
     data = await file.read()
     form = aiohttp.FormData()
     form.add_field("name", name or file.filename)
+    form.add_field("release_version", version)
+    form.add_field("product_ids", product)
+    form.add_field("file_type", file_type)
+    form.add_field("channel", channel)
+    form.add_field("platform", platform)
+    form.add_field("architecture", architecture)
+    form.add_field("auto_replace", str(auto_replace).lower())
+    form.add_field("portal_visible", str(customer_download).lower())
+    form.add_field("is_mandatory", str(mandatory).lower())
+    form.add_field("release_notes", release_notes)
     form.add_field("file", data, filename=file.filename, content_type=file.content_type or "application/octet-stream")
     result = await api(interaction, "POST", f"/api/integrations/apps/{configured_app(interaction)}/builds", data=form)
-    await interaction.followup.send(f"Uploaded `{result['name']}` ({result['size']} bytes).", ephemeral=True)
+    replaced = f" Replaced and archived `{result['replaced_file_id']}`." if result.get("replaced_file_id") else ""
+    await interaction.followup.send(
+        f"Uploaded `{result['name']}` v`{result['version']}` to `{result['channel']}` "
+        f"({result['size']} bytes).\nSHA-256: `{result['sha256']}`.{replaced}", ephemeral=True
+    )
 
 
 @bot.tree.command(description="List protected builds")
 @keygen
 async def builds(interaction: discord.Interaction):
     rows = await api(interaction, "GET", f"/api/integrations/apps/{configured_app(interaction)}/builds")
-    await interaction.response.send_message(render_rows(rows, ["id", "name", "created_at"]), ephemeral=True)
+    await interaction.response.send_message(
+        render_rows(rows, ["id", "name", "release_version", "channel", "file_type", "is_active"]), ephemeral=True
+    )
 
 
 @bot.tree.command(description="Delete a protected build")

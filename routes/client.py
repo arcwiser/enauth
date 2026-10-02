@@ -543,21 +543,52 @@ async def client_download(request: Request, req: EncryptedRequest,
     if not sess or sess["expires_at"] < utcnow():
         return enc_resp({"success": False, "message": "SESSION_EXPIRED"}, secret, req.app_id)
 
-    # Only allow downloading files that belong to this app
+    # Select only an active, currently available release for this application.
     async with db.execute(
-        "SELECT content FROM app_files WHERE app_id = ? AND name = ?", (app["id"], name)
+        """SELECT f.* FROM app_files f
+           WHERE f.app_id=? AND f.name=? AND f.is_active=1 AND f.is_archived=0
+             AND (f.available_from IS NULL OR f.available_from<=CURRENT_TIMESTAMP)
+             AND (f.available_until IS NULL OR f.available_until>CURRENT_TIMESTAMP)""",
+        (app["id"], name),
     ) as cur:
         row = await cur.fetchone()
 
     if not row:
         return enc_resp({"success": False, "message": "FILE_NOT_FOUND"}, secret, req.app_id)
 
+    async with db.execute("SELECT product_id FROM app_file_products WHERE file_id=?", (row["id"],)) as cur:
+        allowed_products = {item["product_id"] for item in await cur.fetchall()}
+    if allowed_products and sess["product_id"] not in allowed_products:
+        await log_action(db, "download_denied", app_id=app["id"], ip=ip,
+                         details=f"file={name}; product={sess['product_id']}")
+        await db.commit()
+        return enc_resp({"success": False, "message": "PRODUCT_NOT_AUTHORIZED"}, secret, req.app_id)
+    if row["download_limit"]:
+        async with db.execute(
+            "SELECT COUNT(*) FROM file_download_events WHERE file_id=? AND license_id=?",
+            (row["id"], sess["license_id"]),
+        ) as cur:
+            downloads = (await cur.fetchone())[0]
+        if downloads >= row["download_limit"]:
+            return enc_resp({"success": False, "message": "DOWNLOAD_LIMIT_REACHED"}, secret, req.app_id)
+
     import base64
     content_b64 = base64.b64encode(row["content"]).decode()
+
+    await db.execute(
+        "INSERT INTO file_download_events(file_id,license_id,source,ip) VALUES(?,?,?,?)",
+        (row["id"], sess["license_id"], "sdk", ip),
+    )
+    await db.commit()
 
     return enc_resp({
         "success": True,
         "message": "OK",
         "name":    name,
         "data":    content_b64,
+        "sha256":  row["file_sha256"],
+        "version": row["release_version"],
+        "channel": row["channel"],
+        "file_type": row["file_type"],
+        "mandatory": bool(row["is_mandatory"]),
     }, secret, req.app_id)

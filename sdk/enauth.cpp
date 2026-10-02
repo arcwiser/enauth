@@ -521,7 +521,16 @@ std::vector<unsigned char> Client::DownloadFile(const std::string& name) {
         if (JsonBool(dec, OBFUSCATE("success"))) {
             std::string b64_data = JsonGet(dec, OBFUSCATE("data"));
             if (!b64_data.empty()) {
-                return Base64Decode(b64_data);
+                auto decoded = Base64Decode(b64_data);
+                const std::string expectedHash = JsonGet(dec, OBFUSCATE("sha256"));
+                if (!expectedHash.empty()) {
+                    const std::string bytes(decoded.begin(), decoded.end());
+                    if (SHA256Hex(bytes) != expectedHash) {
+                        SecureZeroMemory(decoded.data(), decoded.size());
+                        return {};
+                    }
+                }
+                return decoded;
             }
         }
     } catch (...) {}

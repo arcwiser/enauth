@@ -1,4 +1,5 @@
 import hashlib
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -230,29 +231,73 @@ async def logs(app_id: str, limit: int = 20, _key=Depends(require_scope("read"))
 
 @router.post("/apps/{app_id}/builds")
 async def upload_build(app_id: str, name: str = Form(...), file: UploadFile = File(...),
+                       product_ids: Optional[str] = Form(None),
+                       release_version: str = Form("1.0.0"),
+                       channel: str = Form("stable"), file_type: str = Form("payload"),
+                       platform: str = Form("windows"), architecture: str = Form("x64"),
+                       release_notes: Optional[str] = Form(None), portal_visible: bool = Form(False),
+                       is_mandatory: bool = Form(False), auto_replace: bool = Form(False),
                        key=Depends(require_scope("admin")), db=Depends(get_db)):
     await require_app(db, app_id)
     safe_name = Path(name).name.strip()
     if not safe_name or safe_name != name.strip():
         raise HTTPException(400, "Invalid build name")
-    content = await file.read(5 * 1024 * 1024 + 1)
-    if len(content) > 5 * 1024 * 1024:
-        raise HTTPException(413, "Build exceeds 5 MiB")
+    allowed_channels = {"stable", "beta", "nightly", "private"}
+    allowed_types = {"loader", "payload", "update", "config", "symbols", "documentation"}
+    allowed_platforms = {"windows", "linux", "macos", "any"}
+    allowed_architectures = {"x64", "x86", "arm64", "any"}
+    if channel not in allowed_channels or file_type not in allowed_types:
+        raise HTTPException(400, "Invalid release channel or file type")
+    if platform not in allowed_platforms or architecture not in allowed_architectures:
+        raise HTTPException(400, "Invalid platform or architecture")
+    selected_products = list(dict.fromkeys(x.strip() for x in (product_ids or "").split(",") if x.strip()))
+    if len(selected_products) > 25:
+        raise HTTPException(400, "A release can target at most 25 products")
+    for product_id in selected_products:
+        async with db.execute("SELECT 1 FROM products WHERE id=? AND app_id=?", (product_id, app_id)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(404, f"Product not found for this application: {product_id}")
+    max_bytes = int(os.getenv("MAX_BUILD_BYTES", str(25 * 1024 * 1024)))
+    content = await file.read(max_bytes + 1)
+    if len(content) > max_bytes:
+        raise HTTPException(413, f"Build exceeds configured limit of {max_bytes} bytes")
     file_id = generate_uid()
     digest = hashlib.sha256(content).hexdigest()
+    async with db.execute(
+        "SELECT id FROM app_files WHERE app_id=? AND name=? AND is_active=1", (app_id, safe_name)
+    ) as cur:
+        previous = await cur.fetchone()
+    if previous and not auto_replace:
+        raise HTTPException(409, "An active build with this name exists; enable auto replace")
+    if previous:
+        archived_name = f"{safe_name}.archived.{previous['id'][:8]}"
+        await db.execute(
+            "UPDATE app_files SET name=?, is_active=0, is_archived=1 WHERE id=?",
+            (archived_name, previous["id"]),
+        )
     await db.execute(
-        """INSERT INTO app_files (id, app_id, name, content, file_sha256, is_secret)
-           VALUES (?, ?, ?, ?, ?, 1)
-           ON CONFLICT(app_id, name) DO UPDATE SET content=excluded.content,
-           file_sha256=excluded.file_sha256, is_secret=1""",
-        (file_id, app_id, safe_name, content, digest),
+        """INSERT INTO app_files
+           (id,app_id,name,content,file_sha256,is_secret,portal_visible,product_id,
+            release_version,channel,file_type,platform,architecture,release_notes,mime_type,file_size,
+            is_active,is_archived,is_mandatory,replaced_file_id)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,0,?,?)""",
+        (file_id, app_id, safe_name, content, digest, 1 if file_type == "payload" else 0,
+         1 if portal_visible else 0, selected_products[0] if len(selected_products) == 1 else None,
+         release_version.strip(), channel, file_type, platform, architecture,
+         (release_notes or "").strip() or None, file.content_type, len(content),
+         1 if is_mandatory else 0, previous["id"] if previous else None),
     )
+    for product_id in selected_products:
+        await db.execute("INSERT INTO app_file_products(file_id,product_id) VALUES(?,?)", (file_id, product_id))
     await log_action(db, "integration_upload_build", app_id=app_id,
                      details=f"Uploaded {safe_name} ({digest[:16]}) via API key {key['id']}")
     await db.commit()
     async with db.execute("SELECT id FROM app_files WHERE app_id = ? AND name = ?", (app_id, safe_name)) as cur:
         stored = await cur.fetchone()
-    return {"ok": True, "id": stored["id"], "name": safe_name, "size": len(content), "sha256": digest}
+    return {"ok": True, "id": stored["id"], "name": safe_name, "size": len(content),
+            "sha256": digest, "version": release_version, "channel": channel,
+            "file_type": file_type, "products": selected_products,
+            "replaced_file_id": previous["id"] if previous else None}
 
 
 @router.get("/apps/{app_id}/stats")
@@ -544,7 +589,9 @@ async def credit_reseller(reseller_id: str, body: CreditResellerBody,
 async def builds(app_id: str, _key=Depends(require_scope("read")), db=Depends(get_db)):
     await require_app(db, app_id)
     async with db.execute(
-        "SELECT id, name, created_at FROM app_files WHERE app_id = ? ORDER BY created_at DESC",
+        """SELECT id,name,release_version,channel,file_type,platform,architecture,file_size,file_sha256,
+                  is_active,is_archived,portal_visible,created_at
+           FROM app_files WHERE app_id = ? ORDER BY created_at DESC""",
         (app_id,),
     ) as cur:
         return [dict(row) for row in await cur.fetchall()]
