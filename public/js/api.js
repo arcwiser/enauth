@@ -23,6 +23,9 @@ function escapeHtml(value) {
     "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;"
   })[char]);
 }
+function fmtExpiry(value) {
+  return value ? fmtDate(value) : "Lifetime";
+}
 function getTheme() { 
   const user = getUser();
   return user.theme || localStorage.getItem("enauth_theme") || "dark";
@@ -191,6 +194,10 @@ const API = {
     });
   },
   clearLogs: () => api("DELETE", "/api/admin/logs"),
+  getBackups: () => api("GET", "/api/admin/backups"),
+  createBackup: () => api("POST", "/api/admin/backups"),
+  deleteBackup: (name) => api("DELETE", `/api/admin/backups/${encodeURIComponent(name)}`),
+  downloadBackup: (name) => fetch(BASE + `/api/admin/backups/${encodeURIComponent(name)}`, { credentials: "same-origin" }),
 
   // Apps
   getApps:       (params = {}) => {
@@ -245,6 +252,7 @@ const API = {
   // Reseller auth + actions (for testing)
   resellerLogin: (u, p)    => apiWithToken(null, "POST", "/api/admin/reseller/auth/signin", { username: u, password: p }),
   resellerProducts: (token)=> apiWithToken(token, "GET",  "/api/admin/reseller/products"),
+  resellerOverview: (token)=> apiWithToken(token, "GET",  "/api/admin/reseller/overview"),
   resellerBuyKey: (token,b)=> apiWithToken(token, "POST", "/api/admin/reseller/buy-key", b),
   resellerKeys: (token)    => apiWithToken(token, "GET",  "/api/admin/reseller/keys"),
   resellerBanKey: (token, licenseId) => apiWithToken(token, "POST", `/api/admin/reseller/keys/${licenseId}/ban`),
@@ -387,7 +395,7 @@ function buildSidebar(activePage) {
     ["Workspace", [["dashboard", "Overview", "grid"], ["apps", "Applications", "box"], ["products", "Product levels", "layers"], ["licenses", "Licenses", "key"]]],
     ["Distribution", [["files", "Files", "file"], ["news", "Announcements", "message"], ["panels", "Customer panels", "window"], ["resellers", "Resellers", "users"]]],
     ["Security", [["sessions", "Active sessions", "pulse"], ["bans", "Blocklist", "shield"], ["logs", "Event logs", "list"], ["audit", "Audit trail", "search"]]],
-    ["Administration", [["users", "Team members", "users", true], ["api-keys", "API keys", "key"], ["variables", "Variables", "code", true], ["settings", "Settings", "settings"]]]
+    ["Administration", [["users", "Team members", "users", true], ["api-keys", "API keys", "key"], ["variables", "Variables", "code", true], ["backups", "Backups", "shield", true], ["settings", "Settings", "settings"]]]
   ];
   const paths = {
     grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',

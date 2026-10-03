@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Header, File, UploadFile, Form, Request, Response
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Literal, Optional
 import aiosqlite
@@ -35,6 +35,8 @@ TEMP_2FA_SWEEP_SECONDS = int(os.getenv("TEMP_2FA_SWEEP_SECONDS", "60"))
 ADMIN_COOKIE_NAME = "enauth_admin_session"
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "true").lower() == "true"
 SERVER_STARTED_MONOTONIC = time.monotonic()
+BACKUP_DIR = Path(os.getenv("BACKUP_DIR", str(Path(__file__).resolve().parent.parent / "backups"))).resolve()
+BACKUP_RETENTION = max(1, min(int(os.getenv("BACKUP_RETENTION", "14")), 100))
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -134,6 +136,74 @@ async def require_owner(user=Depends(require_admin)):
     if user["role"] != "owner":
         raise HTTPException(403, "Owner role required")
     return user
+
+
+def _backup_path(name: str) -> Path:
+    if not re.fullmatch(r"enauth-\d{8}-\d{6}(?:-\d+)?\.db", name):
+        raise HTTPException(400, "Invalid backup name")
+    path = (BACKUP_DIR / name).resolve()
+    if path.parent != BACKUP_DIR:
+        raise HTTPException(400, "Invalid backup path")
+    return path
+
+
+def _backup_info(path: Path) -> dict:
+    stat = path.stat()
+    return {
+        "name": path.name,
+        "size_bytes": stat.st_size,
+        "created_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+@router.get("/backups")
+async def list_backups(user=Depends(require_owner)):
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    files = sorted(BACKUP_DIR.glob("enauth-*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return {"backups": [_backup_info(p) for p in files]}
+
+
+@router.post("/backups")
+async def create_backup(user=Depends(require_owner), db: aiosqlite.Connection = Depends(get_db)):
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    destination = BACKUP_DIR / f"enauth-{stamp}.db"
+    suffix = 1
+    while destination.exists():
+        destination = BACKUP_DIR / f"enauth-{stamp}-{suffix}.db"
+        suffix += 1
+    async with aiosqlite.connect(destination) as target:
+        await db.backup(target)
+        async with target.execute("PRAGMA integrity_check") as cur:
+            check = await cur.fetchone()
+    if not check or check[0] != "ok":
+        destination.unlink(missing_ok=True)
+        raise HTTPException(500, "Backup integrity verification failed")
+    files = sorted(BACKUP_DIR.glob("enauth-*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for expired in files[BACKUP_RETENTION:]:
+        expired.unlink(missing_ok=True)
+    await log_action(db, "backup_created", details=destination.name)
+    await db.commit()
+    return _backup_info(destination)
+
+
+@router.get("/backups/{name}")
+async def download_backup(name: str, user=Depends(require_owner)):
+    path = _backup_path(name)
+    if not path.is_file():
+        raise HTTPException(404, "Backup not found")
+    return FileResponse(path, media_type="application/vnd.sqlite3", filename=path.name)
+
+
+@router.delete("/backups/{name}")
+async def delete_backup(name: str, user=Depends(require_owner), db: aiosqlite.Connection = Depends(get_db)):
+    path = _backup_path(name)
+    if not path.is_file():
+        raise HTTPException(404, "Backup not found")
+    path.unlink()
+    await log_action(db, "backup_deleted", details=name)
+    await db.commit()
+    return {"ok": True}
 
 
 async def require_api_key(x_api_key: Optional[str] = Header(None),
@@ -798,9 +868,8 @@ async def get_reseller_analytics(reseller_id: str,
 
     # Get total sales (licenses sold)
     async with db.execute(
-        """SELECT COUNT(*) as total, SUM(CAST(l.metadata AS REAL)) as revenue
-           FROM licenses l
-           JOIN key_orders ko ON l.id = ko.license_id
+        """SELECT COUNT(*) as total, COALESCE(SUM(ko.amount_paid), 0) as revenue
+           FROM key_orders ko
            WHERE ko.reseller_id = ?""",
         (reseller_id,)
     ) as cur:
@@ -1149,6 +1218,70 @@ async def list_my_products(reseller=Depends(require_reseller), db: aiosqlite.Con
         ) as cur:
             p["pricing_points"] = rows_to_list(await cur.fetchall())
     return {"balance": reseller["balance"], "products": products}
+
+
+@router.get("/reseller/overview")
+async def reseller_overview(reseller=Depends(require_reseller), db: aiosqlite.Connection = Depends(get_db)):
+    """Reseller-scoped dashboard metrics, recent ledger activity, and sales trends."""
+    async with db.execute(
+        """SELECT COUNT(*) AS total_sales,
+                  COALESCE(SUM(o.amount_paid), 0) AS total_spent,
+                  SUM(CASE WHEN l.status='active' THEN 1 ELSE 0 END) AS active_keys,
+                  SUM(CASE WHEN l.status='banned' THEN 1 ELSE 0 END) AS banned_keys,
+                  SUM(CASE WHEN l.status='active' AND l.expires_at IS NOT NULL
+                                AND l.expires_at <= datetime('now', '+7 days') THEN 1 ELSE 0 END) AS expiring_soon
+           FROM key_orders o JOIN licenses l ON l.id=o.license_id
+           WHERE o.reseller_id=?""",
+        (reseller["id"],),
+    ) as cur:
+        totals = dict(await cur.fetchone())
+
+    async with db.execute(
+        """SELECT DATE(created_at) AS date, COUNT(*) AS count,
+                  COALESCE(SUM(amount_paid), 0) AS amount
+           FROM key_orders
+           WHERE reseller_id=? AND created_at >= datetime('now', '-29 days')
+           GROUP BY DATE(created_at) ORDER BY date""",
+        (reseller["id"],),
+    ) as cur:
+        sales_by_date = rows_to_list(await cur.fetchall())
+
+    async with db.execute(
+        """SELECT p.id, p.name, p.level, COUNT(*) AS count,
+                  COALESCE(SUM(o.amount_paid), 0) AS amount
+           FROM key_orders o JOIN products p ON p.id=o.product_id
+           WHERE o.reseller_id=? GROUP BY p.id, p.name, p.level
+           ORDER BY count DESC, p.name LIMIT 8""",
+        (reseller["id"],),
+    ) as cur:
+        top_products = rows_to_list(await cur.fetchall())
+
+    async with db.execute(
+        """SELECT amount, reason, created_by, created_at
+           FROM reseller_balance_ledger WHERE reseller_id=?
+           ORDER BY created_at DESC LIMIT 20""",
+        (reseller["id"],),
+    ) as cur:
+        ledger = rows_to_list(await cur.fetchall())
+    running_balance = float(reseller["balance"] or 0)
+    recent_ledger = []
+    for entry in ledger:
+        recent_ledger.append({
+            **entry,
+            "type": "credit" if entry["amount"] >= 0 else "purchase",
+            "description": entry["reason"],
+            "balance_after": running_balance,
+        })
+        running_balance -= float(entry["amount"])
+
+    return {
+        "username": reseller["username"],
+        "balance": reseller["balance"],
+        **totals,
+        "sales_by_date": sales_by_date,
+        "top_products": top_products,
+        "recent_ledger": recent_ledger,
+    }
 
 
 class ResellerBuyBody(BaseModel):

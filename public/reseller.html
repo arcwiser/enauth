@@ -3,395 +3,66 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>EnAuth - Reseller</title>
+  <title>EnAuth — Reseller Workspace</title>
   <link rel="stylesheet" href="css/style.css">
+  <style>
+    .rs-shell{min-height:100vh;background:var(--bg)}
+    .rs-header{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:18px;padding:16px 24px;border-bottom:1px solid var(--border);background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(16px)}
+    .rs-brand{display:flex;align-items:center;gap:10px;font-weight:800;letter-spacing:.06em}.rs-mark{display:grid;place-items:center;width:34px;height:34px;border-radius:10px;color:white;background:linear-gradient(135deg,var(--primary),#7c3aed)}
+    .rs-nav{display:flex;gap:5px;overflow:auto}.rs-nav button{border:0;background:transparent;color:var(--text2);padding:9px 12px;border-radius:9px;cursor:pointer;font:inherit}.rs-nav button.active{background:var(--bg2);color:var(--text)}
+    .rs-account{margin-left:auto;display:flex;align-items:center;gap:12px}.rs-balance{padding:7px 11px;border:1px solid var(--border);border-radius:99px;color:var(--green);font-weight:700}
+    .rs-main{max-width:1320px;margin:auto;padding:26px}.rs-view{display:none}.rs-view.active{display:block}
+    .rs-hero{display:grid;grid-template-columns:1.6fr 1fr;gap:18px;margin-bottom:18px}.rs-hero-main{padding:28px;border:1px solid var(--border);border-radius:18px;background:radial-gradient(circle at 85% 20%,color-mix(in srgb,var(--primary) 22%,transparent),transparent 42%),var(--bg2)}
+    .rs-eyebrow{color:var(--primary);font-size:12px;text-transform:uppercase;letter-spacing:.12em;font-weight:700}.rs-hero h1{font-size:30px;margin:8px 0}.rs-muted{color:var(--text2)}
+    .rs-stats{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.rs-stat{padding:17px;border:1px solid var(--border);border-radius:14px;background:var(--bg2)}.rs-stat strong{display:block;font-size:24px;margin-top:7px}.rs-stat small{color:var(--text3)}
+    .rs-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.rs-card{border:1px solid var(--border);border-radius:16px;background:var(--bg2);padding:20px}.rs-card h2{font-size:16px;margin:0 0 16px}
+    .rs-chart{height:190px;display:flex;align-items:flex-end;gap:5px}.rs-bar{flex:1;min-width:6px;border-radius:5px 5px 2px 2px;background:linear-gradient(var(--primary),#7c3aed);opacity:.85}.rs-list-item{display:flex;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid var(--border)}
+    .rs-products{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}.rs-product{padding:18px;border:1px solid var(--border);border-radius:14px;background:var(--bg2)}.rs-product strong{display:block;font-size:17px}.rs-product .level{display:inline-block;margin:10px 0;padding:4px 8px;border-radius:99px;background:color-mix(in srgb,var(--primary) 15%,transparent);color:var(--primary);font-size:11px}
+    .rs-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}.rs-toolbar .input{max-width:340px}.rs-toolbar .spacer{flex:1}
+    .rs-result{margin-top:14px;padding:16px;border:1px solid color-mix(in srgb,var(--green) 40%,var(--border));border-radius:12px;background:color-mix(in srgb,var(--green) 8%,var(--bg2))}
+    @media(max-width:800px){.rs-header{align-items:flex-start;flex-wrap:wrap}.rs-nav{order:3;width:100%}.rs-account{margin-left:auto}.rs-main{padding:16px}.rs-hero,.rs-grid{grid-template-columns:1fr}.rs-hero h1{font-size:24px}}
+  </style>
 </head>
 <body>
-<div class="layout">
-  <aside class="sidebar" id="sidebar"></aside>
-  <div class="main">
-    <div class="topbar">
-      <div class="topbar-title">Reseller</div>
-      <button class="btn btn-ghost" onclick="logoutReseller()">Sign out</button>
-    </div>
-    <div style="display:flex;gap:10px;flex-wrap:wrap;margin:12px 0">
-      <button class="btn btn-outline" type="button" onclick="setTab('tab-products')" id="tab-btn-products">My Products</button>
-      <button class="btn btn-outline" type="button" onclick="setTab('tab-generate')" id="tab-btn-generate">Generate</button>
-      <button class="btn btn-outline" type="button" onclick="setTab('tab-keys')" id="tab-btn-keys">Keys (Manage)</button>
-      <button class="btn btn-outline" type="button" onclick="setTab('tab-analytics')" id="tab-btn-analytics">Analytics</button>
-    </div>
-    <div class="content">
-      <div id="tab-products">
-        <div class="card">
-        <div style="display:flex;justify-content:space-between;gap:12px;align-items:center">
-          <div>
-            <div style="font-size:12px;color:var(--text3)">Signed in as</div>
-            <div id="who" style="font-weight:700"></div>
-          </div>
-          <div>
-            <div style="font-size:12px;color:var(--text3)">Balance</div>
-            <div id="bal" style="font-weight:700"></div>
-          </div>
-        </div>
-        </div>
-
-        <div class="card" style="margin-top:14px">
-        <div style="font-weight:700;margin-bottom:10px">Allowed products</div>
-        <div id="products"></div>
-        </div>
-      </div>
-
-      <div id="tab-generate" style="display:none">
-      <div class="card" style="margin-top:0">
-        <div style="font-weight:700;margin-bottom:10px">Generate key</div>
-        <div class="form-row">
-          <div class="form-group" style="flex:2">
-            <label class="form-label">Product</label>
-            <select class="select" id="buy-product"></select>
-          </div>
-          <div class="form-group" style="flex:2">
-            <label class="form-label">Pricing</label>
-            <select class="select" id="buy-pricing"></select>
-          </div>
-          <div class="form-group" style="flex:1;display:flex;align-items:flex-end">
-            <button class="btn btn-primary" style="width:100%" onclick="buyKey()">Generate</button>
-          </div>
-        </div>
-        <div id="buy-result" style="margin-top:10px"></div>
-      </div>
-      </div>
-
-      <div id="tab-keys" style="display:none">
-      <div class="card" style="margin-top:0;padding:0">
-        <div style="padding:14px 14px 0;font-weight:700">My keys</div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr>
-              <th style="width:46px"><input type="checkbox" id="keys-select-all" onclick="selectAllKeys(this)"></th>
-              <th>Key</th><th>Level</th><th>Status</th><th>Expires</th><th>Actions</th>
-            </tr></thead>
-            <tbody id="keys-tbody">
-              <tr class="loading-row"><td colspan="6"><span class="spinner"></span></td></tr>
-            </tbody>
-          </table>
-        </div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap;padding:14px">
-          <button class="btn btn-outline" type="button" onclick="bulkBan()">Ban selected</button>
-          <button class="btn btn-outline" type="button" onclick="bulkUnban()">Unban selected</button>
-          <button class="btn btn-danger" type="button" onclick="bulkDelete()">Delete selected</button>
-        </div>
-      </div>
-
-      <div id="tab-analytics" style="display:none">
-        <div class="card" style="margin-top:0">
-          <div style="font-weight:700;margin-bottom:10px">Sales Analytics</div>
-          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:14px">
-            <div style="background:var(--bg2);padding:12px;border-radius:8px">
-              <div style="font-size:12px;color:var(--text3)">Total Sales</div>
-              <div id="analytics-total-sales" style="font-size:24px;font-weight:700">-</div>
-            </div>
-            <div style="background:var(--bg2);padding:12px;border-radius:8px">
-              <div style="font-size:12px;color:var(--text3)">Total Revenue</div>
-              <div id="analytics-total-revenue" style="font-size:24px;font-weight:700">-</div>
-            </div>
-          </div>
-          <div style="margin-bottom:14px">
-            <div style="font-weight:700;margin-bottom:10px">Sales by Date (Last 30 Days)</div>
-            <div id="analytics-sales-chart" style="height:200px;background:var(--bg2);border-radius:8px;padding:12px;display:flex;align-items:flex-end;gap:4px;overflow-x:auto">
-              <div style="color:var(--text3);width:100%;text-align:center;padding:20px">Loading...</div>
-            </div>
-          </div>
-          <div>
-            <div style="font-weight:700;margin-bottom:10px">Top Selling Products</div>
-            <div id="analytics-top-products"></div>
-          </div>
-        </div>
-      </div>
-      </div>
-    </div>
-  </div>
+<div class="rs-shell">
+  <header class="rs-header">
+    <div class="rs-brand"><span class="rs-mark">E</span> ENAUTH</div>
+    <nav class="rs-nav" aria-label="Reseller workspace">
+      <button data-view="overview" class="active">Overview</button><button data-view="generate">Generate</button><button data-view="licenses">Licenses</button><button data-view="products">Products</button><button data-view="ledger">Ledger</button>
+    </nav>
+    <div class="rs-account"><span id="header-balance" class="rs-balance">$0.00</span><button class="btn btn-ghost btn-sm" onclick="logoutReseller()">Sign out</button></div>
+  </header>
+  <main class="rs-main">
+    <section id="view-overview" class="rs-view active">
+      <div class="rs-hero"><div class="rs-hero-main"><span class="rs-eyebrow">Reseller workspace</span><h1>Welcome back, <span id="who">Reseller</span>.</h1><p class="rs-muted">Generate licenses, manage customers, and track sales from one clean workspace.</p><button class="btn btn-primary" onclick="showView('generate')">Generate a license</button></div><div class="rs-stats"><div class="rs-stat"><small>Total sales</small><strong id="stat-sales">0</strong></div><div class="rs-stat"><small>Active keys</small><strong id="stat-active">0</strong></div><div class="rs-stat"><small>Spent</small><strong id="stat-spent">$0</strong></div><div class="rs-stat"><small>Expiring soon</small><strong id="stat-expiring">0</strong></div></div></div>
+      <div class="rs-grid"><div class="rs-card"><h2>Sales over the last 30 days</h2><div id="sales-chart" class="rs-chart"><span class="rs-muted">No sales yet.</span></div></div><div class="rs-card"><h2>Top products</h2><div id="top-products" class="rs-muted">No sales yet.</div></div></div>
+    </section>
+    <section id="view-generate" class="rs-view"><div class="rs-card"><span class="rs-eyebrow">New customer license</span><h1>Generate a license</h1><div class="form-row"><div class="form-group"><label class="form-label">Product</label><select class="select" id="buy-product"></select></div><div class="form-group"><label class="form-label">Duration and price</label><select class="select" id="buy-pricing"></select></div></div><button class="btn btn-primary" onclick="buyKey()">Generate license</button><div id="buy-result"></div></div></section>
+    <section id="view-licenses" class="rs-view"><div class="rs-card"><div class="rs-toolbar"><h2 style="margin:0">License inventory</h2><span class="spacer"></span><input class="input" id="key-search" placeholder="Search key, product, or status" oninput="renderKeys()"><button class="btn btn-outline btn-sm" onclick="loadKeys()">Refresh</button></div><div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="keys-select-all" onchange="selectAllKeys(this)"></th><th>License</th><th>Product</th><th>Status</th><th>Expiration</th><th>Actions</th></tr></thead><tbody id="keys-tbody"></tbody></table></div><div class="rs-toolbar" style="margin-top:14px"><button class="btn btn-outline btn-sm" onclick="bulkBan()">Ban selected</button><button class="btn btn-outline btn-sm" onclick="bulkUnban()">Unban selected</button><button class="btn btn-danger btn-sm" onclick="bulkDelete()">Delete selected</button></div></div></section>
+    <section id="view-products" class="rs-view"><div class="rs-toolbar"><div><span class="rs-eyebrow">Catalog</span><h1 style="margin:6px 0">Your products</h1></div></div><div id="products" class="rs-products"></div></section>
+    <section id="view-ledger" class="rs-view"><div class="rs-card"><h2>Balance ledger</h2><div class="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Description</th><th>Amount</th><th>Balance after</th></tr></thead><tbody id="ledger-body"></tbody></table></div></div></section>
+  </main>
 </div>
-
 <script src="js/api.js"></script>
 <script>
-  function requireResellerAuth() {
-    if (!getResellerToken()) {
-      window.location.href = "/panel/index.html";
-      return false;
-    }
-    return true;
-  }
-
-  function buildResellerSidebar() {
-    const el = document.getElementById("sidebar");
-    if (!el) return;
-    el.innerHTML = `
-      <div class="sidebar-logo">
-        <div class="logo-icon">E</div>
-        <div class="logo-text">ENAUTH</div>
-      </div>
-      <nav class="sidebar-nav">
-        <div class="nav-section">Reseller</div>
-        <a class="nav-item active" href="reseller.html"><span class="nav-icon">🧾</span> My Products</a>
-      </nav>
-      <div class="sidebar-footer">
-        <button class="sidebar-logout" onclick="logoutReseller()">⬅ Sign Out</button>
-      </div>
-    `;
-  }
-
-  function setTab(tabId) {
-    const tabs = ["tab-products","tab-generate","tab-keys","tab-analytics"];
-    tabs.forEach(id => {
-      const el = document.getElementById(id);
-      if (!el) return;
-      el.style.display = (id === tabId) ? "" : "none";
-    });
-
-    ["tab-products","tab-generate","tab-keys","tab-analytics"].forEach(x => {
-      const btn = document.getElementById("tab-btn-" + x.replace("tab-",""));
-      if (btn) btn.className = "btn btn-outline";
-    });
-    const activeBtn = document.getElementById("tab-btn-" + tabId.replace("tab-",""));
-    if (activeBtn) activeBtn.className = "btn btn-primary";
-  }
-
-  async function load() {
-    if (!requireResellerAuth()) return;
-    buildResellerSidebar();
-    const token = getResellerToken();
-    const data = await API.resellerProducts(token);
-    const info = JSON.parse(localStorage.getItem("enauth_reseller") || "{}");
-    document.getElementById("who").textContent = info.username || "Reseller";
-    document.getElementById("bal").textContent = `$${Number(data.balance || 0).toFixed(2)}`;
-
-    const container = document.getElementById("products");
-    if (!data.products?.length) {
-      container.innerHTML = `<div style="color:var(--text3)">No allowed products.</div>`;
-      return;
-    }
-    container.innerHTML = data.products.map(p => `
-      <div style="border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:10px">
-        <div style="display:flex;justify-content:space-between;gap:10px">
-          <div><b>${p.level}</b> <span style="color:var(--text3)">${p.name}</span></div>
-        </div>
-        <div style="margin-top:8px;color:var(--text2);font-size:12px">
-          ${p.pricing_points?.length ? p.pricing_points.map(pp => `${pp.days}d / $${Number(pp.price).toFixed(2)}`).join(" • ") : "No allowed pricing points"}
-        </div>
-      </div>
-    `).join("");
-
-    // Buy dropdowns
-    const buyProduct = document.getElementById("buy-product");
-    buyProduct.innerHTML = data.products.map(p => `<option value="${p.id}">${p.level} (${p.name})</option>`).join("");
-    buyProduct.onchange = () => refreshPricing(data.products);
-    refreshPricing(data.products);
-
-    await loadKeys();
-
-    // Load analytics when analytics tab is clicked
-    document.getElementById("tab-btn-analytics").addEventListener("click", loadAnalytics);
-
-    setTab("tab-products");
-  }
-
-  async function loadAnalytics() {
-    const info = JSON.parse(localStorage.getItem("enauth_reseller") || "{}");
-    const resellerId = info.reseller_id;
-    if (!resellerId) return;
-
-    try {
-      const analytics = await API.getResellerAnalytics(resellerId);
-      document.getElementById("analytics-total-sales").textContent = analytics.total_sales || 0;
-      document.getElementById("analytics-total-revenue").textContent = `$${Number(analytics.total_revenue || 0).toFixed(2)}`;
-
-      // Sales by date chart
-      const chartContainer = document.getElementById("analytics-sales-chart");
-      if (analytics.sales_by_date && analytics.sales_by_date.length > 0) {
-        const maxCount = Math.max(...analytics.sales_by_date.map(d => d.count));
-        chartContainer.innerHTML = analytics.sales_by_date.map(d => {
-          const height = (d.count / maxCount) * 100;
-          return `
-            <div style="flex:1;min-width:30px;display:flex;flex-direction:column;align-items:center;gap:4px">
-              <div style="font-size:10px;color:var(--text3)">${d.count}</div>
-              <div style="width:100%;height:${height}%;background:var(--primary);border-radius:4px;min-height:4px"></div>
-              <div style="font-size:9px;color:var(--text3)">${d.date?.slice(5) || ''}</div>
-            </div>
-          `;
-        }).join("");
-      } else {
-        chartContainer.innerHTML = `<div style="color:var(--text3);width:100%;text-align:center;padding:20px">No sales data available</div>`;
-      }
-
-      // Top products
-      const topProductsContainer = document.getElementById("analytics-top-products");
-      if (analytics.top_products && analytics.top_products.length > 0) {
-        topProductsContainer.innerHTML = analytics.top_products.map(p => `
-          <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
-            <span>${p.name || p.product_id}</span>
-            <span style="font-weight:700">${p.count} sales</span>
-          </div>
-        `).join("");
-      } else {
-        topProductsContainer.innerHTML = `<div style="color:var(--text3)">No product data available</div>`;
-      }
-    } catch (err) {
-      console.error("Failed to load analytics:", err);
-      document.getElementById("analytics-sales-chart").innerHTML = `<div style="color:var(--error);width:100%;text-align:center;padding:20px">Failed to load analytics</div>`;
-    }
-  }
-
-  function refreshPricing(products) {
-    const pid = document.getElementById("buy-product").value;
-    const prod = products.find(p => p.id === pid);
-    const sel = document.getElementById("buy-pricing");
-    const points = prod?.pricing_points || [];
-    sel.innerHTML = points.length
-      ? points.map(pp => `<option value="${pp.id}">${pp.days} day(s) - $${Number(pp.price).toFixed(2)}</option>`).join("")
-      : `<option value="">No allowed pricing points</option>`;
-  }
-
-  async function buyKey() {
-    const token = getResellerToken();
-    const product_id = document.getElementById("buy-product").value;
-    const pricing_point_id = document.getElementById("buy-pricing").value;
-    const out = document.getElementById("buy-result");
-    out.innerHTML = "";
-    if (!pricing_point_id) return toast("Select a pricing option", "error");
-    try {
-      const res = await API.resellerBuyKey(token, { product_id, pricing_point_id });
-      out.innerHTML = `
-        <div class="secret-display" style="display:flex;justify-content:space-between;gap:10px;align-items:center">
-          <span class="mono">${res.license_key}</span>
-          <button class="copy-btn" onclick="copyText('${res.license_key}')">⧉</button>
-        </div>
-        <div style="margin-top:8px;color:var(--text3);font-size:12px">Expires: ${res.expires_at}</div>
-      `;
-      toast("Key generated", "success");
-      await load();
-    } catch (e) {
-      toast(e.message, "error");
-    }
-  }
-
-  async function loadKeys() {
-    const token = getResellerToken();
-    const tbody = document.getElementById("keys-tbody");
-    const selectAll = document.getElementById("keys-select-all");
-    if (selectAll) selectAll.checked = false;
-    tbody.innerHTML = `<tr class="loading-row"><td colspan="6"><span class="spinner"></span></td></tr>`;
-    try {
-      const res = await API.resellerKeys(token);
-      const keys = res.keys || [];
-      if (!keys.length) {
-        tbody.innerHTML = `<tr><td colspan="6"><div class="empty"><div class="empty-icon">🔑</div><div class="empty-text">No keys yet</div></div></td></tr>`;
-        return;
-      }
-      tbody.innerHTML = keys.map(k => `
-        <tr>
-          <td style="width:46px"><input type="checkbox" class="key-check" value="${k.id}"></td>
-          <td><span class="mono">${k.key}</span> ${k.key.includes('…')
-            ? `<span title="This legacy key predates encrypted storage" style="font-size:10px;color:var(--text3)">legacy masked</span>`
-            : `<button class="copy-btn" onclick="copyText(decodeURIComponent('${encodeURIComponent(k.key)}'))">⧉</button>`}</td>
-          <td>${k.product_level || "—"}</td>
-          <td>${statusBadge(k.status)}</td>
-          <td style="color:var(--text2)">${k.expires_at ? fmtDate(k.expires_at) : "—"}</td>
-          <td>
-            <div class="action-group">
-              ${k.status === "banned"
-                ? `<button class="btn btn-success btn-sm" onclick="unbanKey('${k.id}')">Unban</button>`
-                : `<button class="btn btn-danger btn-sm" onclick="banKey('${k.id}')">Ban</button>`}
-              <button class="btn btn-ghost btn-sm" onclick="deleteKey('${k.id}')">🗑</button>
-            </div>
-          </td>
-        </tr>
-      `).join("");
-    } catch (e) {
-      toast(e.message, "error");
-    }
-  }
-
-  function selectAllKeys(chk) {
-    const boxes = [...document.querySelectorAll(".key-check")];
-    boxes.forEach(b => b.checked = chk.checked);
-  }
-
-  function selectedKeyIds() {
-    return [...document.querySelectorAll(".key-check:checked")].map(b => b.value);
-  }
-
-  async function bulkBan() {
-    const ids = selectedKeyIds();
-    if (!ids.length) return toast("Select at least 1 key", "error");
-    if (!confirm(`Ban ${ids.length} selected key(s)?`)) return;
-    try {
-      await API.resellerBulkBan(getResellerToken(), ids);
-      toast("Bulk ban done", "warning");
-      await loadKeys();
-    } catch (e) {
-      toast(e.message, "error");
-    }
-  }
-
-  async function bulkUnban() {
-    const ids = selectedKeyIds();
-    if (!ids.length) return toast("Select at least 1 key", "error");
-    if (!confirm(`Unban ${ids.length} selected key(s)?`)) return;
-    try {
-      await API.resellerBulkUnban(getResellerToken(), ids);
-      toast("Bulk unban done", "success");
-      await loadKeys();
-    } catch (e) {
-      toast(e.message, "error");
-    }
-  }
-
-  async function bulkDelete() {
-    const ids = selectedKeyIds();
-    if (!ids.length) return toast("Select at least 1 key", "error");
-    if (!confirm(`Delete ${ids.length} selected key(s)? This is permanent.`)) return;
-    try {
-      await API.resellerBulkDelete(getResellerToken(), ids);
-      toast("Bulk delete done", "success");
-      await loadKeys();
-    } catch (e) {
-      toast(e.message, "error");
-    }
-  }
-
-  async function banKey(id) {
-    if (!confirm("Ban this key? Active session will be killed.")) return;
-    try { await API.resellerBanKey(getResellerToken(), id); toast("Key banned", "warning"); await loadKeys(); }
-    catch (e) { toast(e.message, "error"); }
-  }
-
-  async function unbanKey(id) {
-    try { await API.resellerUnbanKey(getResellerToken(), id); toast("Key unbanned", "success"); await loadKeys(); }
-    catch (e) { toast(e.message, "error"); }
-  }
-
-  async function deleteKey(id) {
-    if (!confirm("Delete this key permanently?")) return;
-    try { await API.resellerDeleteKey(getResellerToken(), id); toast("Key deleted", "success"); await loadKeys(); }
-    catch (e) { toast(e.message, "error"); }
-  }
-
-  function logoutReseller() {
-    localStorage.removeItem("enauth_reseller_token");
-    localStorage.removeItem("enauth_reseller");
-    window.location.href = "/panel/index.html";
-  }
-
-  load().catch(e => {
-    if (/unauthorized|expired/i.test(e.message || "")) {
-      localStorage.removeItem("enauth_reseller_token");
-      localStorage.removeItem("enauth_reseller");
-      window.location.href = "/panel/index.html";
-      return;
-    }
-    toast(e.message, "error");
-  });
+  let products=[], keys=[];
+  const token=()=>getResellerToken();
+  function logoutReseller(){localStorage.removeItem("enauth_reseller_token");localStorage.removeItem("enauth_reseller");location.href="/panel/index.html"}
+  function showView(name){document.querySelectorAll(".rs-view").forEach(x=>x.classList.toggle("active",x.id===`view-${name}`));document.querySelectorAll(".rs-nav button").forEach(x=>x.classList.toggle("active",x.dataset.view===name));}
+  document.querySelectorAll(".rs-nav button").forEach(x=>x.onclick=()=>showView(x.dataset.view));
+  function money(v){return `$${Number(v||0).toFixed(2)}`}
+  function refreshPricing(){const p=products.find(x=>x.id===document.getElementById("buy-product").value);document.getElementById("buy-pricing").innerHTML=(p?.pricing_points||[]).map(x=>`<option value="${escapeHtml(x.id)}">${Number(x.days)} days — ${money(x.price)}</option>`).join("")||'<option value="">No available prices</option>'}
+  function renderProducts(){document.getElementById("products").innerHTML=products.map(p=>`<article class="rs-product"><strong>${escapeHtml(p.name)}</strong><span class="level">${escapeHtml(p.level)}</span><div class="rs-muted">${(p.pricing_points||[]).map(x=>`${Number(x.days)} days · ${money(x.price)}`).join("<br>")||"No pricing configured"}</div></article>`).join("")||'<div class="rs-muted">No products have been assigned to you.</div>';const s=document.getElementById("buy-product");s.innerHTML=products.map(p=>`<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} · ${escapeHtml(p.level)}</option>`).join("");s.onchange=refreshPricing;refreshPricing()}
+  function renderOverview(o){document.getElementById("header-balance").textContent=money(o.balance);document.getElementById("stat-sales").textContent=o.total_sales||0;document.getElementById("stat-active").textContent=o.active_keys||0;document.getElementById("stat-spent").textContent=money(o.total_spent);document.getElementById("stat-expiring").textContent=o.expiring_soon||0;const rows=o.sales_by_date||[],max=Math.max(1,...rows.map(x=>x.count));document.getElementById("sales-chart").innerHTML=rows.length?rows.map(x=>`<div class="rs-bar" style="height:${Math.max(4,x.count/max*100)}%" title="${escapeHtml(x.date)}: ${x.count}"></div>`).join(""):'<span class="rs-muted">No sales yet.</span>';document.getElementById("top-products").innerHTML=(o.top_products||[]).map(x=>`<div class="rs-list-item"><span>${escapeHtml(x.name)} <small class="rs-muted">${escapeHtml(x.level)}</small></span><strong>${x.count}</strong></div>`).join("")||'<span class="rs-muted">No sales yet.</span>';document.getElementById("ledger-body").innerHTML=(o.recent_ledger||[]).map(x=>`<tr><td>${fmtDate(x.created_at)}</td><td>${escapeHtml(x.type)}</td><td>${escapeHtml(x.description||"—")}</td><td>${money(x.amount)}</td><td>${money(x.balance_after)}</td></tr>`).join("")||'<tr><td colspan="5" class="rs-muted">No ledger entries.</td></tr>'}
+  async function loadKeys(){const data=await API.resellerKeys(token());keys=data.keys||[];renderKeys()}
+  function renderKeys(){const q=document.getElementById("key-search").value.toLowerCase();const shown=keys.filter(k=>`${k.key} ${k.product_level||""} ${k.status}`.toLowerCase().includes(q));document.getElementById("keys-tbody").innerHTML=shown.map(k=>`<tr><td><input type="checkbox" class="key-check" value="${escapeHtml(k.id)}"></td><td><span class="mono">${escapeHtml(k.key)}</span>${k.key.includes("…")?' <small class="rs-muted">legacy masked</small>':` <button class="copy-btn" onclick="copyText(decodeURIComponent('${encodeURIComponent(k.key)}'))">⧉</button>`}</td><td>${escapeHtml(k.product_level||"—")}</td><td>${statusBadge(k.status)}</td><td>${fmtExpiry(k.expires_at)}</td><td>${k.status==="banned"?`<button class="btn btn-success btn-sm" onclick="changeKey('${k.id}','unban')">Unban</button>`:`<button class="btn btn-danger btn-sm" onclick="changeKey('${k.id}','ban')">Ban</button>`} <button class="btn btn-ghost btn-sm" onclick="changeKey('${k.id}','delete')">Delete</button></td></tr>`).join("")||'<tr><td colspan="6" class="rs-muted">No matching licenses.</td></tr>'}
+  function selectedKeyIds(){return [...document.querySelectorAll(".key-check:checked")].map(x=>x.value)}function selectAllKeys(x){document.querySelectorAll(".key-check").forEach(y=>y.checked=x.checked)}
+  async function changeKey(id,action){if((action==="delete"||action==="ban")&&!confirm(`${action} this license?`))return;const fn={ban:API.resellerBanKey,unban:API.resellerUnbanKey,delete:API.resellerDeleteKey}[action];await fn(token(),id);toast(`License ${action}${action.endsWith('e')?'d':'ed'}`,"success");await reloadData()}
+  async function bulk(action){const ids=selectedKeyIds();if(!ids.length)return toast("Select at least one license","error");if(!confirm(`${action} ${ids.length} selected licenses?`))return;const fn={Ban:API.resellerBulkBan,Unban:API.resellerBulkUnban,Delete:API.resellerBulkDelete}[action];await fn(token(),ids);toast(`${action} complete`,"success");await reloadData()}function bulkBan(){return bulk("Ban")}function bulkUnban(){return bulk("Unban")}function bulkDelete(){return bulk("Delete")}
+  async function buyKey(){const pricing_point_id=document.getElementById("buy-pricing").value;if(!pricing_point_id)return toast("No pricing option selected","error");try{const r=await API.resellerBuyKey(token(),{product_id:document.getElementById("buy-product").value,pricing_point_id});document.getElementById("buy-result").innerHTML=`<div class="rs-result"><small class="rs-muted">New license</small><div class="secret-display"><span class="mono">${escapeHtml(r.license_key)}</span><button class="copy-btn" id="copy-new">⧉</button></div><small>Expires: <strong>${fmtExpiry(r.expires_at)}</strong></small></div>`;document.getElementById("copy-new").onclick=()=>copyText(r.license_key);toast("License generated","success");await reloadData()}catch(e){toast(e.message,"error")}}
+  async function reloadData(){const [catalog,overview,keyData]=await Promise.all([API.resellerProducts(token()),API.resellerOverview(token()),API.resellerKeys(token())]);products=catalog.products||[];keys=keyData.keys||[];renderProducts();renderOverview(overview);renderKeys()}
+  async function init(){if(!token())return logoutReseller();const info=JSON.parse(localStorage.getItem("enauth_reseller")||"{}");document.getElementById("who").textContent=info.username||"Reseller";try{await reloadData()}catch(e){if(/unauthorized|expired/i.test(e.message||""))return logoutReseller();toast(e.message,"error")}}
+  init();
 </script>
 </body>
 </html>
-

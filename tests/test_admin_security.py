@@ -40,6 +40,8 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
         os.environ["DEBUG"] = "false"
         os.environ["TEMP_2FA_TTL_MINUTES"] = "5"
         os.environ["LICENSE_KEY_PEPPER"] = "test-license-pepper-that-is-long-enough"
+        os.environ["BACKUP_DIR"] = str(self.workdir / "backups")
+        os.environ["BACKUP_RETENTION"] = "2"
 
         for name in MODULES_TO_RESET:
             sys.modules.pop(name, None)
@@ -153,6 +155,25 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
                 remaining = (await cur.fetchone())[0]
 
         self.assertEqual(remaining, 0)
+
+    async def test_database_backup_is_verified_and_retained(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            first = await self.admin.create_backup(user={"role": "owner"}, db=db)
+            second = await self.admin.create_backup(user={"role": "owner"}, db=db)
+            third = await self.admin.create_backup(user={"role": "owner"}, db=db)
+
+        backup_dir = self.workdir / "backups"
+        files = list(backup_dir.glob("enauth-*.db"))
+        self.assertEqual(len(files), 2)
+        self.assertIn(third["name"], {path.name for path in files})
+        async with aiosqlite.connect(backup_dir / third["name"]) as backup_db:
+            async with backup_db.execute("PRAGMA integrity_check") as cur:
+                self.assertEqual((await cur.fetchone())[0], "ok")
+
+        listing = await self.admin.list_backups(user={"role": "owner"})
+        self.assertEqual(len(listing["backups"]), 2)
+        self.assertGreater(second["size_bytes"], 0)
 
     async def test_password_reset_token_is_not_written_to_logs(self):
         await self._create_admin_user(two_factor_enabled=0)

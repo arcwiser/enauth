@@ -469,7 +469,8 @@
     content.style.display = "none";
 
     try {
-      const logs = await API.getLogs({ limit: 2000 });
+      const [logs, dashboard] = await Promise.all([API.getLogs({ limit: 2000 }), API.dashboard()]);
+      const security = dashboard.monitoring?.security_events || {};
       const actionCounts = {};
       logs.forEach(l => { actionCounts[l.action] = (actionCounts[l.action] || 0) + 1; });
 
@@ -484,8 +485,10 @@
         { val: logins, lbl: "Successful Logins", color: "var(--accent-green)" },
         { val: fails, lbl: "Failed Logins", color: "var(--accent-red)" },
         { val: bans, lbl: "Bans Issued", color: "var(--accent-orange)" },
-        { val: suspicious, lbl: "Suspicious Logins", color: "var(--accent-orange)" },
-        { val: actionCounts["logout"] || 0, lbl: "Logouts", color: "var(--text-dim)" },
+        { val: security.invalid_key_attempts || 0, lbl: "Invalid Keys · 24h", color: "var(--accent-red)" },
+        { val: security.hwid_limit_violations || 0, lbl: "HWID Limits · 24h", color: "var(--accent-orange)" },
+        { val: security.replay_attempts || 0, lbl: "Replay Attempts · 24h", color: "var(--accent-red)" },
+        { val: security.suspicious_ip_changes || suspicious, lbl: "Suspicious IPs · 24h", color: "var(--accent-orange)" },
       ].map(s => `
         <div class="stat-mini">
           <div class="stat-mini-val" style="color:${s.color}">${s.val}</div>
