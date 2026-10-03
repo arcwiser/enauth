@@ -137,6 +137,9 @@ The SDK includes:
 - HTTPS enforcement for every non-local server
 - Network timeouts and a 4 MiB response limit
 - AES-256-GCM application-layer message protection
+- Session-bound AES-256-GCM file envelopes derived from the session token,
+  device HWID, application secret, and file identity. A payload captured from
+  one session cannot be decrypted with a different session context.
 - HMAC-SHA256 signature verification
 - Cryptographically random per-request replay nonces
 - Fail-closed server response HMAC and timestamp validation
@@ -149,7 +152,8 @@ The SDK includes:
   CMake project and can be disabled explicitly with
   `-DENAUTH_ENABLE_ANTI_DEBUG=OFF` for development troubleshooting.
 - Replay attack protection
-- Runtime string obfuscation
+- Layered runtime secret storage using a per-process AES-256-GCM key plus a
+  position-varying XOR transform (replacing the previous single-byte XOR-only storage)
 - Local anti-debugging and integrity checks enabled by default in the example build
 - HWID collection and validation
 

@@ -1,5 +1,5 @@
-import base64
 import importlib
+import hashlib
 import json
 import logging
 import os
@@ -12,7 +12,10 @@ from pathlib import Path
 
 import aiosqlite
 
-from utils.crypto import compute_signature, decrypt_payload, encrypt_payload, hash_license_key, mask_license_key
+from utils.crypto import (
+    compute_signature, decrypt_bytes, decrypt_payload, derive_session_download_secret,
+    encrypt_payload, hash_license_key, mask_license_key,
+)
 
 
 MODULES_TO_RESET = [
@@ -192,7 +195,18 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
             download_payload = self._decrypt_response(download_resp, seeded["secret"])
             self.assertTrue(download_payload["success"])
             self.assertEqual(download_payload["name"], "payload.bin")
-            self.assertEqual(base64.b64decode(download_payload["data"]), b"hello world")
+            self.assertEqual(download_payload["encryption"], "AES-256-GCM-SESSION-v1")
+            self.assertEqual(download_payload["sha256"], hashlib.sha256(b"hello world").hexdigest())
+            download_secret = derive_session_download_secret(
+                seeded["secret"], login_payload["token"], "a" * 64, seeded["file_id"]
+            )
+            self.assertEqual(decrypt_bytes(download_payload["data"], download_secret), b"hello world")
+
+            wrong_session_secret = derive_session_download_secret(
+                seeded["secret"], "different-session", "a" * 64, seeded["file_id"]
+            )
+            with self.assertRaises(ValueError):
+                decrypt_bytes(download_payload["data"], wrong_session_secret)
 
     async def test_session_is_revoked_when_hwid_changes(self):
         seeded = await self._seed_app()

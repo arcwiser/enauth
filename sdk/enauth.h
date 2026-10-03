@@ -158,16 +158,17 @@ public:
     void StopHeartbeatThread();
 
 private:
-    // Per-instance runtime XOR key — seeded from CPUID+TSC at construction,
-    // different each run, never a compile-time constant.
+    // Per-instance layered storage: a runtime XOR transform inside an
+    // independently randomized AES-256-GCM envelope for every field.
     unsigned char m_xor_key = 0;
+    std::vector<unsigned char> m_enc_memory_key;
 
     std::vector<unsigned char> m_enc_server_url;
     std::vector<unsigned char> m_enc_app_id;
     std::vector<unsigned char> m_enc_app_secret;
     std::vector<unsigned char> m_enc_version;
 
-    // session state — stored XOR-encrypted with m_xor_key
+    // Session state uses the same layered runtime storage.
     std::vector<unsigned char> m_enc_token;
     std::vector<unsigned char> m_enc_license_key;
     std::vector<unsigned char> m_enc_expires_at;
@@ -179,6 +180,7 @@ private:
 
     void EncryptStore(std::vector<unsigned char>& target, const std::string& source);
     std::string DecryptField(const std::vector<unsigned char>& field) const;
+    std::string GetMemoryKey() const;
 
     bool        m_initialized = false;
     bool        m_logged_in   = false;

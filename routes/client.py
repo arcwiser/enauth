@@ -16,6 +16,7 @@ from utils.crypto import (
     verify_signature, compute_signature,
     generate_session_token, generate_uid,
     is_valid_hwid, hash_license_key, mask_license_key,
+    encrypt_bytes, derive_session_download_secret,
 )
 from utils.logger import log_action
 
@@ -648,8 +649,13 @@ async def client_download(request: Request, req: EncryptedRequest,
         if downloads >= row["download_limit"]:
             return enc_resp({"success": False, "message": "DOWNLOAD_LIMIT_REACHED"}, secret, req.app_id)
 
-    import base64
-    content_b64 = base64.b64encode(row["content"]).decode()
+    download_secret = derive_session_download_secret(
+        secret, token, sess["hwid"], row["id"]
+    )
+    content_b64 = encrypt_bytes(row["content"], download_secret)
+    content_sha256 = row["file_sha256"] or hashlib.sha256(row["content"]).hexdigest()
+    if not row["file_sha256"]:
+        await db.execute("UPDATE app_files SET file_sha256=? WHERE id=?", (content_sha256, row["id"]))
 
     await db.execute(
         "INSERT INTO file_download_events(file_id,license_id,source,ip) VALUES(?,?,?,?)",
@@ -661,8 +667,10 @@ async def client_download(request: Request, req: EncryptedRequest,
         "success": True,
         "message": "OK",
         "name":    name,
+        "file_id": row["id"],
         "data":    content_b64,
-        "sha256":  row["file_sha256"],
+        "encryption": "AES-256-GCM-SESSION-v1",
+        "sha256":  content_sha256,
         "version": row["release_version"],
         "channel": row["channel"],
         "file_type": row["file_type"],

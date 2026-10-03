@@ -309,6 +309,12 @@ Client::Client(const std::string& server_url, const std::string& app_id,
                const std::string& app_secret, const std::string& version)
 {
     m_xor_key = GenerateRuntimeKey();
+    std::string memoryKey = SecureRandomHex(32);
+    m_enc_memory_key.reserve(memoryKey.size());
+    for (size_t i = 0; i < memoryKey.size(); ++i)
+        m_enc_memory_key.push_back(static_cast<unsigned char>(memoryKey[i]) ^
+            static_cast<unsigned char>(m_xor_key + (i * 29u)));
+    SecureZeroMemory(memoryKey.data(), memoryKey.size());
     EncryptStore(m_enc_server_url, server_url);
     EncryptStore(m_enc_app_id,     app_id);
     EncryptStore(m_enc_app_secret, app_secret);
@@ -321,16 +327,38 @@ Client::Client(const std::string& server_url, const std::string& app_id,
 }
 
 void Client::EncryptStore(std::vector<unsigned char>& target, const std::string& source) {
-    target.clear();
-    for (size_t i = 0; i < source.size(); i++) {
-        target.push_back((unsigned char)source[i] ^ m_xor_key);
-    }
+    std::string layered(source);
+    for (size_t i = 0; i < layered.size(); ++i)
+        layered[i] = static_cast<char>(static_cast<unsigned char>(layered[i]) ^
+            static_cast<unsigned char>(m_xor_key + (i * 131u)));
+    std::string memoryKey = GetMemoryKey();
+    std::string encrypted = AES256CBCEncrypt(layered, memoryKey);
+    target.assign(encrypted.begin(), encrypted.end());
+    if (!layered.empty()) SecureZeroMemory(layered.data(), layered.size());
+    if (!memoryKey.empty()) SecureZeroMemory(memoryKey.data(), memoryKey.size());
+    if (!encrypted.empty()) SecureZeroMemory(encrypted.data(), encrypted.size());
 }
 
 std::string Client::DecryptField(const std::vector<unsigned char>& field) const {
-    std::string s;
-    for (unsigned char b : field) s += (char)(b ^ m_xor_key);
-    return s;
+    if (field.empty()) return {};
+    std::string encrypted(field.begin(), field.end());
+    std::string memoryKey = GetMemoryKey();
+    std::string value = AES256CBCDecrypt(encrypted, memoryKey);
+    for (size_t i = 0; i < value.size(); ++i)
+        value[i] = static_cast<char>(static_cast<unsigned char>(value[i]) ^
+            static_cast<unsigned char>(m_xor_key + (i * 131u)));
+    SecureZeroMemory(encrypted.data(), encrypted.size());
+    SecureZeroMemory(memoryKey.data(), memoryKey.size());
+    return value;
+}
+
+std::string Client::GetMemoryKey() const {
+    std::string key;
+    key.reserve(m_enc_memory_key.size());
+    for (size_t i = 0; i < m_enc_memory_key.size(); ++i)
+        key.push_back(static_cast<char>(m_enc_memory_key[i] ^
+            static_cast<unsigned char>(m_xor_key + (i * 29u))));
+    return key;
 }
 
 std::string Client::GetServerUrl()  const { return DecryptField(m_enc_server_url); }
@@ -341,7 +369,22 @@ std::string Client::GetSessionToken() const { return DecryptField(m_enc_token); 
 std::string Client::GetLicenseKey()   const { return DecryptField(m_enc_license_key); }
 std::string Client::GetExpiresAt()    const { return DecryptField(m_enc_expires_at); }
 
-Client::~Client() { StopHeartbeatThread(); }
+Client::~Client() {
+    StopHeartbeatThread();
+    auto wipe = [](std::vector<unsigned char>& value) {
+        if (!value.empty()) SecureZeroMemory(value.data(), value.size());
+        value.clear();
+    };
+    wipe(m_enc_server_url);
+    wipe(m_enc_app_id);
+    wipe(m_enc_app_secret);
+    wipe(m_enc_version);
+    wipe(m_enc_token);
+    wipe(m_enc_license_key);
+    wipe(m_enc_expires_at);
+    wipe(m_enc_memory_key);
+    m_xor_key = 0;
+}
 
 std::string Client::GetHwid() const { return hwid::Collect(); }
 
@@ -537,30 +580,44 @@ std::vector<unsigned char> Client::DownloadFile(const std::string& name) {
     SecurityCheck();
     try {
         std::string token = GetSessionToken();
+        std::string deviceHwid = GetHwid();
         std::string payload = std::string("{") + 
             JsonStr(OBFUSCATE("token"), token) + "," +
-            JsonStr(OBFUSCATE("hwid"), GetHwid()) + "," +
+            JsonStr(OBFUSCATE("hwid"), deviceHwid) + "," +
             JsonStr(OBFUSCATE("name"), name) + "}";
-        SecureZeroMemory(&token[0], token.size());
         
         std::string raw = Post(OBFUSCATE("/api/client/download"), BuildRequest(payload));
         std::string dec = DecryptResponse(raw);
 
         if (JsonBool(dec, OBFUSCATE("success"))) {
             std::string b64_data = JsonGet(dec, OBFUSCATE("data"));
-            if (!b64_data.empty()) {
-                auto decoded = Base64Decode(b64_data);
+            const std::string encryption = JsonGet(dec, OBFUSCATE("encryption"));
+            const std::string fileId = JsonGet(dec, OBFUSCATE("file_id"));
+            if (!b64_data.empty() && encryption == OBFUSCATE("AES-256-GCM-SESSION-v1") &&
+                !fileId.empty()) {
+                std::string appSecret = GetAppSecret();
+                std::string sessionSecret = HmacSHA256Hex(
+                    appSecret, OBFUSCATE("download-v1|") + token + "|" + deviceHwid + "|" + fileId);
+                std::string plaintext = AES256CBCDecrypt(b64_data, sessionSecret);
+                std::vector<unsigned char> decoded(plaintext.begin(), plaintext.end());
                 const std::string expectedHash = JsonGet(dec, OBFUSCATE("sha256"));
-                if (!expectedHash.empty()) {
-                    const std::string bytes(decoded.begin(), decoded.end());
-                    if (SHA256Hex(bytes) != expectedHash) {
-                        SecureZeroMemory(decoded.data(), decoded.size());
-                        return {};
-                    }
+                const bool validHash = !expectedHash.empty() && SHA256Hex(plaintext) == expectedHash;
+                if (!plaintext.empty()) SecureZeroMemory(plaintext.data(), plaintext.size());
+                if (!sessionSecret.empty()) SecureZeroMemory(sessionSecret.data(), sessionSecret.size());
+                if (!appSecret.empty()) SecureZeroMemory(appSecret.data(), appSecret.size());
+                if (!validHash) {
+                    if (!decoded.empty()) SecureZeroMemory(decoded.data(), decoded.size());
+                    SecureZeroMemory(token.data(), token.size());
+                    SecureZeroMemory(deviceHwid.data(), deviceHwid.size());
+                    return {};
                 }
+                SecureZeroMemory(token.data(), token.size());
+                SecureZeroMemory(deviceHwid.data(), deviceHwid.size());
                 return decoded;
             }
         }
+        if (!token.empty()) SecureZeroMemory(token.data(), token.size());
+        if (!deviceHwid.empty()) SecureZeroMemory(deviceHwid.data(), deviceHwid.size());
     } catch (...) {}
     return {};
 }

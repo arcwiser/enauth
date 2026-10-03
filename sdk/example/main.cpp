@@ -5,7 +5,6 @@
 #include <atomic>
 #include <chrono>
 #include <conio.h>
-#include <fstream>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -123,18 +122,15 @@ int main() {
     }
 
     if (!downloadName.empty()) {
-        const auto fileData = client.DownloadFile(downloadName);
+        auto fileData = client.DownloadFile(downloadName);
         if (fileData.empty()) {
             std::cerr << "Protected download failed or returned no data.\n";
         } else {
-            std::ofstream output(downloadName, std::ios::binary | std::ios::trunc);
-            output.write(reinterpret_cast<const char*>(fileData.data()),
-                         static_cast<std::streamsize>(fileData.size()));
-            if (!output) {
-                std::cerr << "Could not save protected download.\n";
-            } else {
-                std::cout << "Verified download saved as " << downloadName << '\n';
-            }
+            std::cout << "Verified session-bound payload loaded in memory ("
+                      << fileData.size() << " bytes).\n";
+            // Consume the protected payload directly from memory here. Do not
+            // write decrypted bytes to disk. Wipe them as soon as processing ends.
+            SecureZeroMemory(fileData.data(), fileData.size());
         }
     }
 

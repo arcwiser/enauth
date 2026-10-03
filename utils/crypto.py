@@ -51,6 +51,34 @@ def encrypt_payload(data: dict, app_secret: str) -> str:
     return base64.b64encode(salt + nonce + ciphertext).decode("utf-8")
 
 
+def encrypt_bytes(value: bytes, secret: str) -> str:
+    """Encrypt arbitrary bytes with the same versioned AES-256-GCM envelope."""
+    salt = os.urandom(_SALT_LEN)
+    nonce = os.urandom(_NONCE_LEN)
+    ciphertext = AESGCM(derive_key(secret, salt)).encrypt(nonce, value, None)
+    return base64.b64encode(salt + nonce + ciphertext).decode("ascii")
+
+
+def decrypt_bytes(value_b64: str, secret: str) -> bytes:
+    """Decrypt an arbitrary-byte AES-256-GCM envelope."""
+    raw = base64.b64decode(value_b64, validate=True)
+    if len(raw) < _SALT_LEN + _NONCE_LEN + 16:
+        raise ValueError("Ciphertext too short")
+    salt = raw[:_SALT_LEN]
+    nonce = raw[_SALT_LEN:_SALT_LEN + _NONCE_LEN]
+    ciphertext = raw[_SALT_LEN + _NONCE_LEN:]
+    try:
+        return AESGCM(derive_key(secret, salt)).decrypt(nonce, ciphertext, None)
+    except Exception as exc:
+        raise ValueError("Decryption failed") from exc
+
+
+def derive_session_download_secret(app_secret: str, token: str, hwid: str, file_id: str) -> str:
+    """Derive a unique download key scoped to one session, device, and file."""
+    context = f"download-v1|{token}|{hwid}|{file_id}".encode("utf-8")
+    return hmaclib.new(app_secret.encode("utf-8"), context, hashlib.sha256).hexdigest()
+
+
 def decrypt_payload(data_b64: str, app_secret: str) -> dict:
     """Decrypt base64(salt[16] + nonce[12] + ciphertext+tag) with AES-256-GCM."""
     raw = base64.b64decode(data_b64)
