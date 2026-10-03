@@ -24,7 +24,7 @@ target_link_libraries(enauth-example PRIVATE winhttp bcrypt crypt32)
 if(MSVC)
     target_compile_options(enauth-example PRIVATE
         /W4 /permissive- /GS /sdl
-        $<$<CONFIG:Release>:/O2>
+        $<$<CONFIG:Release>:/O2 /GL /Qspectre>
         $<$<CONFIG:Release>:/guard:cf>
     )
     target_link_options(enauth-example PRIVATE
@@ -32,5 +32,7 @@ if(MSVC)
         $<$<CONFIG:Release>:/NXCOMPAT>
         $<$<CONFIG:Release>:/HIGHENTROPYVA>
         $<$<CONFIG:Release>:/guard:cf>
+        $<$<CONFIG:Release>:/LTCG>
+        $<$<CONFIG:Release>:/CETCOMPAT>
     )
 endif()

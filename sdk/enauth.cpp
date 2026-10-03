@@ -50,6 +50,7 @@ std::string AES256CBCEncrypt(const std::string& plaintext, const std::string& ap
 std::string AES256CBCDecrypt(const std::string& b64,       const std::string& app_secret);
 std::string HmacSHA256Hex   (const std::string& key,       const std::string& msg);
 std::string SHA256Hex        (const std::string& data);
+std::string SecureRandomHex  (size_t byteCount);
 std::vector<unsigned char> Base64Decode(const std::string& b64);
 
 // Declared in hwid.cpp
@@ -228,9 +229,8 @@ std::string Client::BuildRequest(const std::string& json_payload) {
     std::string hmacMsg = appId + "|" + std::to_string(ts) + "|" + enc;
     std::string sig     = HmacSHA256Hex(secret, hmacMsg);
 
-    // Generate a per-request nonce (first 32 chars of a fresh random hex)
-    // We reuse SHA256 of (sig + ts) as a cheap nonce — unique per request
-    std::string nonce = SHA256Hex(sig + std::to_string(ts)).substr(0, 32);
+    // Generate a fresh 128-bit CNG nonce for every request.
+    std::string nonce = SecureRandomHex(16);
 
     std::string res = std::string("{") +
         JsonStr(OBFUSCATE("app_id"), appId)          + "," +
@@ -256,10 +256,33 @@ std::string Client::DecryptResponse(const std::string& json_response) {
 
     std::string enc = JsonGet(json_response, OBFUSCATE("data"));
     if (enc.empty()) throw std::runtime_error(OBFUSCATE("No data in response"));
-    
+
+    const std::string sig = JsonGet(json_response, OBFUSCATE("sig"));
+    const std::string tsText = JsonGet(json_response, OBFUSCATE("ts"));
+    if (sig.empty() || tsText.empty())
+        throw std::runtime_error(OBFUSCATE("Unsigned server response"));
+    long long responseTs = 0;
+    try { responseTs = std::stoll(tsText); }
+    catch (...) { throw std::runtime_error(OBFUSCATE("Invalid server timestamp")); }
+    const long long now = UnixTime();
+    const long long skew = now >= responseTs ? now - responseTs : responseTs - now;
+    if (skew > 60)
+        throw std::runtime_error(OBFUSCATE("Stale server response"));
+
     std::string secret = GetAppSecret();
+    std::string appId = GetAppId();
+    const std::string expectedSig = HmacSHA256Hex(secret, appId + "|" + tsText + "|" + enc);
+    unsigned char difference = static_cast<unsigned char>(expectedSig.size() ^ sig.size());
+    const size_t compareLength = (std::min)(expectedSig.size(), sig.size());
+    for (size_t i = 0; i < compareLength; ++i)
+        difference |= static_cast<unsigned char>(expectedSig[i] ^ sig[i]);
+    if (!appId.empty()) SecureZeroMemory(&appId[0], appId.size());
+    if (difference != 0) {
+        if (!secret.empty()) SecureZeroMemory(&secret[0], secret.size());
+        throw std::runtime_error(OBFUSCATE("Invalid server signature"));
+    }
     std::string dec = AES256CBCDecrypt(enc, secret);
-    SecureZeroMemory(&secret[0], secret.size());
+    if (!secret.empty()) SecureZeroMemory(&secret[0], secret.size());
     return dec;
 }
 

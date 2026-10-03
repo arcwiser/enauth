@@ -138,6 +138,10 @@ The SDK includes:
 - Network timeouts and a 4 MiB response limit
 - AES-256-GCM application-layer message protection
 - HMAC-SHA256 signature verification
+- Cryptographically random per-request replay nonces
+- Fail-closed server response HMAC and timestamp validation
+- Release builds enable CFG, CET shadow-stack compatibility, Spectre mitigations,
+  ASLR, DEP, stack checks, and link-time optimization when built with MSVC
 - Replay attack protection
 - Runtime string obfuscation
 - Optional anti-debugging checks when `ENAUTH_ENABLE_ANTI_DEBUG` is defined

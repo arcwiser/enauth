@@ -79,6 +79,18 @@ static std::vector<BYTE> RandomBytes(DWORD count) {
     return buf;
 }
 
+std::string SecureRandomHex(size_t byteCount) {
+    const auto bytes = RandomBytes(static_cast<DWORD>(byteCount));
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(bytes.size() * 2);
+    for (BYTE value : bytes) {
+        result.push_back(hex[(value >> 4) & 0x0F]);
+        result.push_back(hex[value & 0x0F]);
+    }
+    return result;
+}
+
 // ─── SHA-256 ──────────────────────────────────────────────────────────────────
 
 std::string SHA256Hex(const std::string& data) {
