@@ -33,7 +33,7 @@ MAX_PAGE_SIZE = int(os.getenv("MAX_PAGE_SIZE", "200"))
 TEMP_2FA_TTL_MINUTES = int(os.getenv("TEMP_2FA_TTL_MINUTES", "5"))
 TEMP_2FA_SWEEP_SECONDS = int(os.getenv("TEMP_2FA_SWEEP_SECONDS", "60"))
 ADMIN_COOKIE_NAME = "enauth_admin_session"
-COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "true").lower() == "true"
 SERVER_STARTED_MONOTONIC = time.monotonic()
 
 

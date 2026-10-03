@@ -57,6 +57,10 @@ def validate_startup_configuration(debug_mode: bool):
     if len(license_pepper) < 32:
         print("CRITICAL ERROR: LICENSE_KEY_PEPPER must contain at least 32 characters.")
         sys.exit(1)
+    if not debug_mode and os.getenv("COOKIE_SECURE", "true").lower() != "true":
+        print("CRITICAL ERROR: COOKIE_SECURE must be true in production mode.")
+        print("Use DEBUG=true only for intentional local HTTP development.")
+        sys.exit(1)
     if os.getenv("CORS_ORIGINS", "*") == "*":
         if not debug_mode:
             print("\n" + "="*80)
