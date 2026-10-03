@@ -4,6 +4,9 @@ project(enauth_example LANGUAGES CXX)
 option(ENAUTH_ENABLE_ANTI_DEBUG
     "Enable the SDK's local anti-debug integrity checks"
     ON)
+option(ENAUTH_ENABLE_SPECTRE
+    "Compile with MSVC Spectre mitigations (requires the optional Spectre libraries)"
+    ON)
 
 if(NOT WIN32)
     message(FATAL_ERROR "The EnAuth C++ SDK currently supports Windows only.")
@@ -28,7 +31,8 @@ target_link_libraries(enauth-example PRIVATE winhttp bcrypt crypt32)
 if(MSVC)
     target_compile_options(enauth-example PRIVATE
         /W4 /permissive- /GS /sdl
-        $<$<CONFIG:Release>:/O2 /GL /Qspectre>
+        $<$<CONFIG:Release>:/O2 /GL>
+        $<$<AND:$<CONFIG:Release>,$<BOOL:${ENAUTH_ENABLE_SPECTRE}>>:/Qspectre>
         $<$<CONFIG:Release>:/guard:cf>
     )
     target_link_options(enauth-example PRIVATE
