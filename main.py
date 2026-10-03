@@ -69,7 +69,6 @@ def validate_startup_configuration(debug_mode: bool):
             print("Please set CORS_ORIGINS to a specific domain (e.g., CORS_ORIGINS=https://yourdomain.com)")
             print("or run the server in debug mode (DEBUG=true) for local development.")
             print("="*80 + "\n")
-            import sys
             sys.exit(1)
         else:
             app_log.warning("CORS_ORIGINS is set to '*'. That is convenient for local use, but tighter origins are safer in production.")
