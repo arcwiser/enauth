@@ -4,7 +4,7 @@ from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Request, Depends, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import json
 import aiosqlite
 from slowapi import Limiter
@@ -61,11 +61,11 @@ async def _check_and_store_nonce(db: aiosqlite.Connection, nonce: str, now: floa
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 class EncryptedRequest(BaseModel):
-    app_id: str
-    data:   str
-    sig:    str
+    app_id: str = Field(min_length=1, max_length=128)
+    data:   str = Field(min_length=1, max_length=6_000_000)
+    sig:    str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-fA-F]{64}$")
     ts:     int
-    nonce:  str = ""   # optional for backwards compat, enforced below
+    nonce:  str = Field(min_length=32, max_length=32, pattern=r"^[0-9a-fA-F]{32}$")
 
 
 def get_ip(request: Request) -> str:
@@ -146,12 +146,7 @@ async def parse_request(req: EncryptedRequest, db) -> tuple[dict, dict]:
     if abs(now - req.ts) > TIMESTAMP_TOLERANCE:
         raise HTTPException(400, "REPLAY_ATTACK")
 
-    # 2. Nonce check — build a nonce from sig+ts if client didn't send one
-    nonce = req.nonce or f"{req.sig[:32]}{req.ts}"
-    if not await _check_and_store_nonce(db, nonce, now):
-        raise HTTPException(400, "REPLAY_ATTACK")
-
-    # 3. App lookup
+    # 2. App lookup
     async with db.execute("SELECT * FROM applications WHERE id = ?", (req.app_id,)) as cur:
         app = await cur.fetchone()
     if not app:
@@ -159,9 +154,14 @@ async def parse_request(req: EncryptedRequest, db) -> tuple[dict, dict]:
 
     secret = app["secret_key"]
 
-    # 4. HMAC verification (now binds app_id)
+    # 3. Authenticate before touching the replay cache. This prevents invalid
+    # requests from filling the persistent nonce table.
     if not verify_signature(secret, req.data, req.ts, req.sig, req.app_id):
         raise HTTPException(401, "INVALID_SIGNATURE")
+
+    # 4. Store the authenticated nonce atomically.
+    if not await _check_and_store_nonce(db, req.nonce, now):
+        raise HTTPException(400, "REPLAY_ATTACK")
 
     # 5. Authenticated decryption (GCM tag validates integrity)
     try:
@@ -170,6 +170,57 @@ async def parse_request(req: EncryptedRequest, db) -> tuple[dict, dict]:
         raise HTTPException(400, "DECRYPT_FAILED")
 
     return payload, dict(app)
+
+
+async def get_app_session(db, token: str, app_id: str):
+    """Resolve a session only inside the application that issued it."""
+    async with db.execute(
+        "SELECT * FROM sessions WHERE token = ? AND app_id = ?", (token, app_id)
+    ) as cur:
+        return await cur.fetchone()
+
+
+async def enforce_active_authorization(db, sess, app, ip: str) -> str | None:
+    """Re-check mutable license and product authorization on protected calls."""
+    async with db.execute(
+        "SELECT status, expires_at FROM licenses WHERE id=? AND app_id=?",
+        (sess["license_id"], app["id"]),
+    ) as cur:
+        lic = await cur.fetchone()
+
+    failure = None
+    if not lic or lic["status"] != "active":
+        failure = "EXPIRED_KEY" if lic and lic["status"] == "expired" else "BANNED_KEY"
+    elif lic["expires_at"] and lic["expires_at"] < utcnow():
+        failure = "EXPIRED_KEY"
+    elif app["is_paused"]:
+        failure = "APP_PAUSED"
+
+    if not failure and sess["product_id"]:
+        async with db.execute(
+            """SELECT p.is_paused AS product_paused,
+                      lp.is_paused AS entitlement_paused, lp.expires_at
+               FROM products p
+               JOIN license_products lp ON lp.product_id=p.id AND lp.license_id=?
+               WHERE p.id=? AND p.app_id=?""",
+            (sess["license_id"], sess["product_id"], app["id"]),
+        ) as cur:
+            entitlement = await cur.fetchone()
+        if not entitlement:
+            failure = "LEVEL_NOT_ALLOWED"
+        elif entitlement["product_paused"]:
+            failure = "PRODUCT_PAUSED"
+        elif entitlement["entitlement_paused"]:
+            failure = "ENTITLEMENT_PAUSED"
+        elif entitlement["expires_at"] and entitlement["expires_at"] < utcnow():
+            failure = "EXPIRED_KEY"
+
+    if failure:
+        await db.execute("DELETE FROM sessions WHERE token=?", (sess["token"],))
+        await log_action(db, "session_authorization_revoked", app_id=app["id"], ip=ip,
+                         hwid=sess["hwid"], details=failure)
+        await db.commit()
+    return failure
 
 
 def utcnow() -> str:
@@ -445,8 +496,7 @@ async def client_heartbeat(request: Request, req: EncryptedRequest,
     secret = app["secret_key"]
     token  = payload.get("token", "")
 
-    async with db.execute("SELECT * FROM sessions WHERE token = ?", (token,)) as cur:
-        sess = await cur.fetchone()
+    sess = await get_app_session(db, token, app["id"])
 
     if not sess or sess["expires_at"] < utcnow():
         if sess:
@@ -455,6 +505,9 @@ async def client_heartbeat(request: Request, req: EncryptedRequest,
         return enc_resp({"success": False, "message": "SESSION_EXPIRED"}, secret, req.app_id)
     if not await enforce_session_identity(db, payload, sess, app["id"], ip):
         return enc_resp({"success": False, "message": "SESSION_IDENTITY_MISMATCH"}, secret, req.app_id)
+    authorization_failure = await enforce_active_authorization(db, sess, app, ip)
+    if authorization_failure:
+        return enc_resp({"success": False, "message": authorization_failure}, secret, req.app_id)
 
     # ── Per-app HWID ban check ──
     async with db.execute(
@@ -492,8 +545,7 @@ async def client_logout(request: Request, req: EncryptedRequest,
     secret = app["secret_key"]
     token  = payload.get("token", "")
 
-    async with db.execute("SELECT * FROM sessions WHERE token = ?", (token,)) as cur:
-        sess = await cur.fetchone()
+    sess = await get_app_session(db, token, app["id"])
 
     if sess:
         if not await enforce_session_identity(db, payload, sess, app["id"], ip):
@@ -523,13 +575,15 @@ async def client_validate(request: Request, req: EncryptedRequest,
     secret = app["secret_key"]
     token  = payload.get("token", "")
 
-    async with db.execute("SELECT * FROM sessions WHERE token = ?", (token,)) as cur:
-        sess = await cur.fetchone()
+    sess = await get_app_session(db, token, app["id"])
 
     if not sess or sess["expires_at"] < utcnow():
         return enc_resp({"success": False, "message": "SESSION_EXPIRED"}, secret, req.app_id)
     if not await enforce_session_identity(db, payload, sess, app["id"], ip):
         return enc_resp({"success": False, "message": "SESSION_IDENTITY_MISMATCH"}, secret, req.app_id)
+    authorization_failure = await enforce_active_authorization(db, sess, app, ip)
+    if authorization_failure:
+        return enc_resp({"success": False, "message": authorization_failure}, secret, req.app_id)
 
     return enc_resp({"success": True, "message": "OK",
                      "expires_at": sess["expires_at"]}, secret, req.app_id)
@@ -555,13 +609,15 @@ async def client_download(request: Request, req: EncryptedRequest,
     if not name:
         return enc_resp({"success": False, "message": "MISSING_FIELDS"}, secret, req.app_id)
 
-    async with db.execute("SELECT * FROM sessions WHERE token = ?", (token,)) as cur:
-        sess = await cur.fetchone()
+    sess = await get_app_session(db, token, app["id"])
 
     if not sess or sess["expires_at"] < utcnow():
         return enc_resp({"success": False, "message": "SESSION_EXPIRED"}, secret, req.app_id)
     if not await enforce_session_identity(db, payload, sess, app["id"], ip):
         return enc_resp({"success": False, "message": "SESSION_IDENTITY_MISMATCH"}, secret, req.app_id)
+    authorization_failure = await enforce_active_authorization(db, sess, app, ip)
+    if authorization_failure:
+        return enc_resp({"success": False, "message": authorization_failure}, secret, req.app_id)
 
     # Select only an active, currently available release for this application.
     async with db.execute(

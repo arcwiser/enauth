@@ -219,6 +219,71 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
             async with db.execute("SELECT COUNT(*) FROM sessions WHERE token=?", (token,)) as cur:
                 self.assertEqual((await cur.fetchone())[0], 0)
 
+    async def test_session_cannot_cross_application_boundary(self):
+        seeded = await self._seed_app()
+        fake_request = _FakeRequest(headers={"User-Agent": "EnAuthTest/1.0"})
+        other_secret = "b" * 64
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute(
+                "INSERT INTO applications (id, name, secret_key, version) VALUES (?, ?, ?, ?)",
+                ("app-2", "Other App", other_secret, "1.0.0"),
+            )
+            await db.commit()
+
+            login_req = self._encrypted_request(
+                seeded["app_id"], seeded["secret"],
+                {"version": "1.0.0", "license_key": seeded["license_key"], "hwid": "a" * 64},
+            )
+            login_resp = await self.client.client_login.__wrapped__(fake_request, login_req, db)
+            token = self._decrypt_response(login_resp, seeded["secret"])["token"]
+
+            cross_app_req = self._encrypted_request(
+                "app-2", other_secret, {"token": token, "hwid": "a" * 64},
+            )
+            response = await self.client.client_validate.__wrapped__(fake_request, cross_app_req, db)
+            payload = self._decrypt_response(response, other_secret)
+            self.assertFalse(payload["success"])
+            self.assertEqual(payload["message"], "SESSION_EXPIRED")
+
+    async def test_protected_request_rechecks_license_status(self):
+        seeded = await self._seed_app()
+        fake_request = _FakeRequest(headers={"User-Agent": "EnAuthTest/1.0"})
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            login_req = self._encrypted_request(
+                seeded["app_id"], seeded["secret"],
+                {"version": "1.0.0", "license_key": seeded["license_key"], "hwid": "a" * 64},
+            )
+            login_resp = await self.client.client_login.__wrapped__(fake_request, login_req, db)
+            token = self._decrypt_response(login_resp, seeded["secret"])["token"]
+            await db.execute("UPDATE licenses SET status='banned' WHERE id=?", (seeded["license_id"],))
+            await db.commit()
+
+            validate_req = self._encrypted_request(
+                seeded["app_id"], seeded["secret"], {"token": token, "hwid": "a" * 64},
+            )
+            response = await self.client.client_validate.__wrapped__(fake_request, validate_req, db)
+            payload = self._decrypt_response(response, seeded["secret"])
+            self.assertFalse(payload["success"])
+            self.assertEqual(payload["message"], "BANNED_KEY")
+            async with db.execute("SELECT COUNT(*) FROM sessions WHERE token=?", (token,)) as cur:
+                self.assertEqual((await cur.fetchone())[0], 0)
+
+    async def test_invalid_signature_does_not_consume_nonce(self):
+        seeded = await self._seed_app()
+        req = self._encrypted_request(seeded["app_id"], seeded["secret"], {"version": "1.0.0"})
+        req.sig = "0" * 64
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            with self.assertRaises(Exception):
+                await self.client.parse_request(req, db)
+            async with db.execute("SELECT COUNT(*) FROM request_nonces") as cur:
+                self.assertEqual((await cur.fetchone())[0], 0)
+
     async def test_paused_product_does_not_block_an_online_product(self):
         seeded = await self._seed_app()
         fake_request = _FakeRequest(headers={"User-Agent": "EnAuthTest/1.0"})
