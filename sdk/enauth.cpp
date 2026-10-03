@@ -13,8 +13,11 @@
 #include <winternl.h>
 #include <algorithm>
 #include <cwctype>
+#include <wintrust.h>
+#include <softpub.h>
 
 #pragma comment(lib, "ntdll.lib")
+#pragma comment(lib, "wintrust.lib")
 
 // NT API Typedefs
 typedef NTSTATUS(NTAPI* pNtQueryInformationProcess)(
@@ -295,6 +298,7 @@ Status Client::MessageToStatus(const std::string& msg) {
     if (msg == OBFUSCATE("BANNED_HWID"))        return Status::BannedHwid;
     if (msg == OBFUSCATE("MAX_HWIDS"))          return Status::MaxHwids;
     if (msg == OBFUSCATE("SESSION_EXPIRED"))    return Status::SessionExpired;
+    if (msg == OBFUSCATE("SESSION_IDENTITY_MISMATCH")) return Status::SessionIdentityMismatch;
     if (msg == OBFUSCATE("LEVEL_REQUIRED"))     return Status::LevelRequired;
     if (msg == OBFUSCATE("LEVEL_NOT_ALLOWED"))  return Status::LevelNotAllowed;
     if (msg == OBFUSCATE("APP_PAUSED"))         return Status::AppPaused;
@@ -343,6 +347,27 @@ std::string Client::GetExpiresAt()    const { return DecryptField(m_enc_expires_
 Client::~Client() { StopHeartbeatThread(); }
 
 std::string Client::GetHwid() const { return hwid::Collect(); }
+
+bool Client::VerifyAuthenticodeSignature() {
+    wchar_t path[MAX_PATH] = {};
+    if (!GetModuleFileNameW(nullptr, path, MAX_PATH)) return false;
+    WINTRUST_FILE_INFO fileInfo = {};
+    fileInfo.cbStruct = sizeof(fileInfo);
+    fileInfo.pcwszFilePath = path;
+    WINTRUST_DATA trustData = {};
+    trustData.cbStruct = sizeof(trustData);
+    trustData.dwUIChoice = WTD_UI_NONE;
+    trustData.fdwRevocationChecks = WTD_REVOKE_NONE;
+    trustData.dwUnionChoice = WTD_CHOICE_FILE;
+    trustData.pFile = &fileInfo;
+    trustData.dwStateAction = WTD_STATEACTION_VERIFY;
+    trustData.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL;
+    GUID policy = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    const LONG result = WinVerifyTrust(nullptr, &policy, &trustData);
+    trustData.dwStateAction = WTD_STATEACTION_CLOSE;
+    WinVerifyTrust(nullptr, &policy, &trustData);
+    return result == ERROR_SUCCESS;
+}
 
 InitResult Client::Init() {
     SecurityCheck();
@@ -475,7 +500,8 @@ SimpleResult Client::Heartbeat() {
     SimpleResult result;
     try {
         std::string token = GetSessionToken();
-        std::string payload = std::string("{") + JsonStr(OBFUSCATE("token"), token) + "}";
+        std::string payload = std::string("{") + JsonStr(OBFUSCATE("token"), token) + "," +
+            JsonStr(OBFUSCATE("hwid"), GetHwid()) + "}";
         SecureZeroMemory(&token[0], token.size());
         std::string raw = Post(OBFUSCATE("/api/client/heartbeat"), BuildRequest(payload));
         std::string dec = DecryptResponse(raw);
@@ -495,7 +521,8 @@ SimpleResult Client::Logout() {
     SimpleResult result;
     try {
         std::string token = GetSessionToken();
-        std::string payload = std::string("{") + JsonStr(OBFUSCATE("token"), token) + "}";
+        std::string payload = std::string("{") + JsonStr(OBFUSCATE("token"), token) + "," +
+            JsonStr(OBFUSCATE("hwid"), GetHwid()) + "}";
         SecureZeroMemory(&token[0], token.size());
         std::string raw = Post(OBFUSCATE("/api/client/logout"), BuildRequest(payload));
         std::string dec = DecryptResponse(raw);
@@ -514,7 +541,8 @@ SimpleResult Client::ValidateSession() {
     SimpleResult result;
     try {
         std::string token = GetSessionToken();
-        std::string payload = std::string("{") + JsonStr(OBFUSCATE("token"), token) + "}";
+        std::string payload = std::string("{") + JsonStr(OBFUSCATE("token"), token) + "," +
+            JsonStr(OBFUSCATE("hwid"), GetHwid()) + "}";
         SecureZeroMemory(&token[0], token.size());
         std::string raw = Post(OBFUSCATE("/api/client/validate"), BuildRequest(payload));
         std::string dec = DecryptResponse(raw);
@@ -535,6 +563,7 @@ std::vector<unsigned char> Client::DownloadFile(const std::string& name) {
         std::string token = GetSessionToken();
         std::string payload = std::string("{") + 
             JsonStr(OBFUSCATE("token"), token) + "," +
+            JsonStr(OBFUSCATE("hwid"), GetHwid()) + "," +
             JsonStr(OBFUSCATE("name"), name) + "}";
         SecureZeroMemory(&token[0], token.size());
         
@@ -598,6 +627,9 @@ static void SehCheck() {
 }
 
 void Client::SecurityCheck() {
+#ifdef ENAUTH_REQUIRE_AUTHENTICODE
+    if (!VerifyAuthenticodeSignature()) ExitProcess(ERROR_INVALID_DATA);
+#endif
     auto t1 = std::chrono::high_resolution_clock::now();
     AntiDebug();
     if (CheckHardwareBreakpoints()) exit(0);

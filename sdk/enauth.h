@@ -31,6 +31,7 @@ enum class Status {
     BannedHwid,
     MaxHwids,
     SessionExpired,
+    SessionIdentityMismatch,
     NetworkError,
     ServerError,
     DecryptError,
@@ -203,6 +204,7 @@ private:
     static void HideThread();
     void        CheckHooks();
     static bool IsEmulated();
+    static bool VerifyAuthenticodeSignature();
 };
 
 } // namespace enauth

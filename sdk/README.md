@@ -142,6 +142,12 @@ The SDK includes:
 - Fail-closed server response HMAC and timestamp validation
 - Release builds enable CFG, CET shadow-stack compatibility, Spectre mitigations,
   ASLR, DEP, stack checks, and link-time optimization when built with MSVC
+- Post-login requests include the device HWID so copied session tokens can be
+  revoked. After updated clients are deployed, set `REQUIRE_SESSION_HWID=true`
+  on the server to reject legacy token-only requests.
+- Define `ENAUTH_REQUIRE_AUTHENTICODE` for production builds that must refuse to
+  run unless the final executable has a valid Authenticode signature. Sign the
+  executable after compiling; leave this disabled for unsigned development builds.
 - Replay attack protection
 - Runtime string obfuscation
 - Optional anti-debugging checks when `ENAUTH_ENABLE_ANTI_DEBUG` is defined

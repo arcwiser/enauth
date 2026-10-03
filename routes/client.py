@@ -29,6 +29,18 @@ SESSION_DURATION     = int(os.getenv("SESSION_DURATION", "86400"))       # 24 ho
 MAX_LOGIN_STRIKES    = int(os.getenv("MAX_LOGIN_STRIKES", "5"))          # lock key after 5 bad attempts (down from 10)
 NONCE_CACHE_SIZE     = int(os.getenv("NONCE_CACHE_SIZE", "10000"))      # max unique nonces to remember
 NONCE_TTL            = int(os.getenv("NONCE_TTL", "120"))                # seconds to keep a nonce (2× tolerance)
+REQUIRE_SESSION_HWID = os.getenv("REQUIRE_SESSION_HWID", "false").lower() == "true"
+
+
+async def enforce_session_identity(db, payload: dict, sess, app_id: str, ip: str) -> bool:
+    supplied_hwid = (payload.get("hwid") or "").strip()
+    if (REQUIRE_SESSION_HWID and not supplied_hwid) or (supplied_hwid and supplied_hwid != sess["hwid"]):
+        await db.execute("DELETE FROM sessions WHERE token=?", (sess["token"],))
+        await log_action(db, "session_identity_mismatch", app_id=app_id, ip=ip,
+                         hwid=supplied_hwid[:128] or None, details="Session revoked")
+        await db.commit()
+        return False
+    return True
 
 async def _check_and_store_nonce(db: aiosqlite.Connection, nonce: str, now: float) -> bool:
     """Atomically persist a nonce so replay checks survive restarts and workers."""
@@ -441,6 +453,8 @@ async def client_heartbeat(request: Request, req: EncryptedRequest,
             await db.execute("DELETE FROM sessions WHERE token = ?", (token,))
             await db.commit()
         return enc_resp({"success": False, "message": "SESSION_EXPIRED"}, secret, req.app_id)
+    if not await enforce_session_identity(db, payload, sess, app["id"], ip):
+        return enc_resp({"success": False, "message": "SESSION_IDENTITY_MISMATCH"}, secret, req.app_id)
 
     # ── Per-app HWID ban check ──
     async with db.execute(
@@ -478,10 +492,12 @@ async def client_logout(request: Request, req: EncryptedRequest,
     secret = app["secret_key"]
     token  = payload.get("token", "")
 
-    async with db.execute("SELECT license_id FROM sessions WHERE token = ?", (token,)) as cur:
+    async with db.execute("SELECT * FROM sessions WHERE token = ?", (token,)) as cur:
         sess = await cur.fetchone()
 
     if sess:
+        if not await enforce_session_identity(db, payload, sess, app["id"], ip):
+            return enc_resp({"success": False, "message": "SESSION_IDENTITY_MISMATCH"}, secret, req.app_id)
         await db.execute("DELETE FROM sessions WHERE token = ?", (token,))
         await db.commit()
         async with db.execute("SELECT key FROM licenses WHERE id = ?", (sess["license_id"],)) as c:
@@ -512,6 +528,8 @@ async def client_validate(request: Request, req: EncryptedRequest,
 
     if not sess or sess["expires_at"] < utcnow():
         return enc_resp({"success": False, "message": "SESSION_EXPIRED"}, secret, req.app_id)
+    if not await enforce_session_identity(db, payload, sess, app["id"], ip):
+        return enc_resp({"success": False, "message": "SESSION_IDENTITY_MISMATCH"}, secret, req.app_id)
 
     return enc_resp({"success": True, "message": "OK",
                      "expires_at": sess["expires_at"]}, secret, req.app_id)
@@ -542,6 +560,8 @@ async def client_download(request: Request, req: EncryptedRequest,
 
     if not sess or sess["expires_at"] < utcnow():
         return enc_resp({"success": False, "message": "SESSION_EXPIRED"}, secret, req.app_id)
+    if not await enforce_session_identity(db, payload, sess, app["id"], ip):
+        return enc_resp({"success": False, "message": "SESSION_IDENTITY_MISMATCH"}, secret, req.app_id)
 
     # Select only an active, currently available release for this application.
     async with db.execute(

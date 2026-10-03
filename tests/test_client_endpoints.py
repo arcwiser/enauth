@@ -51,6 +51,7 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
         os.environ["MAX_LOGIN_STRIKES"] = "5"
         os.environ["NONCE_CACHE_SIZE"] = "10000"
         os.environ["NONCE_TTL"] = "120"
+        os.environ["REQUIRE_SESSION_HWID"] = "false"
         os.environ["LICENSE_KEY_PEPPER"] = "test-license-pepper-that-is-long-enough"
 
         for name in MODULES_TO_RESET:
@@ -154,7 +155,7 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
             validate_req = self._encrypted_request(
                 seeded["app_id"],
                 seeded["secret"],
-                {"token": login_payload["token"]},
+                {"token": login_payload["token"], "hwid": "a" * 64},
             )
             validate_resp = await self.client.client_validate.__wrapped__(
                 request=fake_request,
@@ -168,7 +169,7 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
             heartbeat_req = self._encrypted_request(
                 seeded["app_id"],
                 seeded["secret"],
-                {"token": login_payload["token"]},
+                {"token": login_payload["token"], "hwid": "a" * 64},
             )
             heartbeat_resp = await self.client.client_heartbeat.__wrapped__(
                 request=fake_request,
@@ -181,7 +182,7 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
             download_req = self._encrypted_request(
                 seeded["app_id"],
                 seeded["secret"],
-                {"token": login_payload["token"], "name": "payload.bin"},
+                {"token": login_payload["token"], "hwid": "a" * 64, "name": "payload.bin"},
             )
             download_resp = await self.client.client_download.__wrapped__(
                 request=fake_request,
@@ -192,6 +193,31 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(download_payload["success"])
             self.assertEqual(download_payload["name"], "payload.bin")
             self.assertEqual(base64.b64decode(download_payload["data"]), b"hello world")
+
+    async def test_session_is_revoked_when_hwid_changes(self):
+        seeded = await self._seed_app()
+        fake_request = _FakeRequest(headers={"User-Agent": "EnAuthTest/1.0"})
+
+        login_req = self._encrypted_request(
+            seeded["app_id"], seeded["secret"],
+            {"version": "1.0.0", "license_key": seeded["license_key"], "hwid": "a" * 64},
+        )
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            login_resp = await self.client.client_login.__wrapped__(fake_request, login_req, db)
+            token = self._decrypt_response(login_resp, seeded["secret"])["token"]
+
+            validate_req = self._encrypted_request(
+                seeded["app_id"], seeded["secret"],
+                {"token": token, "hwid": "b" * 64},
+            )
+            validate_resp = await self.client.client_validate.__wrapped__(fake_request, validate_req, db)
+            validate_payload = self._decrypt_response(validate_resp, seeded["secret"])
+            self.assertFalse(validate_payload["success"])
+            self.assertEqual(validate_payload["message"], "SESSION_IDENTITY_MISMATCH")
+
+            async with db.execute("SELECT COUNT(*) FROM sessions WHERE token=?", (token,)) as cur:
+                self.assertEqual((await cur.fetchone())[0], 0)
 
     async def test_paused_product_does_not_block_an_online_product(self):
         seeded = await self._seed_app()
