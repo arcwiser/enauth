@@ -29,7 +29,7 @@ SESSION_DURATION     = int(os.getenv("SESSION_DURATION", "86400"))       # 24 ho
 MAX_LOGIN_STRIKES    = int(os.getenv("MAX_LOGIN_STRIKES", "5"))          # lock key after 5 bad attempts (down from 10)
 NONCE_CACHE_SIZE     = int(os.getenv("NONCE_CACHE_SIZE", "10000"))      # max unique nonces to remember
 NONCE_TTL            = int(os.getenv("NONCE_TTL", "120"))                # seconds to keep a nonce (2× tolerance)
-REQUIRE_SESSION_HWID = os.getenv("REQUIRE_SESSION_HWID", "false").lower() == "true"
+REQUIRE_SESSION_HWID = os.getenv("REQUIRE_SESSION_HWID", "true").lower() == "true"
 
 
 async def enforce_session_identity(db, payload: dict, sess, app_id: str, ip: str) -> bool:

@@ -143,14 +143,16 @@ The SDK includes:
 - Release builds enable CFG, CET shadow-stack compatibility, Spectre mitigations,
   ASLR, DEP, stack checks, and link-time optimization when built with MSVC
 - Post-login requests include the device HWID so copied session tokens can be
-  revoked. After updated clients are deployed, set `REQUIRE_SESSION_HWID=true`
-  on the server to reject legacy token-only requests.
-- Define `ENAUTH_REQUIRE_AUTHENTICODE` for production builds that must refuse to
-  run unless the final executable has a valid Authenticode signature. Sign the
-  executable after compiling; leave this disabled for unsigned development builds.
+  revoked. `REQUIRE_SESSION_HWID` defaults to `true`, so legacy token-only
+  requests are rejected unless an operator explicitly opts out.
+- Authenticode enforcement and the SDK's local integrity checks are enabled by
+  default by the example CMake project. Sign the executable after compiling.
+  For an intentional unsigned development build, configure with
+  `-DENAUTH_REQUIRE_AUTHENTICODE=OFF`; local checks can likewise be disabled with
+  `-DENAUTH_ENABLE_ANTI_DEBUG=OFF`.
 - Replay attack protection
 - Runtime string obfuscation
-- Optional anti-debugging checks when `ENAUTH_ENABLE_ANTI_DEBUG` is defined
+- Local anti-debugging and integrity checks enabled by default in the example build
 - HWID collection and validation
 
 Application secrets compiled into a desktop application can be recovered by a
