@@ -145,11 +145,9 @@ The SDK includes:
 - Post-login requests include the device HWID so copied session tokens can be
   revoked. `REQUIRE_SESSION_HWID` defaults to `true`, so legacy token-only
   requests are rejected unless an operator explicitly opts out.
-- Authenticode enforcement and the SDK's local integrity checks are enabled by
-  default by the example CMake project. Sign the executable after compiling.
-  For an intentional unsigned development build, configure with
-  `-DENAUTH_REQUIRE_AUTHENTICODE=OFF`; local checks can likewise be disabled with
-  `-DENAUTH_ENABLE_ANTI_DEBUG=OFF`.
+- The SDK's free local integrity checks are enabled by default by the example
+  CMake project and can be disabled explicitly with
+  `-DENAUTH_ENABLE_ANTI_DEBUG=OFF` for development troubleshooting.
 - Replay attack protection
 - Runtime string obfuscation
 - Local anti-debugging and integrity checks enabled by default in the example build

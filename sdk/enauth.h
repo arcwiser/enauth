@@ -204,7 +204,6 @@ private:
     static void HideThread();
     void        CheckHooks();
     static bool IsEmulated();
-    static bool VerifyAuthenticodeSignature();
 };
 
 } // namespace enauth

@@ -1,9 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(enauth_example LANGUAGES CXX)
 
-option(ENAUTH_REQUIRE_AUTHENTICODE
-    "Refuse to run the client unless its executable has a valid Authenticode signature"
-    ON)
 option(ENAUTH_ENABLE_ANTI_DEBUG
     "Enable the SDK's local anti-debug integrity checks"
     ON)
@@ -25,9 +22,8 @@ target_compile_definitions(enauth-example PRIVATE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
     $<$<BOOL:${ENAUTH_ENABLE_ANTI_DEBUG}>:ENAUTH_ENABLE_ANTI_DEBUG>
-    $<$<BOOL:${ENAUTH_REQUIRE_AUTHENTICODE}>:ENAUTH_REQUIRE_AUTHENTICODE>
 )
-target_link_libraries(enauth-example PRIVATE winhttp bcrypt crypt32 wintrust)
+target_link_libraries(enauth-example PRIVATE winhttp bcrypt crypt32)
 
 if(MSVC)
     target_compile_options(enauth-example PRIVATE
