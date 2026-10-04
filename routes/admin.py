@@ -84,6 +84,7 @@ async def cleanup_runtime_state(db: aiosqlite.Connection):
     await db.execute("DELETE FROM portal_sessions WHERE expires_at <= ?", (now,))
     await db.execute("DELETE FROM sessions WHERE expires_at <= ? OR COALESCE(token_expires_at, expires_at) <= ?", (now, now))
     await db.execute("DELETE FROM temp_2fa_sessions WHERE expires_at <= ?", (now,))
+    await db.execute("DELETE FROM download_tickets WHERE expires_at <= ? OR consumed_at IS NOT NULL", (now,))
     await db.execute("DELETE FROM logs WHERE timestamp < datetime(?, '-30 days')", (now,))
     await db.commit()
 

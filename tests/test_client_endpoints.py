@@ -419,8 +419,29 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await self.client.get_app_session(db, login["token"], seeded["app_id"]))
 
             download_path = "/api/client/download"
-            download_req = self._v2_request(seeded["app_id"], {
+            ticket_path = "/api/client/download-ticket"
+            ticket_req = self._v2_request(seeded["app_id"], {
                 "token": validated["token"], "hwid": "d" * 64, "name": "payload.bin",
+            })
+            ticket_resp = await self.client.client_download_ticket.__wrapped__(
+                _FakeRequest(path=ticket_path), ticket_req, db
+            )
+            ticket = self._verify_v2_response(ticket_resp, ticket_path, ticket_req.nonce)
+            self.assertTrue(ticket["success"])
+            substituted_req = self._v2_request(seeded["app_id"], {
+                "token": ticket["token"], "hwid": "d" * 64, "name": "other.bin",
+                "ticket": ticket["ticket"],
+            })
+            substituted_resp = await self.client.client_download.__wrapped__(
+                _FakeRequest(path=download_path), substituted_req, db
+            )
+            substituted = self._verify_v2_response(
+                substituted_resp, download_path, substituted_req.nonce
+            )
+            self.assertEqual(substituted["message"], "INVALID_DOWNLOAD_TICKET")
+            download_req = self._v2_request(seeded["app_id"], {
+                "token": ticket["token"], "hwid": "d" * 64, "name": "payload.bin",
+                "ticket": ticket["ticket"],
             })
             download_resp = await self.client.client_download.__wrapped__(
                 _FakeRequest(path=download_path), download_req, db
@@ -429,6 +450,16 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(download["encryption"], "TLS-SIGNED-SESSION-v2")
             self.assertEqual(base64.b64decode(download["data"], validate=True), b"hello world")
             self.assertNotEqual(download["token"], validated["token"])
+
+            replay_req = self._v2_request(seeded["app_id"], {
+                "token": download["token"], "hwid": "d" * 64, "name": "payload.bin",
+                "ticket": ticket["ticket"],
+            })
+            replay_resp = await self.client.client_download.__wrapped__(
+                _FakeRequest(path=download_path), replay_req, db
+            )
+            replay = self._verify_v2_response(replay_resp, download_path, replay_req.nonce)
+            self.assertEqual(replay["message"], "INVALID_DOWNLOAD_TICKET")
 
     async def test_product_version_policy_blocks_compromised_client(self):
         seeded = await self._seed_app()

@@ -608,10 +608,37 @@ std::vector<unsigned char> Client::DownloadFile(const std::string& name) {
     try {
         std::string token = GetSessionToken();
         std::string deviceHwid = GetHwid();
-        std::string payload = std::string("{") + 
+        std::string ticketPayload = std::string("{") +
             JsonStr(OBFUSCATE("token"), token) + "," +
             JsonStr(OBFUSCATE("hwid"), deviceHwid) + "," +
             JsonStr(OBFUSCATE("name"), name) + "}";
+        const std::string ticketEndpoint = OBFUSCATE("/api/client/download-ticket");
+        std::string ticketNonce;
+        std::string ticketBody = BuildRequest(ticketPayload, ticketNonce);
+        std::string ticketRaw = Post(ticketEndpoint, ticketBody);
+        std::string ticketResponse = DecryptResponse(ticketRaw, ticketEndpoint, ticketNonce);
+        if (!JsonBool(ticketResponse, OBFUSCATE("success"))) {
+            SecureZeroMemory(token.data(), token.size());
+            SecureZeroMemory(deviceHwid.data(), deviceHwid.size());
+            return {};
+        }
+        std::string ticket = JsonGet(ticketResponse, OBFUSCATE("ticket"));
+        std::string ticketToken = JsonGet(ticketResponse, OBFUSCATE("token"));
+        if (ticket.empty() || ticketToken.empty()) {
+            SecureZeroMemory(token.data(), token.size());
+            SecureZeroMemory(deviceHwid.data(), deviceHwid.size());
+            return {};
+        }
+        SecureZeroMemory(token.data(), token.size());
+        token = ticketToken;
+        EncryptStore(m_enc_token, ticketToken);
+        std::string payload = std::string("{") +
+            JsonStr(OBFUSCATE("token"), token) + "," +
+            JsonStr(OBFUSCATE("hwid"), deviceHwid) + "," +
+            JsonStr(OBFUSCATE("name"), name) + "," +
+            JsonStr(OBFUSCATE("ticket"), ticket) + "}";
+        SecureZeroMemory(ticket.data(), ticket.size());
+        SecureZeroMemory(ticketToken.data(), ticketToken.size());
         
         const std::string endpoint = OBFUSCATE("/api/client/download");
         std::string nonce;

@@ -400,6 +400,7 @@ Environment variables (see `.env.example`):
 - `TIMESTAMP_TOLERANCE`: Request timestamp tolerance in seconds (default: 60)
 - `SESSION_DURATION`: Client session duration in seconds (default: 86400)
 - `SESSION_TOKEN_SECONDS`: Protocol-v2 bearer-token lifetime before rotation (default: 300)
+- `DOWNLOAD_TICKET_SECONDS`: One-use SDK download-ticket lifetime (default: 60)
 - `AUTO_BACKUP_HOURS`: Verified scheduled-backup interval; `0` disables it
 - `BACKUP_ENCRYPTION_KEY`: Encrypts signing-key copies stored beside scheduled database backups
 - `MAX_LOGIN_STRIKES`: Maximum failed login attempts before lockout (default: 5)

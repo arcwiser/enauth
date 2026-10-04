@@ -2,6 +2,7 @@ import time
 import hashlib
 import base64
 import re
+import secrets
 from contextvars import ContextVar
 from datetime import datetime, timezone, timedelta
 
@@ -32,6 +33,7 @@ import os
 TIMESTAMP_TOLERANCE  = int(os.getenv("TIMESTAMP_TOLERANCE", "60"))      # ±60 seconds — tight replay window
 SESSION_DURATION     = int(os.getenv("SESSION_DURATION", "86400"))       # 24 hours
 SESSION_TOKEN_SECONDS = max(60, int(os.getenv("SESSION_TOKEN_SECONDS", "300")))
+DOWNLOAD_TICKET_SECONDS = max(10, min(int(os.getenv("DOWNLOAD_TICKET_SECONDS", "60")), 300))
 MAX_LOGIN_STRIKES    = int(os.getenv("MAX_LOGIN_STRIKES", "5"))          # lock key after 5 bad attempts (down from 10)
 NONCE_CACHE_SIZE     = int(os.getenv("NONCE_CACHE_SIZE", "10000"))      # max unique nonces to remember
 NONCE_TTL            = int(os.getenv("NONCE_TTL", "120"))                # seconds to keep a nonce (2× tolerance)
@@ -246,6 +248,31 @@ async def rotate_session_token(db, sess) -> str:
     if cursor.rowcount != 1:
         raise HTTPException(409, "SESSION_ROTATION_CONFLICT")
     return new_token
+
+
+async def resolve_download_file(db, app_id: str, name: str, sess):
+    async with db.execute(
+        """SELECT f.* FROM app_files f
+           WHERE f.app_id=? AND f.name=? AND f.is_active=1 AND f.is_archived=0 AND f.is_revoked=0
+             AND (f.available_from IS NULL OR f.available_from<=CURRENT_TIMESTAMP)
+             AND (f.available_until IS NULL OR f.available_until>CURRENT_TIMESTAMP)""",
+        (app_id, name),
+    ) as cur:
+        row = await cur.fetchone()
+    if not row:
+        return None, "FILE_NOT_FOUND"
+    async with db.execute("SELECT product_id FROM app_file_products WHERE file_id=?", (row["id"],)) as cur:
+        allowed_products = {item["product_id"] for item in await cur.fetchall()}
+    if allowed_products and sess["product_id"] not in allowed_products:
+        return None, "PRODUCT_NOT_AUTHORIZED"
+    if row["download_limit"]:
+        async with db.execute(
+            "SELECT COUNT(*) FROM file_download_events WHERE file_id=? AND license_id=?",
+            (row["id"], sess["license_id"]),
+        ) as cur:
+            if (await cur.fetchone())[0] >= row["download_limit"]:
+                return None, "DOWNLOAD_LIMIT_REACHED"
+    return row, None
 
 
 async def enforce_active_authorization(db, sess, app, ip: str) -> str | None:
@@ -685,6 +712,48 @@ async def client_validate(request: Request, req: EncryptedRequest,
                      "expires_at": sess["expires_at"]}, secret, req.app_id)
 
 
+# ─── /download ticket ────────────────────────────────────────────────────────
+
+@router.post("/download-ticket")
+@limiter.limit("15/minute")
+async def client_download_ticket(request: Request, req: EncryptedRequest,
+                                 db: aiosqlite.Connection = Depends(get_db)):
+    ip = get_ip(request)
+    payload, app = await parse_request(req, db, request.url.path)
+    secret = app["secret_key"]
+    if req.protocol != 2:
+        return enc_resp({"success": False, "message": "CLIENT_UPDATE_REQUIRED"}, secret, req.app_id)
+    token = payload.get("token", "")
+    name = payload.get("name", "").strip()
+    sess = await get_app_session(db, token, app["id"])
+    if not sess:
+        return enc_resp({"success": False, "message": "SESSION_EXPIRED"}, secret, req.app_id)
+    if not await enforce_session_identity(db, payload, sess, app["id"], ip):
+        return enc_resp({"success": False, "message": "SESSION_IDENTITY_MISMATCH"}, secret, req.app_id)
+    authorization_failure = await enforce_active_authorization(db, sess, app, ip)
+    if authorization_failure:
+        return enc_resp({"success": False, "message": authorization_failure}, secret, req.app_id)
+    row, failure = await resolve_download_file(db, app["id"], name, sess)
+    if failure:
+        return enc_resp({"success": False, "message": failure}, secret, req.app_id)
+
+    ticket = secrets.token_urlsafe(48)
+    ticket_hash = hashlib.sha256(ticket.encode("utf-8")).hexdigest()
+    ticket_expiry = future(DOWNLOAD_TICKET_SECONDS)
+    await db.execute(
+        """INSERT INTO download_tickets
+           (id,ticket_hash,session_id,license_id,app_id,product_id,file_id,hwid,client_version,expires_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (generate_uid(), ticket_hash, sess["id"], sess["license_id"], app["id"], sess["product_id"],
+         row["id"], sess["hwid"], sess["client_version"], ticket_expiry),
+    )
+    new_token = await rotate_session_token(db, sess)
+    await db.commit()
+    return enc_resp({"success": True, "message": "OK", "ticket": ticket,
+                     "ticket_expires_at": ticket_expiry, "token": new_token,
+                     "file_id": row["id"], "sha256": row["file_sha256"]}, secret, req.app_id)
+
+
 # ─── /download ───────────────────────────────────────────────────────────────
 
 @router.post("/download")
@@ -701,6 +770,7 @@ async def client_download(request: Request, req: EncryptedRequest,
     secret = app["secret_key"]
     token  = payload.get("token", "")
     name   = payload.get("name", "").strip()
+    ticket = payload.get("ticket", "").strip()
 
     if not name:
         return enc_resp({"success": False, "message": "MISSING_FIELDS"}, secret, req.app_id)
@@ -715,34 +785,33 @@ async def client_download(request: Request, req: EncryptedRequest,
     if authorization_failure:
         return enc_resp({"success": False, "message": authorization_failure}, secret, req.app_id)
 
-    # Select only an active, currently available release for this application.
-    async with db.execute(
-        """SELECT f.* FROM app_files f
-           WHERE f.app_id=? AND f.name=? AND f.is_active=1 AND f.is_archived=0 AND f.is_revoked=0
-             AND (f.available_from IS NULL OR f.available_from<=CURRENT_TIMESTAMP)
-             AND (f.available_until IS NULL OR f.available_until>CURRENT_TIMESTAMP)""",
-        (app["id"], name),
-    ) as cur:
-        row = await cur.fetchone()
-
-    if not row:
-        return enc_resp({"success": False, "message": "FILE_NOT_FOUND"}, secret, req.app_id)
-
-    async with db.execute("SELECT product_id FROM app_file_products WHERE file_id=?", (row["id"],)) as cur:
-        allowed_products = {item["product_id"] for item in await cur.fetchall()}
-    if allowed_products and sess["product_id"] not in allowed_products:
-        await log_action(db, "download_denied", app_id=app["id"], ip=ip,
-                         details=f"file={name}; product={sess['product_id']}")
-        await db.commit()
-        return enc_resp({"success": False, "message": "PRODUCT_NOT_AUTHORIZED"}, secret, req.app_id)
-    if row["download_limit"]:
+    if req.protocol == 2:
+        if not ticket:
+            return enc_resp({"success": False, "message": "DOWNLOAD_TICKET_REQUIRED"}, secret, req.app_id)
+        ticket_hash = hashlib.sha256(ticket.encode("utf-8")).hexdigest()
+        cursor = await db.execute(
+            """UPDATE download_tickets SET consumed_at=CURRENT_TIMESTAMP
+               WHERE ticket_hash=? AND session_id=? AND license_id=? AND app_id=?
+                 AND product_id IS ? AND hwid=? AND client_version IS ?
+                 AND consumed_at IS NULL AND expires_at>CURRENT_TIMESTAMP""",
+            (ticket_hash, sess["id"], sess["license_id"], app["id"], sess["product_id"],
+             sess["hwid"], sess["client_version"]),
+        )
+        if cursor.rowcount != 1:
+            return enc_resp({"success": False, "message": "INVALID_DOWNLOAD_TICKET"}, secret, req.app_id)
         async with db.execute(
-            "SELECT COUNT(*) FROM file_download_events WHERE file_id=? AND license_id=?",
-            (row["id"], sess["license_id"]),
+            """SELECT f.* FROM download_tickets dt JOIN app_files f ON f.id=dt.file_id
+               WHERE dt.ticket_hash=? AND f.name=? AND f.is_active=1 AND f.is_archived=0 AND f.is_revoked=0""",
+            (ticket_hash, name),
         ) as cur:
-            downloads = (await cur.fetchone())[0]
-        if downloads >= row["download_limit"]:
-            return enc_resp({"success": False, "message": "DOWNLOAD_LIMIT_REACHED"}, secret, req.app_id)
+            row = await cur.fetchone()
+        if not row:
+            await db.rollback()
+            return enc_resp({"success": False, "message": "INVALID_DOWNLOAD_TICKET"}, secret, req.app_id)
+    else:
+        row, failure = await resolve_download_file(db, app["id"], name, sess)
+        if failure:
+            return enc_resp({"success": False, "message": failure}, secret, req.app_id)
 
     if req.protocol == 2:
         content_b64 = base64.b64encode(row["content"]).decode("ascii")
