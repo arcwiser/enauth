@@ -52,6 +52,7 @@ std::string HmacSHA256Hex   (const std::string& key,       const std::string& ms
 std::string SHA256Hex        (const std::string& data);
 std::string SecureRandomHex  (size_t byteCount);
 std::vector<unsigned char> Base64Decode(const std::string& b64);
+std::string Base64Encode(const std::vector<unsigned char>& data);
 bool VerifyEcdsaP256Signature(const std::string& publicKeyHex,
                              const std::string& message,
                              const std::string& signatureB64);
@@ -222,81 +223,70 @@ std::string Client::Post(const std::string& endpoint, const std::string& body) {
     return response;
 }
 
-std::string Client::BuildRequest(const std::string& json_payload) {
-    long long ts     = UnixTime();
-    std::string secret = GetAppSecret();
-    std::string appId  = GetAppId();
-    std::string enc    = AES256CBCEncrypt(json_payload, secret);
-
-    // HMAC now covers: app_id + "|" + ts + "|" + enc  (matches server)
-    std::string hmacMsg = appId + "|" + std::to_string(ts) + "|" + enc;
-    std::string sig     = HmacSHA256Hex(secret, hmacMsg);
-
-    // Generate a fresh 128-bit CNG nonce for every request.
-    std::string nonce = SecureRandomHex(16);
-
+std::string Client::BuildRequest(const std::string& json_payload, std::string& requestNonce) {
+    const long long ts = UnixTime();
+    std::string appId = GetAppId();
+    requestNonce = SecureRandomHex(16);
+    std::vector<unsigned char> bytes(json_payload.begin(), json_payload.end());
+    std::string payload = Base64Encode(bytes);
     std::string res = std::string("{") +
-        JsonStr(OBFUSCATE("app_id"), appId)          + "," +
-        JsonStr(OBFUSCATE("data"),   enc)             + "," +
-        JsonStr(OBFUSCATE("sig"),    sig)             + "," +
-        JsonInt(OBFUSCATE("ts"),     ts)              + "," +
-        JsonStr(OBFUSCATE("nonce"),  nonce)           +
-        "}";
-
-    SecureZeroMemory(&appId[0],  appId.size());
-    SecureZeroMemory(&secret[0], secret.size());
+        JsonInt(OBFUSCATE("protocol"), 2) + "," +
+        JsonStr(OBFUSCATE("app_id"), appId) + "," +
+        JsonStr(OBFUSCATE("payload"), payload) + "," +
+        JsonInt(OBFUSCATE("ts"), ts) + "," +
+        JsonStr(OBFUSCATE("nonce"), requestNonce) + "}";
+    if (!appId.empty()) SecureZeroMemory(appId.data(), appId.size());
+    if (!payload.empty()) SecureZeroMemory(payload.data(), payload.size());
+    if (!bytes.empty()) SecureZeroMemory(bytes.data(), bytes.size());
     return res;
 }
 
-std::string Client::DecryptResponse(const std::string& json_response) {
-    if (json_response.find(OBFUSCATE("\"data\"")) == std::string::npos) {
+std::string Client::DecryptResponse(const std::string& json_response,
+                                    const std::string& endpoint,
+                                    const std::string& requestNonce) {
+    if (JsonGet(json_response, OBFUSCATE("protocol")) != "2") {
         std::string detail = JsonGet(json_response, OBFUSCATE("detail"));
         if (!detail.empty()) {
             return OBFUSCATE("{\"success\":false,\"message\":\"") + detail + OBFUSCATE("\"}");
         }
-        return json_response;
+        throw std::runtime_error(OBFUSCATE("Protocol 2 response required"));
     }
-
-    std::string enc = JsonGet(json_response, OBFUSCATE("data"));
-    if (enc.empty()) throw std::runtime_error(OBFUSCATE("No data in response"));
-
-    const std::string sig = JsonGet(json_response, OBFUSCATE("sig"));
+    const std::string payload = JsonGet(json_response, OBFUSCATE("payload"));
     const std::string serverSig = JsonGet(json_response, OBFUSCATE("server_sig"));
     const std::string tsText = JsonGet(json_response, OBFUSCATE("ts"));
-    if (sig.empty() || tsText.empty())
+    const std::string validUntilText = JsonGet(json_response, OBFUSCATE("valid_until"));
+    const std::string returnedNonce = JsonGet(json_response, OBFUSCATE("request_nonce"));
+    const std::string returnedEndpoint = JsonGet(json_response, OBFUSCATE("endpoint"));
+    const std::string returnedAppId = JsonGet(json_response, OBFUSCATE("app_id"));
+    if (payload.empty() || serverSig.empty() || tsText.empty() || validUntilText.empty())
         throw std::runtime_error(OBFUSCATE("Unsigned server response"));
     long long responseTs = 0;
     try { responseTs = std::stoll(tsText); }
     catch (...) { throw std::runtime_error(OBFUSCATE("Invalid server timestamp")); }
+    long long validUntil = 0;
+    try { validUntil = std::stoll(validUntilText); }
+    catch (...) { throw std::runtime_error(OBFUSCATE("Invalid response expiry")); }
     const long long now = UnixTime();
-    const long long skew = now >= responseTs ? now - responseTs : responseTs - now;
-    if (skew > 60)
+    if (responseTs > now + 60 || validUntil < now || validUntil - responseTs > 120)
         throw std::runtime_error(OBFUSCATE("Stale server response"));
 
-    std::string responsePublicKey = GetResponsePublicKey();
     std::string appId = GetAppId();
-    const std::string signedMessage = appId + "|" + tsText + "|" + enc;
+    if (returnedNonce != requestNonce || returnedEndpoint != endpoint || returnedAppId != appId) {
+        if (!appId.empty()) SecureZeroMemory(appId.data(), appId.size());
+        throw std::runtime_error(OBFUSCATE("Server response context mismatch"));
+    }
+    std::string responsePublicKey = GetResponsePublicKey();
+    const std::string signedMessage = "v2|" + appId + "|" + endpoint + "|" + requestNonce +
+        "|" + tsText + "|" + validUntilText + "|" + payload;
     if (serverSig.empty() || !VerifyEcdsaP256Signature(responsePublicKey, signedMessage, serverSig)) {
         if (!responsePublicKey.empty()) SecureZeroMemory(responsePublicKey.data(), responsePublicKey.size());
         if (!appId.empty()) SecureZeroMemory(appId.data(), appId.size());
         throw std::runtime_error(OBFUSCATE("Invalid asymmetric server signature"));
     }
     if (!responsePublicKey.empty()) SecureZeroMemory(responsePublicKey.data(), responsePublicKey.size());
-
-    std::string secret = GetAppSecret();
-    const std::string expectedSig = HmacSHA256Hex(secret, appId + "|" + tsText + "|" + enc);
-    unsigned char difference = static_cast<unsigned char>(expectedSig.size() ^ sig.size());
-    const size_t compareLength = (std::min)(expectedSig.size(), sig.size());
-    for (size_t i = 0; i < compareLength; ++i)
-        difference |= static_cast<unsigned char>(expectedSig[i] ^ sig[i]);
     if (!appId.empty()) SecureZeroMemory(&appId[0], appId.size());
-    if (difference != 0) {
-        if (!secret.empty()) SecureZeroMemory(&secret[0], secret.size());
-        throw std::runtime_error(OBFUSCATE("Invalid server signature"));
-    }
-    std::string dec = AES256CBCDecrypt(enc, secret);
-    if (!secret.empty()) SecureZeroMemory(&secret[0], secret.size());
-    return dec;
+    const auto decoded = Base64Decode(payload);
+    return std::string(decoded.begin(), decoded.end());
 }
 
 Status Client::MessageToStatus(const std::string& msg) {
@@ -319,7 +309,7 @@ Status Client::MessageToStatus(const std::string& msg) {
 }
 
 Client::Client(const std::string& server_url, const std::string& app_id,
-               const std::string& app_secret, const std::string& version,
+               const std::string& version,
                const std::string& response_public_key_hex)
 {
     m_xor_key = GenerateRuntimeKey();
@@ -331,7 +321,6 @@ Client::Client(const std::string& server_url, const std::string& app_id,
     SecureZeroMemory(memoryKey.data(), memoryKey.size());
     EncryptStore(m_enc_server_url, server_url);
     EncryptStore(m_enc_app_id,     app_id);
-    EncryptStore(m_enc_app_secret, app_secret);
     EncryptStore(m_enc_version,    version);
     EncryptStore(m_enc_response_public_key, response_public_key_hex);
     
@@ -378,7 +367,6 @@ std::string Client::GetMemoryKey() const {
 
 std::string Client::GetServerUrl()  const { return DecryptField(m_enc_server_url); }
 std::string Client::GetAppId()      const { return DecryptField(m_enc_app_id); }
-std::string Client::GetAppSecret()  const { return DecryptField(m_enc_app_secret); }
 std::string Client::GetVersion()    const { return DecryptField(m_enc_version); }
 std::string Client::GetResponsePublicKey() const { return DecryptField(m_enc_response_public_key); }
 std::string Client::GetSessionToken() const { return DecryptField(m_enc_token); }
@@ -393,7 +381,6 @@ Client::~Client() {
     };
     wipe(m_enc_server_url);
     wipe(m_enc_app_id);
-    wipe(m_enc_app_secret);
     wipe(m_enc_version);
     wipe(m_enc_response_public_key);
     wipe(m_enc_token);
@@ -412,9 +399,11 @@ InitResult Client::Init() {
         std::string ver = GetVersion();
         std::string payload = std::string("{") + JsonStr(OBFUSCATE("version"), ver) + "}";
         SecureZeroMemory(&ver[0], ver.size());
-        std::string body    = BuildRequest(payload);
-        std::string raw     = Post(OBFUSCATE("/api/client/init"), body);
-        std::string dec     = DecryptResponse(raw);
+        const std::string endpoint = OBFUSCATE("/api/client/init");
+        std::string nonce;
+        std::string body = BuildRequest(payload, nonce);
+        std::string raw = Post(endpoint, body);
+        std::string dec = DecryptResponse(raw, endpoint, nonce);
 
         result.success          = JsonBool(dec, OBFUSCATE("success"));
         result.message          = JsonGet(dec, OBFUSCATE("message"));
@@ -443,9 +432,11 @@ LoginResult Client::Login(const std::string& license_key,
         if (!product_id.empty()) payload += "," + JsonStr(OBFUSCATE("product_id"), product_id);
         if (!level.empty())      payload += "," + JsonStr(OBFUSCATE("level"), level);
         payload += "}";
-        std::string body = BuildRequest(payload);
-        std::string raw  = Post(OBFUSCATE("/api/client/login"), body);
-        std::string dec  = DecryptResponse(raw);
+        const std::string endpoint = OBFUSCATE("/api/client/login");
+        std::string nonce;
+        std::string body = BuildRequest(payload, nonce);
+        std::string raw = Post(endpoint, body);
+        std::string dec = DecryptResponse(raw, endpoint, nonce);
 
         result.success    = JsonBool(dec, OBFUSCATE("success"));
         result.message    = JsonGet(dec, OBFUSCATE("message"));
@@ -500,8 +491,11 @@ LoginResult Client::Login(const std::string& license_key,
 NewsResult Client::GetNews() {
     NewsResult result;
     try {
-        std::string raw = Post(OBFUSCATE("/api/client/news"), BuildRequest("{}"));
-        std::string dec = DecryptResponse(raw);
+        const std::string endpoint = OBFUSCATE("/api/client/news");
+        std::string nonce;
+        std::string body = BuildRequest("{}", nonce);
+        std::string raw = Post(endpoint, body);
+        std::string dec = DecryptResponse(raw, endpoint, nonce);
 
         result.success = JsonBool(dec, OBFUSCATE("success"));
         result.message = JsonGet(dec, OBFUSCATE("message"));
@@ -539,8 +533,11 @@ SimpleResult Client::Heartbeat() {
         std::string payload = std::string("{") + JsonStr(OBFUSCATE("token"), token) + "," +
             JsonStr(OBFUSCATE("hwid"), GetHwid()) + "}";
         SecureZeroMemory(&token[0], token.size());
-        std::string raw = Post(OBFUSCATE("/api/client/heartbeat"), BuildRequest(payload));
-        std::string dec = DecryptResponse(raw);
+        const std::string endpoint = OBFUSCATE("/api/client/heartbeat");
+        std::string nonce;
+        std::string body = BuildRequest(payload, nonce);
+        std::string raw = Post(endpoint, body);
+        std::string dec = DecryptResponse(raw, endpoint, nonce);
         result.success  = JsonBool(dec, OBFUSCATE("success"));
         result.message  = JsonGet(dec, OBFUSCATE("message"));
         result.status   = MessageToStatus(result.message);
@@ -560,8 +557,11 @@ SimpleResult Client::Logout() {
         std::string payload = std::string("{") + JsonStr(OBFUSCATE("token"), token) + "," +
             JsonStr(OBFUSCATE("hwid"), GetHwid()) + "}";
         SecureZeroMemory(&token[0], token.size());
-        std::string raw = Post(OBFUSCATE("/api/client/logout"), BuildRequest(payload));
-        std::string dec = DecryptResponse(raw);
+        const std::string endpoint = OBFUSCATE("/api/client/logout");
+        std::string nonce;
+        std::string body = BuildRequest(payload, nonce);
+        std::string raw = Post(endpoint, body);
+        std::string dec = DecryptResponse(raw, endpoint, nonce);
         result.success  = JsonBool(dec, OBFUSCATE("success"));
         result.message  = JsonGet(dec, OBFUSCATE("message"));
         result.status   = MessageToStatus(result.message);
@@ -580,8 +580,11 @@ SimpleResult Client::ValidateSession() {
         std::string payload = std::string("{") + JsonStr(OBFUSCATE("token"), token) + "," +
             JsonStr(OBFUSCATE("hwid"), GetHwid()) + "}";
         SecureZeroMemory(&token[0], token.size());
-        std::string raw = Post(OBFUSCATE("/api/client/validate"), BuildRequest(payload));
-        std::string dec = DecryptResponse(raw);
+        const std::string endpoint = OBFUSCATE("/api/client/validate");
+        std::string nonce;
+        std::string body = BuildRequest(payload, nonce);
+        std::string raw = Post(endpoint, body);
+        std::string dec = DecryptResponse(raw, endpoint, nonce);
         result.success  = JsonBool(dec, OBFUSCATE("success"));
         result.message  = JsonGet(dec, OBFUSCATE("message"));
         result.status   = MessageToStatus(result.message);
@@ -603,25 +606,23 @@ std::vector<unsigned char> Client::DownloadFile(const std::string& name) {
             JsonStr(OBFUSCATE("hwid"), deviceHwid) + "," +
             JsonStr(OBFUSCATE("name"), name) + "}";
         
-        std::string raw = Post(OBFUSCATE("/api/client/download"), BuildRequest(payload));
-        std::string dec = DecryptResponse(raw);
+        const std::string endpoint = OBFUSCATE("/api/client/download");
+        std::string nonce;
+        std::string body = BuildRequest(payload, nonce);
+        std::string raw = Post(endpoint, body);
+        std::string dec = DecryptResponse(raw, endpoint, nonce);
 
         if (JsonBool(dec, OBFUSCATE("success"))) {
             std::string b64_data = JsonGet(dec, OBFUSCATE("data"));
             const std::string encryption = JsonGet(dec, OBFUSCATE("encryption"));
             const std::string fileId = JsonGet(dec, OBFUSCATE("file_id"));
-            if (!b64_data.empty() && encryption == OBFUSCATE("AES-256-GCM-SESSION-v1") &&
+            if (!b64_data.empty() && encryption == OBFUSCATE("TLS-SIGNED-SESSION-v2") &&
                 !fileId.empty()) {
-                std::string appSecret = GetAppSecret();
-                std::string sessionSecret = HmacSHA256Hex(
-                    appSecret, OBFUSCATE("download-v1|") + token + "|" + deviceHwid + "|" + fileId);
-                std::string plaintext = AES256CBCDecrypt(b64_data, sessionSecret);
-                std::vector<unsigned char> decoded(plaintext.begin(), plaintext.end());
+                std::vector<unsigned char> decoded = Base64Decode(b64_data);
+                std::string plaintext(decoded.begin(), decoded.end());
                 const std::string expectedHash = JsonGet(dec, OBFUSCATE("sha256"));
                 const bool validHash = !expectedHash.empty() && SHA256Hex(plaintext) == expectedHash;
                 if (!plaintext.empty()) SecureZeroMemory(plaintext.data(), plaintext.size());
-                if (!sessionSecret.empty()) SecureZeroMemory(sessionSecret.data(), sessionSecret.size());
-                if (!appSecret.empty()) SecureZeroMemory(appSecret.data(), appSecret.size());
                 if (!validHash) {
                     if (!decoded.empty()) SecureZeroMemory(decoded.data(), decoded.size());
                     SecureZeroMemory(token.data(), token.size());

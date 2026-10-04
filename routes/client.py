@@ -1,10 +1,13 @@
 import time
 import hashlib
+import base64
+import re
+from contextvars import ContextVar
 from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Request, Depends, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 import json
 import aiosqlite
 from slowapi import Limiter
@@ -32,6 +35,10 @@ MAX_LOGIN_STRIKES    = int(os.getenv("MAX_LOGIN_STRIKES", "5"))          # lock 
 NONCE_CACHE_SIZE     = int(os.getenv("NONCE_CACHE_SIZE", "10000"))      # max unique nonces to remember
 NONCE_TTL            = int(os.getenv("NONCE_TTL", "120"))                # seconds to keep a nonce (2× tolerance)
 REQUIRE_SESSION_HWID = os.getenv("REQUIRE_SESSION_HWID", "true").lower() == "true"
+ALLOW_LEGACY_PROTOCOL = os.getenv("ALLOW_LEGACY_PROTOCOL", "true").lower() == "true"
+_response_context: ContextVar[tuple[int, str, str]] = ContextVar(
+    "enauth_response_context", default=(1, "", "")
+)
 
 
 async def enforce_session_identity(db, payload: dict, sess, app_id: str, ip: str) -> bool:
@@ -64,10 +71,21 @@ async def _check_and_store_nonce(db: aiosqlite.Connection, nonce: str, now: floa
 
 class EncryptedRequest(BaseModel):
     app_id: str = Field(min_length=1, max_length=128)
-    data:   str = Field(min_length=1, max_length=6_000_000)
-    sig:    str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-fA-F]{64}$")
+    protocol: int = Field(default=1, ge=1, le=2)
+    data:   str | None = Field(default=None, max_length=6_000_000)
+    payload: str | None = Field(default=None, max_length=6_000_000)
+    sig:    str | None = Field(default=None, max_length=64)
     ts:     int
     nonce:  str = Field(min_length=32, max_length=32, pattern=r"^[0-9a-fA-F]{32}$")
+
+    @model_validator(mode="after")
+    def validate_protocol_envelope(self):
+        if self.protocol == 2:
+            if not self.payload:
+                raise ValueError("Protocol 2 requires payload")
+        elif not self.data or not self.sig or not re.fullmatch(r"[0-9a-fA-F]{64}", self.sig):
+            raise ValueError("Protocol 1 requires signed encrypted data")
+        return self
 
 
 def get_ip(request: Request) -> str:
@@ -128,22 +146,31 @@ async def check_fingerprint_consistency(db: aiosqlite.Connection, license_id: st
 
 def enc_resp(data: dict, secret: str, app_id: str = "") -> JSONResponse:
     ts  = int(time.time())
+    protocol, request_nonce, endpoint = _response_context.get()
+    if protocol == 2:
+        payload_bytes = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        payload_b64 = base64.b64encode(payload_bytes).decode("ascii")
+        valid_until = ts + TIMESTAMP_TOLERANCE
+        signed_message = f"v2|{app_id}|{endpoint}|{request_nonce}|{ts}|{valid_until}|{payload_b64}"
+        return JSONResponse({
+            "protocol": 2, "app_id": app_id, "endpoint": endpoint,
+            "request_nonce": request_nonce, "ts": ts, "valid_until": valid_until,
+            "payload": payload_b64, "server_sig": sign_response(signed_message),
+        })
     enc = encrypt_payload(data, secret)
     sig = compute_signature(secret, enc, ts, app_id)
     signed_message = f"{app_id}|{ts}|{enc}"
     return JSONResponse({"data": enc, "sig": sig, "server_sig": sign_response(signed_message), "ts": ts})
 
 
-async def parse_request(req: EncryptedRequest, db) -> tuple[dict, dict]:
+async def parse_request(req: EncryptedRequest, db, endpoint: str = "") -> tuple[dict, dict]:
     """
-    Full validation pipeline:
-      1. Timestamp within ±60 s
-      2. Nonce not seen before (replay protection)
-      3. App exists
-      4. HMAC-SHA256 signature valid (covers app_id + ts + data)
-      5. AES-256-GCM decrypt (authenticated — rejects tampered ciphertext)
+    Protocol 2 trusts TLS for request confidentiality/integrity, then applies
+    server-side authorization and persistent nonce replay protection. Protocol
+    1 retains the legacy HMAC/encrypted envelope only during migration.
     """
     now = time.time()
+    _response_context.set((req.protocol, req.nonce, endpoint))
 
     # 1. Timestamp check
     if abs(now - req.ts) > TIMESTAMP_TOLERANCE:
@@ -155,10 +182,30 @@ async def parse_request(req: EncryptedRequest, db) -> tuple[dict, dict]:
     if not app:
         raise HTTPException(401, "INVALID_APP")
 
+    if req.protocol != 2 and not ALLOW_LEGACY_PROTOCOL:
+        await log_action(db, "protocol_downgrade_rejected", app_id=req.app_id,
+                         details=f"endpoint={endpoint}; protocol={req.protocol}")
+        await db.commit()
+        raise HTTPException(426, "CLIENT_UPDATE_REQUIRED")
+
     secret = app["secret_key"]
 
-    # 3. Authenticate before touching the replay cache. This prevents invalid
-    # requests from filling the persistent nonce table.
+    # Protocol 2 deliberately has no shared client secret: a desktop secret is
+    # extractable and therefore cannot authenticate an untrusted client.
+    if req.protocol == 2:
+        try:
+            decoded = base64.b64decode(req.payload, validate=True)
+            if len(decoded) > 4 * 1024 * 1024:
+                raise ValueError("payload too large")
+            payload = json.loads(decoded.decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("payload must be an object")
+        except Exception:
+            raise HTTPException(400, "INVALID_PAYLOAD")
+        if not await _check_and_store_nonce(db, req.nonce, now):
+            raise HTTPException(400, "REPLAY_ATTACK")
+        return payload, dict(app)
+
     if not verify_signature(secret, req.data, req.ts, req.sig, req.app_id):
         raise HTTPException(401, "INVALID_SIGNATURE")
 
@@ -242,7 +289,7 @@ async def client_init(request: Request, req: EncryptedRequest,
                       db: aiosqlite.Connection = Depends(get_db)):
     ip = get_ip(request)
     try:
-        payload, app = await parse_request(req, db)
+        payload, app = await parse_request(req, db, request.url.path)
     except HTTPException as e:
         await log_action(db, "init_fail", app_id=req.app_id, ip=ip, details=e.detail)
         raise
@@ -269,7 +316,7 @@ async def client_news(request: Request, req: EncryptedRequest,
                       db: aiosqlite.Connection = Depends(get_db)):
     ip = get_ip(request)
     try:
-        payload, app = await parse_request(req, db)
+        payload, app = await parse_request(req, db, request.url.path)
     except HTTPException:
         raise
 
@@ -296,7 +343,7 @@ async def client_login(request: Request, req: EncryptedRequest,
                        db: aiosqlite.Connection = Depends(get_db)):
     ip = get_ip(request)
     try:
-        payload, app = await parse_request(req, db)
+        payload, app = await parse_request(req, db, request.url.path)
     except HTTPException as e:
         await log_action(db, "login_fail", app_id=req.app_id, ip=ip, details=e.detail)
         raise
@@ -491,7 +538,7 @@ async def client_heartbeat(request: Request, req: EncryptedRequest,
                            db: aiosqlite.Connection = Depends(get_db)):
     ip = get_ip(request)
     try:
-        payload, app = await parse_request(req, db)
+        payload, app = await parse_request(req, db, request.url.path)
     except HTTPException as e:
         await log_action(db, "heartbeat_fail", app_id=req.app_id, ip=ip, details=e.detail)
         raise
@@ -540,7 +587,7 @@ async def client_logout(request: Request, req: EncryptedRequest,
                         db: aiosqlite.Connection = Depends(get_db)):
     ip = get_ip(request)
     try:
-        payload, app = await parse_request(req, db)
+        payload, app = await parse_request(req, db, request.url.path)
     except HTTPException as e:
         await log_action(db, "logout_fail", app_id=req.app_id, ip=ip, details=e.detail)
         raise
@@ -571,7 +618,7 @@ async def client_validate(request: Request, req: EncryptedRequest,
                           db: aiosqlite.Connection = Depends(get_db)):
     ip = get_ip(request)
     try:
-        payload, app = await parse_request(req, db)
+        payload, app = await parse_request(req, db, request.url.path)
     except HTTPException:
         raise
 
@@ -600,7 +647,7 @@ async def client_download(request: Request, req: EncryptedRequest,
                           db: aiosqlite.Connection = Depends(get_db)):
     ip = get_ip(request)
     try:
-        payload, app = await parse_request(req, db)
+        payload, app = await parse_request(req, db, request.url.path)
     except HTTPException as e:
         await log_action(db, "download_fail", app_id=req.app_id, ip=ip, details=e.detail)
         raise
@@ -651,10 +698,13 @@ async def client_download(request: Request, req: EncryptedRequest,
         if downloads >= row["download_limit"]:
             return enc_resp({"success": False, "message": "DOWNLOAD_LIMIT_REACHED"}, secret, req.app_id)
 
-    download_secret = derive_session_download_secret(
-        secret, token, sess["hwid"], row["id"]
-    )
-    content_b64 = encrypt_bytes(row["content"], download_secret)
+    if req.protocol == 2:
+        content_b64 = base64.b64encode(row["content"]).decode("ascii")
+        content_encryption = "TLS-SIGNED-SESSION-v2"
+    else:
+        download_secret = derive_session_download_secret(secret, token, sess["hwid"], row["id"])
+        content_b64 = encrypt_bytes(row["content"], download_secret)
+        content_encryption = "AES-256-GCM-SESSION-v1"
     content_sha256 = row["file_sha256"] or hashlib.sha256(row["content"]).hexdigest()
     if not row["file_sha256"]:
         await db.execute("UPDATE app_files SET file_sha256=? WHERE id=?", (content_sha256, row["id"]))
@@ -671,7 +721,7 @@ async def client_download(request: Request, req: EncryptedRequest,
         "name":    name,
         "file_id": row["id"],
         "data":    content_b64,
-        "encryption": "AES-256-GCM-SESSION-v1",
+        "encryption": content_encryption,
         "sha256":  content_sha256,
         "version": row["release_version"],
         "channel": row["channel"],

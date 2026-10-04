@@ -41,11 +41,10 @@ const char* StatusName(enauth::Status status) {
 }  // namespace
 
 int main() {
-    // Compile-time application configuration. Replace the two placeholders
+    // Compile-time application configuration. Replace the placeholders
     // below with the values from your EnAuth admin panel before building.
     const std::string serverUrl = OBFUSCATE("https://auth.olsoftwares.com");
     const std::string appId = OBFUSCATE("REPLACE_WITH_APPLICATION_ID");
-    std::string appSecret = OBFUSCATE("REPLACE_WITH_APPLICATION_SECRET");
     const std::string appVersion = OBFUSCATE("1.0.0");
     const std::string responsePublicKey = OBFUSCATE("REPLACE_WITH_RESPONSE_SIGNING_PUBLIC_KEY");
     const std::string productId = OBFUSCATE("");
@@ -54,15 +53,13 @@ int main() {
     constexpr int heartbeatSeconds = 30;
 
     if (appId == "REPLACE_WITH_APPLICATION_ID" ||
-        appSecret == "REPLACE_WITH_APPLICATION_SECRET" ||
         responsePublicKey == "REPLACE_WITH_RESPONSE_SIGNING_PUBLIC_KEY") {
-        std::cerr << "Configure the application ID, secret, and response-signing public key in main.cpp before building.\n";
+        std::cerr << "Configure the application ID and response-signing public key in main.cpp before building.\n";
         return 2;
     }
 
     if (productId.empty() != productLevel.empty()) {
         std::cerr << "Set both ENAUTH_PRODUCT_ID and ENAUTH_PRODUCT_LEVEL, or neither.\n";
-        ClearSensitive(appSecret);
         return 2;
     }
 
@@ -72,12 +69,10 @@ int main() {
 
     if (licenseKey.empty()) {
         std::cerr << "A license key is required.\n";
-        ClearSensitive(appSecret);
         return 2;
     }
 
-    enauth::Client client(serverUrl, appId, appSecret, appVersion, responsePublicKey);
-    ClearSensitive(appSecret);
+    enauth::Client client(serverUrl, appId, appVersion, responsePublicKey);
 
     const auto init = client.Init();
     if (!init.success) {

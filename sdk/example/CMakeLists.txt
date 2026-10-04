@@ -7,6 +7,17 @@ option(ENAUTH_ENABLE_ANTI_DEBUG
 option(ENAUTH_ENABLE_SPECTRE
     "Compile with MSVC Spectre mitigations (requires the optional Spectre libraries)"
     ON)
+option(ENAUTH_ALLOW_PLACEHOLDERS
+    "Allow configuring before the example credentials are replaced"
+    OFF)
+
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp" ENAUTH_EXAMPLE_SOURCE)
+if(NOT ENAUTH_ALLOW_PLACEHOLDERS AND
+   ENAUTH_EXAMPLE_SOURCE MATCHES "REPLACE_WITH_(APPLICATION_ID|RESPONSE_SIGNING_PUBLIC_KEY)")
+    message(FATAL_ERROR
+        "Replace the EnAuth application ID and response signing public key in main.cpp. "
+        "Use -DENAUTH_ALLOW_PLACEHOLDERS=ON only for an intentional non-functional build.")
+endif()
 
 if(NOT WIN32)
     message(FATAL_ERROR "The EnAuth C++ SDK currently supports Windows only.")

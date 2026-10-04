@@ -1,4 +1,5 @@
 import importlib
+import base64
 import hashlib
 import json
 import logging
@@ -11,6 +12,10 @@ import unittest
 from pathlib import Path
 
 import aiosqlite
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 
 from utils.crypto import (
     compute_signature, decrypt_bytes, decrypt_payload, derive_session_download_secret,
@@ -22,6 +27,7 @@ MODULES_TO_RESET = [
     "database",
     "routes.client",
     "utils.logger",
+    "utils.response_signing",
 ]
 
 
@@ -31,9 +37,11 @@ class _FakeClient:
 
 
 class _FakeRequest:
-    def __init__(self, host: str = "127.0.0.1", headers: dict | None = None):
+    def __init__(self, host: str = "127.0.0.1", headers: dict | None = None,
+                 path: str = "/api/client/test"):
         self.client = _FakeClient(host)
         self.headers = headers or {}
+        self.url = type("FakeUrl", (), {"path": path})()
 
 
 class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
@@ -55,13 +63,16 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
         os.environ["NONCE_CACHE_SIZE"] = "10000"
         os.environ["NONCE_TTL"] = "120"
         os.environ["REQUIRE_SESSION_HWID"] = "false"
+        os.environ["ALLOW_LEGACY_PROTOCOL"] = "true"
         os.environ["LICENSE_KEY_PEPPER"] = "test-license-pepper-that-is-long-enough"
+        os.environ["RESPONSE_SIGNING_KEY_PATH"] = str(self.workdir / "response-signing-key.pem")
 
         for name in MODULES_TO_RESET:
             sys.modules.pop(name, None)
 
         self.database = importlib.import_module("database")
         self.client = importlib.import_module("routes.client")
+        self.response_signing = importlib.import_module("utils.response_signing")
         await self.database.init_db()
 
     async def asyncTearDown(self):
@@ -120,6 +131,36 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
     def _decrypt_response(self, response, secret: str):
         body = json.loads(response.body.decode("utf-8"))
         return decrypt_payload(body["data"], secret)
+
+    def _v2_request(self, app_id: str, payload: dict, nonce: str | None = None):
+        encoded = base64.b64encode(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        ).decode("ascii")
+        return self.client.EncryptedRequest(
+            protocol=2, app_id=app_id, payload=encoded,
+            ts=int(time.time()), nonce=nonce or uuid.uuid4().hex,
+        )
+
+    def _verify_v2_response(self, response, endpoint: str, nonce: str):
+        body = json.loads(response.body.decode("utf-8"))
+        self.assertEqual(body["protocol"], 2)
+        self.assertEqual(body["endpoint"], endpoint)
+        self.assertEqual(body["request_nonce"], nonce)
+        message = (
+            f'v2|{body["app_id"]}|{endpoint}|{nonce}|{body["ts"]}|'
+            f'{body["valid_until"]}|{body["payload"]}'
+        )
+        raw_key = bytes.fromhex(self.response_signing.response_public_key_hex())
+        public_key = ec.EllipticCurvePublicNumbers(
+            int.from_bytes(raw_key[:32], "big"), int.from_bytes(raw_key[32:], "big"),
+            ec.SECP256R1(),
+        ).public_key()
+        raw_sig = base64.b64decode(body["server_sig"], validate=True)
+        der_sig = encode_dss_signature(
+            int.from_bytes(raw_sig[:32], "big"), int.from_bytes(raw_sig[32:], "big")
+        )
+        public_key.verify(der_sig, message.encode("utf-8"), ec.ECDSA(hashes.SHA256()))
+        return json.loads(base64.b64decode(body["payload"], validate=True))
 
     async def test_login_validate_heartbeat_and_download(self):
         seeded = await self._seed_app()
@@ -350,6 +391,91 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
             })
             response = await self.client.client_login.__wrapped__(fake_request, req, db)
             self.assertEqual(self._decrypt_response(response, seeded["secret"])["message"], "ENTITLEMENT_PAUSED")
+
+    async def test_protocol_v2_login_validate_and_download_without_app_secret(self):
+        seeded = await self._seed_app()
+        login_path = "/api/client/login"
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            login_req = self._v2_request(seeded["app_id"], {
+                "version": "1.0.0", "license_key": seeded["license_key"], "hwid": "d" * 64,
+            })
+            login_resp = await self.client.client_login.__wrapped__(
+                _FakeRequest(path=login_path), login_req, db
+            )
+            login = self._verify_v2_response(login_resp, login_path, login_req.nonce)
+            self.assertTrue(login["success"])
+
+            validate_path = "/api/client/validate"
+            validate_req = self._v2_request(seeded["app_id"], {
+                "token": login["token"], "hwid": "d" * 64,
+            })
+            validate_resp = await self.client.client_validate.__wrapped__(
+                _FakeRequest(path=validate_path), validate_req, db
+            )
+            self.assertTrue(self._verify_v2_response(
+                validate_resp, validate_path, validate_req.nonce
+            )["success"])
+
+            download_path = "/api/client/download"
+            download_req = self._v2_request(seeded["app_id"], {
+                "token": login["token"], "hwid": "d" * 64, "name": "payload.bin",
+            })
+            download_resp = await self.client.client_download.__wrapped__(
+                _FakeRequest(path=download_path), download_req, db
+            )
+            download = self._verify_v2_response(download_resp, download_path, download_req.nonce)
+            self.assertEqual(download["encryption"], "TLS-SIGNED-SESSION-v2")
+            self.assertEqual(base64.b64decode(download["data"], validate=True), b"hello world")
+
+    async def test_protocol_v2_replay_and_fake_license_are_rejected(self):
+        seeded = await self._seed_app()
+        path = "/api/client/login"
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            fake_req = self._v2_request(seeded["app_id"], {
+                "version": "1.0.0", "license_key": "FAKE-KEY", "hwid": "e" * 64,
+            })
+            fake_resp = await self.client.client_login.__wrapped__(_FakeRequest(path=path), fake_req, db)
+            self.assertEqual(
+                self._verify_v2_response(fake_resp, path, fake_req.nonce)["message"], "INVALID_KEY"
+            )
+            with self.assertRaises(Exception) as replay:
+                await self.client.parse_request(fake_req, db, path)
+            self.assertIn("REPLAY_ATTACK", str(replay.exception))
+
+    async def test_protocol_v2_response_tampering_breaks_signature(self):
+        seeded = await self._seed_app()
+        path = "/api/client/init"
+        req = self._v2_request(seeded["app_id"], {"version": "1.0.0"})
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            response = await self.client.client_init.__wrapped__(_FakeRequest(path=path), req, db)
+        body = json.loads(response.body.decode("utf-8"))
+        decoded = json.loads(base64.b64decode(body["payload"]))
+        decoded["success"] = not decoded["success"]
+        body["payload"] = base64.b64encode(
+            json.dumps(decoded, separators=(",", ":")).encode()
+        ).decode()
+        response.body = json.dumps(body).encode()
+        with self.assertRaises(InvalidSignature):
+            self._verify_v2_response(response, path, req.nonce)
+
+    async def test_legacy_protocol_can_be_disabled_after_migration(self):
+        seeded = await self._seed_app()
+        req = self._encrypted_request(
+            seeded["app_id"], seeded["secret"], {"version": "1.0.0"}
+        )
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            previous = self.client.ALLOW_LEGACY_PROTOCOL
+            self.client.ALLOW_LEGACY_PROTOCOL = False
+            try:
+                with self.assertRaises(Exception) as rejected:
+                    await self.client.parse_request(req, db, "/api/client/init")
+                self.assertIn("CLIENT_UPDATE_REQUIRED", str(rejected.exception))
+            finally:
+                self.client.ALLOW_LEGACY_PROTOCOL = previous
 
 
 if __name__ == "__main__":

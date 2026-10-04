@@ -38,7 +38,6 @@ winhttp.lib bcrypt.lib crypt32.lib
 enauth::Client client(
     "https://your-server.com",  // Server URL
     "your-app-id",              // Application ID from admin panel
-    "your-app-secret",          // 64-char hex secret from admin panel
     "1.0.0",                   // Application version
     "your-128-char-response-signing-public-key"
 );
@@ -137,15 +136,13 @@ The SDK includes:
 - Strict operating-system TLS certificate validation
 - HTTPS enforcement for every non-local server
 - Network timeouts and a 4 MiB response limit
-- AES-256-GCM application-layer message protection
-- Session-bound AES-256-GCM file envelopes derived from the session token,
-  device HWID, application secret, and file identity. A payload captured from
-  one session cannot be decrypted with a different session context.
-- HMAC-SHA256 signature verification
+- TLS transport protection with server-side authorization on every protected operation
+- Signed payload delivery bound to the exact application, endpoint, request nonce,
+  timestamp, and short absolute response expiry
 - ECDSA P-256 server response verification. Only the public key is embedded in
   the SDK; the signing private key stays on the server.
 - Cryptographically random per-request replay nonces
-- Fail-closed server response HMAC and timestamp validation
+- Fail-closed asymmetric server signature, request-context, and expiry validation
 - Release builds enable CFG, CET shadow-stack compatibility, Spectre mitigations,
   ASLR, DEP, stack checks, and link-time optimization when built with MSVC
 - Post-login requests include the device HWID so copied session tokens can be
@@ -160,9 +157,9 @@ The SDK includes:
 - Local anti-debugging and integrity checks enabled by default in the example build
 - HWID collection and validation
 
-Application secrets compiled into a desktop application can be recovered by a
-determined attacker. Do not treat the SDK as a place to keep a master secret,
-and do not rely on a local license check to protect server-side privileges.
+Protocol v2 contains no application secret. The SDK carries only the public
+response-verification key. Do not rely on a local license check to protect
+server-side privileges.
 
 ## HWID Collection
 
@@ -217,8 +214,7 @@ The example is preconfigured with the obfuscated production endpoint
 `https://auth.olsoftwares.com`. Change that literal in `example/main.cpp` when
 building for a different EnAuth deployment.
 
-Before building, replace `REPLACE_WITH_APPLICATION_ID`,
-`REPLACE_WITH_APPLICATION_SECRET`, and
+Before building, replace `REPLACE_WITH_APPLICATION_ID` and
 `REPLACE_WITH_RESPONSE_SIGNING_PUBLIC_KEY` in `example/main.cpp`. Retrieve the
 public signing key from the owner-only Discord integration page or
 `GET /api/admin/response-signing-public-key`. The server creates its private
@@ -230,10 +226,23 @@ does not read configuration from environment variables.
 
 The example links every SDK implementation file. Its Release configuration
 enables the SDK anti-debug path, control-flow guard, stack checks, ASLR, DEP,
-and high-entropy ASLR. XOR-protected in-memory credentials, HWID collection,
-AES-256-GCM encryption, PBKDF2 derivation, HMAC signing, TLS validation, replay
-protection, and encrypted session storage are performed automatically inside
+and high-entropy ASLR. Layered in-memory field protection, HWID collection,
+strict TLS validation, persistent replay protection, asymmetric response
+verification, and encrypted session storage are performed automatically inside
 the SDK rather than called separately by application code.
+
+### Protocol 2 migration
+
+1. Deploy the server with `ALLOW_LEGACY_PROTOCOL=true`.
+2. Copy the response-signing public key into each new SDK build and distribute it.
+3. Require the new client version for every application.
+4. Set `ALLOW_LEGACY_PROTOCOL=false` and restart the server.
+5. Rotate the old application secret after all legacy clients are retired.
+
+New protocol 2 clients never receive or embed the application secret. TLS protects
+requests in transit; licenses and short-lived, app-bound sessions remain the
+actual authorization credentials. Every response is signed and bound to its app,
+endpoint, request nonce, timestamp, and expiry.
 
 Run `bootstrap.ps1 -SkipInstall` when dependency installation is managed by
 your organization and the script should fail instead of installing tools.

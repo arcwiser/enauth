@@ -90,13 +90,11 @@ public:
     /**
      * @param server_url   Base URL of the EnAuth server, e.g. "https://auth.example.com"
      * @param app_id       UUID of your application (from admin panel)
-     * @param app_secret   64-char hex secret of your application
      * @param version      Version string that must match the server-side setting
      * @param response_public_key_hex ECDSA P-256 public key (X || Y, 128 hex chars)
      */
     Client(const std::string& server_url,
            const std::string& app_id,
-           const std::string& app_secret,
            const std::string& version,
            const std::string& response_public_key_hex);
 
@@ -167,7 +165,6 @@ private:
 
     std::vector<unsigned char> m_enc_server_url;
     std::vector<unsigned char> m_enc_app_id;
-    std::vector<unsigned char> m_enc_app_secret;
     std::vector<unsigned char> m_enc_version;
     std::vector<unsigned char> m_enc_response_public_key;
 
@@ -178,7 +175,6 @@ private:
 
     std::string GetServerUrl()  const;
     std::string GetAppId()      const;
-    std::string GetAppSecret()  const;
     std::string GetVersion()    const;
     std::string GetResponsePublicKey() const;
 
@@ -196,9 +192,11 @@ private:
     std::function<void()>  m_hb_callback;
 
     // Internal helpers
-    std::string  BuildRequest(const std::string& json_payload);
+    std::string  BuildRequest(const std::string& json_payload, std::string& request_nonce);
     std::string  Post(const std::string& endpoint, const std::string& body);
-    std::string  DecryptResponse(const std::string& json_response);
+    std::string  DecryptResponse(const std::string& json_response,
+                                 const std::string& endpoint,
+                                 const std::string& request_nonce);
     SimpleResult ParseSimple(const std::string& decrypted_json);
     Status       MessageToStatus(const std::string& msg);
 

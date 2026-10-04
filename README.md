@@ -430,8 +430,8 @@ Basic usage:
 enauth::Client client(
     "https://your-server.com",
     "your-app-id",
-    "your-app-secret",
-    "1.0.0"
+    "1.0.0",
+    "YOUR_RESPONSE_SIGNING_PUBLIC_KEY"
 );
 
 auto result = client.Init();
@@ -461,10 +461,9 @@ The system uses SQLite with the following main tables:
 - License keys are returned only when created and stored as server-peppered hashes
 - Dashboard sessions use `HttpOnly`, `SameSite=Strict` cookies rather than browser storage
 - Replay nonces are stored in SQLite so protection survives restarts and multiple workers
-- The application-layer AES/HMAC envelope is defense in depth, not a replacement for TLS
-- Application secrets embedded in a desktop executable must be treated as extractable
+- Protocol 2 SDK builds contain no application secret; TLS protects client requests
+- Every server response is asymmetrically signed and bound to the exact request context
 - A client-side license check can be patched; keep high-value authorization decisions server-side
-- HMAC signatures prevent request tampering
 - Nonce-based replay protection
 - Rate limiting on all endpoints
 - HWID validation requires SHA-256/512 hashes
