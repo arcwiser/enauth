@@ -50,6 +50,8 @@ int main() {
     const std::string productId = OBFUSCATE("");
     const std::string productLevel = OBFUSCATE("");
     const std::string downloadName = OBFUSCATE("");
+    const std::string loaderName = OBFUSCATE("loader.exe");
+    const std::string loaderVersion = OBFUSCATE("1.0.0");
     constexpr int heartbeatSeconds = 30;
 
     if (appId == "REPLACE_WITH_APPLICATION_ID" ||
@@ -102,6 +104,12 @@ int main() {
                   << "): " << validation.message << '\n';
         client.Logout();
         return 1;
+    }
+
+    if (client.AutoUpdateLoader(loaderName, loaderVersion)) {
+        std::cout << "A verified loader update was staged. Restarting now.\n";
+        client.Logout();
+        return 0;
     }
 
     std::cout << "Authenticated and session verified successfully.\n";

@@ -286,6 +286,14 @@ const API = {
       return data;
     });
   },
+  getLoaders: (appId = "") => api("GET", `/api/admin/loaders${appId ? `?app_id=${encodeURIComponent(appId)}` : ""}`),
+  uploadLoader: (formData) => fetch(BASE + "/api/admin/loaders", {
+    method: "POST", credentials: "same-origin", body: formData,
+  }).then(async res => {
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "Loader upload failed");
+    return data;
+  }),
   deleteFile: (id) => api("DELETE", `/api/admin/files/${id}`),
   updateFileVisibility: (id, b) => api("PUT", `/api/admin/files/${id}/visibility`, b),
   revokeFile: (id, reason, block_client_version = true) => api("POST", `/api/admin/files/${id}/revoke`, { reason, block_client_version }),
@@ -399,7 +407,7 @@ function buildSidebar(activePage) {
   const user = getUser();
   const groups = [
     ["Workspace", [["dashboard", "Overview", "grid"], ["apps", "Applications", "box"], ["products", "Product levels", "layers"], ["licenses", "Licenses", "key"]]],
-    ["Distribution", [["files", "Files", "file"], ["news", "Announcements", "message"], ["panels", "Customer panels", "window"], ["resellers", "Resellers", "users"], ["discord", "Discord bot", "message", true]]],
+    ["Distribution", [["loaders", "Loader releases", "box"], ["files", "Files", "file"], ["news", "Announcements", "message"], ["panels", "Customer panels", "window"], ["resellers", "Resellers", "users"], ["discord", "Discord bot", "message", true]]],
     ["Security", [["sessions", "Active sessions", "pulse"], ["bans", "Blocklist", "shield"], ["logs", "Event logs", "list"], ["audit", "Audit trail", "search"]]],
     ["Administration", [["users", "Team members", "users", true], ["api-keys", "API keys", "key"], ["variables", "Variables", "code", true], ["backups", "Backups", "shield", true], ["settings", "Settings", "settings"]]]
   ];

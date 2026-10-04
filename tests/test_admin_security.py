@@ -1,4 +1,5 @@
 import importlib
+import io
 import os
 import shutil
 import sys
@@ -10,7 +11,7 @@ import logging
 import aiosqlite
 import pyotp
 from fastapi import HTTPException
-from fastapi import Response
+from fastapi import Response, UploadFile
 
 from utils.crypto import hash_password, encrypt_license_key, decrypt_license_key
 
@@ -306,6 +307,30 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result["token"])
             async with db.execute("SELECT 1 FROM reseller_sessions WHERE token=?", (result["token"],)) as cur:
                 self.assertIsNotNone(await cur.fetchone())
+
+    async def test_loader_publish_archives_previous_release(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("INSERT INTO applications(id,name,secret_key) VALUES(?,?,?)", ("app-1", "App", "z" * 64))
+            await db.commit()
+            caller = {"id": "owner-1", "username": "owner", "role": "owner", "_source": "admin_users"}
+            first = await self.admin.upload_loader_release(
+                app_id="app-1", version="1.0.0", logical_name="loader.exe",
+                release_notes="first", file=UploadFile(filename="loader.exe", file=io.BytesIO(b"MZfirst")),
+                user=caller, db=db,
+            )
+            second = await self.admin.upload_loader_release(
+                app_id="app-1", version="1.1.0", logical_name="loader.exe",
+                release_notes="second", file=UploadFile(filename="loader.exe", file=io.BytesIO(b"MZsecond")),
+                user=caller, db=db,
+            )
+            self.assertEqual(second["replaced_file_id"], first["id"])
+            async with db.execute(
+                "SELECT release_version,is_active,is_archived FROM app_files ORDER BY release_version"
+            ) as cur:
+                rows = await cur.fetchall()
+            self.assertEqual([(r["release_version"], r["is_active"], r["is_archived"]) for r in rows],
+                             [("1.0.0", 0, 1), ("1.1.0", 1, 0)])
 
 
 if __name__ == "__main__":

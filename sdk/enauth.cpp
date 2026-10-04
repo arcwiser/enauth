@@ -676,6 +676,103 @@ std::vector<unsigned char> Client::DownloadFile(const std::string& name) {
     return {};
 }
 
+bool Client::AutoUpdateLoader(const std::string& name, const std::string& currentVersion) {
+    if (!m_logged_in || name.empty() || currentVersion.empty()) return false;
+    try {
+        std::string token = GetSessionToken();
+        std::string hwid = GetHwid();
+        std::string payload = std::string("{") +
+            JsonStr(OBFUSCATE("token"), token) + "," +
+            JsonStr(OBFUSCATE("hwid"), hwid) + "," +
+            JsonStr(OBFUSCATE("name"), name) + "}";
+        const std::string endpoint = OBFUSCATE("/api/client/download-ticket");
+        std::string nonce;
+        std::string response = DecryptResponse(Post(endpoint, BuildRequest(payload, nonce)), endpoint, nonce);
+        std::string rotatedToken = JsonGet(response, OBFUSCATE("token"));
+        std::string latestVersion = JsonGet(response, OBFUSCATE("version"));
+        std::string fileType = JsonGet(response, OBFUSCATE("file_type"));
+        if (!rotatedToken.empty()) EncryptStore(m_enc_token, rotatedToken);
+        SecureZeroMemory(token.data(), token.size());
+        SecureZeroMemory(hwid.data(), hwid.size());
+        if (!JsonBool(response, OBFUSCATE("success")) || fileType != OBFUSCATE("loader") ||
+            latestVersion.empty() || latestVersion == currentVersion) return false;
+
+        std::vector<unsigned char> update = DownloadFile(name);
+        if (update.size() < 2 || update[0] != 'M' || update[1] != 'Z') {
+            if (!update.empty()) SecureZeroMemory(update.data(), update.size());
+            return false;
+        }
+        std::vector<wchar_t> pathBuffer(32768);
+        DWORD pathLength = GetModuleFileNameW(nullptr, pathBuffer.data(), static_cast<DWORD>(pathBuffer.size()));
+        if (!pathLength || pathLength >= pathBuffer.size()) {
+            SecureZeroMemory(update.data(), update.size());
+            return false;
+        }
+        std::wstring target(pathBuffer.data(), pathLength);
+        std::wstring staged = target + L".update";
+        std::wstring script = target + L".update.cmd";
+        HANDLE stagedFile = CreateFileW(staged.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                        FILE_ATTRIBUTE_HIDDEN, nullptr);
+        if (stagedFile == INVALID_HANDLE_VALUE) {
+            SecureZeroMemory(update.data(), update.size());
+            return false;
+        }
+        DWORD written = 0;
+        const bool wroteUpdate = WriteFile(stagedFile, update.data(), static_cast<DWORD>(update.size()),
+                                           &written, nullptr) && written == update.size();
+        FlushFileBuffers(stagedFile);
+        CloseHandle(stagedFile);
+        SecureZeroMemory(update.data(), update.size());
+        if (!wroteUpdate) {
+            DeleteFileW(staged.c_str());
+            return false;
+        }
+        auto batchEscape = [](std::string value) {
+            size_t pos = 0;
+            while ((pos = value.find('%', pos)) != std::string::npos) { value.replace(pos, 1, "%%"); pos += 2; }
+            return value;
+        };
+        const std::string targetUtf8 = batchEscape(WideToUtf8(target.c_str()));
+        const std::string stagedUtf8 = batchEscape(WideToUtf8(staged.c_str()));
+        std::string commands = "@echo off\r\n:wait\r\ntasklist /FI \"PID eq " +
+            std::to_string(GetCurrentProcessId()) + "\" | find \"" +
+            std::to_string(GetCurrentProcessId()) + "\" >nul\r\nif not errorlevel 1 (timeout /t 1 /nobreak >nul & goto wait)\r\n" +
+            "move /Y \"" + stagedUtf8 + "\" \"" + targetUtf8 + "\" >nul\r\n" +
+            "start \"\" \"" + targetUtf8 + "\"\r\ndel \"%~f0\"\r\n";
+        HANDLE scriptFile = CreateFileW(script.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                        FILE_ATTRIBUTE_HIDDEN, nullptr);
+        if (scriptFile == INVALID_HANDLE_VALUE) {
+            DeleteFileW(staged.c_str());
+            return false;
+        }
+        written = 0;
+        const bool wroteScript = WriteFile(scriptFile, commands.data(), static_cast<DWORD>(commands.size()),
+                                           &written, nullptr) && written == commands.size();
+        CloseHandle(scriptFile);
+        if (!wroteScript) {
+            DeleteFileW(staged.c_str());
+            DeleteFileW(script.c_str());
+            return false;
+        }
+        std::wstring commandLine = L"cmd.exe /D /C \"\"" + script + L"\"\"";
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION process{};
+        const BOOL launched = CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, FALSE,
+                                             CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process);
+        if (!launched) {
+            DeleteFileW(staged.c_str());
+            DeleteFileW(script.c_str());
+            return false;
+        }
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 void Client::StartHeartbeatThread(int interval_sec, std::function<void()> on_expire) {
     m_hb_callback = on_expire;
     m_hb_running  = true;

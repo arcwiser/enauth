@@ -161,6 +161,18 @@ Protocol v2 contains no application secret. The SDK carries only the public
 response-verification key. Do not rely on a local license check to protect
 server-side privileges.
 
+Loader builds can opt into verified automatic updates after authentication:
+
+```cpp
+if (client.AutoUpdateLoader("loader.exe", "1.2.0")) {
+    return 0; // exit promptly; the staged updater replaces and restarts this executable
+}
+```
+
+The loader release is delivered through a one-use download ticket, the signed
+response is verified, and its SHA-256 digest is checked before replacement.
+The running process is never overwritten in place.
+
 ## HWID Collection
 
 The SDK automatically collects hardware ID using:

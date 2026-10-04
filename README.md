@@ -401,8 +401,16 @@ Environment variables (see `.env.example`):
 - `SESSION_DURATION`: Client session duration in seconds (default: 86400)
 - `SESSION_TOKEN_SECONDS`: Protocol-v2 bearer-token lifetime before rotation (default: 300)
 - `DOWNLOAD_TICKET_SECONDS`: One-use SDK download-ticket lifetime (default: 60)
+- `MAX_BUILD_BYTES`: Maximum uploaded build/loader size, capped at 100 MiB
 - `AUTO_BACKUP_HOURS`: Verified scheduled-backup interval; `0` disables it
 - `BACKUP_ENCRYPTION_KEY`: Encrypts signing-key copies stored beside scheduled database backups
+
+Loader releases are managed from **Loader releases** in the panel. Publish each
+new version under the same logical filename (for example `loader.exe`); EnAuth
+archives the previous release automatically. SDK applications can call
+`AutoUpdateLoader("loader.exe", "1.2.0")` after login and validation. A `true`
+result means the signed and SHA-256-verified update was staged and the process
+should exit immediately so the updater can replace and restart it.
 - `MAX_LOGIN_STRIKES`: Maximum failed login attempts before lockout (default: 5)
 - `NONCE_CACHE_SIZE`: Maximum nonces to remember for replay protection (default: 10000)
 - `NONCE_TTL`: Nonce time-to-live in seconds (default: 120)

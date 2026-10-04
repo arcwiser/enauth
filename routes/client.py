@@ -751,7 +751,8 @@ async def client_download_ticket(request: Request, req: EncryptedRequest,
     await db.commit()
     return enc_resp({"success": True, "message": "OK", "ticket": ticket,
                      "ticket_expires_at": ticket_expiry, "token": new_token,
-                     "file_id": row["id"], "sha256": row["file_sha256"]}, secret, req.app_id)
+                     "file_id": row["id"], "sha256": row["file_sha256"],
+                     "version": row["release_version"], "file_type": row["file_type"]}, secret, req.app_id)
 
 
 # ─── /download ───────────────────────────────────────────────────────────────

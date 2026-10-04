@@ -128,6 +128,12 @@ public:
      */
     std::vector<unsigned char> DownloadFile(const std::string& name);
 
+    /**
+     * Check the current loader release and stage a verified self-update when newer.
+     * Returns true only when an updater was launched; the caller must exit promptly.
+     */
+    bool AutoUpdateLoader(const std::string& name, const std::string& current_version);
+
     /** Fetch public news items from the server. No login required after Init(). */
     NewsResult GetNews();
 

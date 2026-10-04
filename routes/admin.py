@@ -3341,6 +3341,77 @@ async def bulk_delete_news(body: BulkIdsBody, user=Depends(require_admin), db: a
 
 # ─── App Files ───────────────────────────────────────────────────────────────
 
+@router.get("/loaders")
+async def list_loader_releases(app_id: Optional[str] = None, user=Depends(require_admin),
+                               db: aiosqlite.Connection = Depends(get_db)):
+    owner_id = auth_owner_id(user)
+    sql = """SELECT f.id,f.app_id,f.name,f.release_version,f.file_size,f.file_sha256,
+                    f.release_notes,f.is_active,f.is_archived,f.is_revoked,f.created_at,
+                    a.name AS app_name
+             FROM app_files f JOIN applications a ON a.id=f.app_id
+             WHERE f.file_type='loader'"""
+    args = []
+    if owner_id:
+        sql += " AND a.owner_user_id=?"; args.append(owner_id)
+    if app_id:
+        sql += " AND f.app_id=?"; args.append(app_id)
+    sql += " ORDER BY f.created_at DESC LIMIT 200"
+    async with db.execute(sql, args) as cur:
+        return rows_to_list(await cur.fetchall())
+
+
+@router.post("/loaders")
+async def upload_loader_release(app_id: str = Form(...), version: str = Form(...),
+                                logical_name: str = Form("loader.exe"),
+                                release_notes: Optional[str] = Form(None),
+                                file: UploadFile = File(...), user=Depends(require_admin),
+                                db: aiosqlite.Connection = Depends(get_db)):
+    owner_id = auth_owner_id(user)
+    async with db.execute(
+        "SELECT id FROM applications WHERE id=?" + (" AND owner_user_id=?" if owner_id else ""),
+        (app_id, owner_id) if owner_id else (app_id,),
+    ) as cur:
+        if not await cur.fetchone():
+            raise HTTPException(404, "Application not found")
+    safe_name = Path(logical_name).name.strip()
+    if not safe_name or safe_name != logical_name.strip() or not safe_name.lower().endswith(".exe"):
+        raise HTTPException(400, "Loader name must be a plain .exe filename")
+    clean_version = version.strip()
+    if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._+\-]{0,63}", clean_version):
+        raise HTTPException(400, "Invalid loader version")
+    max_bytes = 100 * 1024 * 1024
+    content = await file.read(max_bytes + 1)
+    if len(content) > max_bytes:
+        raise HTTPException(413, "Loader exceeds the 100 MB upload limit")
+    if not content.startswith(b"MZ"):
+        raise HTTPException(400, "Loader must be a Windows executable")
+    async with db.execute(
+        "SELECT id FROM app_files WHERE app_id=? AND name=? AND file_type='loader' AND is_active=1",
+        (app_id, safe_name),
+    ) as cur:
+        previous = await cur.fetchone()
+    if previous:
+        await db.execute(
+            "UPDATE app_files SET name=?,is_active=0,is_archived=1 WHERE id=?",
+            (f"{safe_name}.archived.{previous['id'][:8]}", previous["id"]),
+        )
+    file_id = generate_uid()
+    digest = hashlib.sha256(content).hexdigest()
+    await db.execute(
+        """INSERT INTO app_files
+           (id,app_id,name,content,file_sha256,is_secret,portal_visible,release_version,
+            channel,file_type,platform,architecture,release_notes,mime_type,file_size,
+            is_active,is_archived,is_mandatory,replaced_file_id)
+           VALUES(?,?,?,?,?,0,0,?,'stable','loader','windows','x64',?,'application/vnd.microsoft.portable-executable',?,1,0,1,?)""",
+        (file_id, app_id, safe_name, content, digest, clean_version,
+         (release_notes or "").strip() or None, len(content), previous["id"] if previous else None),
+    )
+    await log_action(db, "loader_release_published", app_id=app_id,
+                     details=f"name={safe_name}; version={clean_version}; sha256={digest}")
+    await db.commit()
+    return {"id": file_id, "name": safe_name, "version": clean_version, "sha256": digest,
+            "size": len(content), "replaced_file_id": previous["id"] if previous else None}
+
 @router.get("/files")
 async def list_files(app_id: Optional[str] = None, search: Optional[str] = None,
                      limit: int = 100, offset: int = 0,
@@ -3398,9 +3469,9 @@ async def upload_file(
             if not await cur.fetchone():
                 raise HTTPException(404, "Product not found for this app")
     
-    content = await file.read()
-    if len(content) > 5 * 1024 * 1024: # 5MB limit
-        raise HTTPException(400, "File too large (max 5MB)")
+    content = await file.read(100 * 1024 * 1024 + 1)
+    if len(content) > 100 * 1024 * 1024:
+        raise HTTPException(413, "File too large (max 100 MB)")
         
     fid = generate_uid()
     try:

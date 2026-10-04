@@ -289,7 +289,7 @@ async def upload_build(app_id: str, name: str = Form(...), file: UploadFile = Fi
         async with db.execute("SELECT 1 FROM products WHERE id=? AND app_id=?", (product_id, app_id)) as cur:
             if not await cur.fetchone():
                 raise HTTPException(404, f"Product not found for this application: {product_id}")
-    max_bytes = int(os.getenv("MAX_BUILD_BYTES", str(25 * 1024 * 1024)))
+    max_bytes = min(int(os.getenv("MAX_BUILD_BYTES", str(100 * 1024 * 1024))), 100 * 1024 * 1024)
     content = await file.read(max_bytes + 1)
     if len(content) > max_bytes:
         raise HTTPException(413, f"Build exceeds configured limit of {max_bytes} bytes")

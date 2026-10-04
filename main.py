@@ -120,7 +120,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MAX_REQUEST_BYTES = int(os.getenv("MAX_REQUEST_BYTES", str(2 * 1024 * 1024)))
+MAX_REQUEST_BYTES = int(os.getenv("MAX_REQUEST_BYTES", str(105 * 1024 * 1024)))
 
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
