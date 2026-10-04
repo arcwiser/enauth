@@ -18,6 +18,7 @@ from utils.crypto import (
     is_valid_hwid, hash_license_key, mask_license_key,
     encrypt_bytes, derive_session_download_secret,
 )
+from utils.response_signing import sign_response
 from utils.logger import log_action
 
 limiter = Limiter(key_func=get_remote_address)
@@ -129,7 +130,8 @@ def enc_resp(data: dict, secret: str, app_id: str = "") -> JSONResponse:
     ts  = int(time.time())
     enc = encrypt_payload(data, secret)
     sig = compute_signature(secret, enc, ts, app_id)
-    return JSONResponse({"data": enc, "sig": sig, "ts": ts})
+    signed_message = f"{app_id}|{ts}|{enc}"
+    return JSONResponse({"data": enc, "sig": sig, "server_sig": sign_response(signed_message), "ts": ts})
 
 
 async def parse_request(req: EncryptedRequest, db) -> tuple[dict, dict]:

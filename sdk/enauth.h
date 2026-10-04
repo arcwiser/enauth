@@ -92,11 +92,13 @@ public:
      * @param app_id       UUID of your application (from admin panel)
      * @param app_secret   64-char hex secret of your application
      * @param version      Version string that must match the server-side setting
+     * @param response_public_key_hex ECDSA P-256 public key (X || Y, 128 hex chars)
      */
     Client(const std::string& server_url,
            const std::string& app_id,
            const std::string& app_secret,
-           const std::string& version);
+           const std::string& version,
+           const std::string& response_public_key_hex);
 
     ~Client();
 
@@ -167,6 +169,7 @@ private:
     std::vector<unsigned char> m_enc_app_id;
     std::vector<unsigned char> m_enc_app_secret;
     std::vector<unsigned char> m_enc_version;
+    std::vector<unsigned char> m_enc_response_public_key;
 
     // Session state uses the same layered runtime storage.
     std::vector<unsigned char> m_enc_token;
@@ -177,6 +180,7 @@ private:
     std::string GetAppId()      const;
     std::string GetAppSecret()  const;
     std::string GetVersion()    const;
+    std::string GetResponsePublicKey() const;
 
     void EncryptStore(std::vector<unsigned char>& target, const std::string& source);
     std::string DecryptField(const std::vector<unsigned char>& field) const;

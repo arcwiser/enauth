@@ -7,6 +7,7 @@ backups/
 *.log
 *.log.*
 *.pem
+response-signing-key.pem
 venv/
 .venv/
 node_modules/

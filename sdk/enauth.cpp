@@ -52,6 +52,9 @@ std::string HmacSHA256Hex   (const std::string& key,       const std::string& ms
 std::string SHA256Hex        (const std::string& data);
 std::string SecureRandomHex  (size_t byteCount);
 std::vector<unsigned char> Base64Decode(const std::string& b64);
+bool VerifyEcdsaP256Signature(const std::string& publicKeyHex,
+                             const std::string& message,
+                             const std::string& signatureB64);
 
 // Declared in hwid.cpp
 namespace enauth { namespace hwid { std::string Collect(); } }
@@ -258,6 +261,7 @@ std::string Client::DecryptResponse(const std::string& json_response) {
     if (enc.empty()) throw std::runtime_error(OBFUSCATE("No data in response"));
 
     const std::string sig = JsonGet(json_response, OBFUSCATE("sig"));
+    const std::string serverSig = JsonGet(json_response, OBFUSCATE("server_sig"));
     const std::string tsText = JsonGet(json_response, OBFUSCATE("ts"));
     if (sig.empty() || tsText.empty())
         throw std::runtime_error(OBFUSCATE("Unsigned server response"));
@@ -269,8 +273,17 @@ std::string Client::DecryptResponse(const std::string& json_response) {
     if (skew > 60)
         throw std::runtime_error(OBFUSCATE("Stale server response"));
 
-    std::string secret = GetAppSecret();
+    std::string responsePublicKey = GetResponsePublicKey();
     std::string appId = GetAppId();
+    const std::string signedMessage = appId + "|" + tsText + "|" + enc;
+    if (serverSig.empty() || !VerifyEcdsaP256Signature(responsePublicKey, signedMessage, serverSig)) {
+        if (!responsePublicKey.empty()) SecureZeroMemory(responsePublicKey.data(), responsePublicKey.size());
+        if (!appId.empty()) SecureZeroMemory(appId.data(), appId.size());
+        throw std::runtime_error(OBFUSCATE("Invalid asymmetric server signature"));
+    }
+    if (!responsePublicKey.empty()) SecureZeroMemory(responsePublicKey.data(), responsePublicKey.size());
+
+    std::string secret = GetAppSecret();
     const std::string expectedSig = HmacSHA256Hex(secret, appId + "|" + tsText + "|" + enc);
     unsigned char difference = static_cast<unsigned char>(expectedSig.size() ^ sig.size());
     const size_t compareLength = (std::min)(expectedSig.size(), sig.size());
@@ -306,7 +319,8 @@ Status Client::MessageToStatus(const std::string& msg) {
 }
 
 Client::Client(const std::string& server_url, const std::string& app_id,
-               const std::string& app_secret, const std::string& version)
+               const std::string& app_secret, const std::string& version,
+               const std::string& response_public_key_hex)
 {
     m_xor_key = GenerateRuntimeKey();
     std::string memoryKey = SecureRandomHex(32);
@@ -319,6 +333,7 @@ Client::Client(const std::string& server_url, const std::string& app_id,
     EncryptStore(m_enc_app_id,     app_id);
     EncryptStore(m_enc_app_secret, app_secret);
     EncryptStore(m_enc_version,    version);
+    EncryptStore(m_enc_response_public_key, response_public_key_hex);
     
 #ifdef ENAUTH_ENABLE_ANTI_DEBUG
     SecurityCheck();
@@ -365,6 +380,7 @@ std::string Client::GetServerUrl()  const { return DecryptField(m_enc_server_url
 std::string Client::GetAppId()      const { return DecryptField(m_enc_app_id); }
 std::string Client::GetAppSecret()  const { return DecryptField(m_enc_app_secret); }
 std::string Client::GetVersion()    const { return DecryptField(m_enc_version); }
+std::string Client::GetResponsePublicKey() const { return DecryptField(m_enc_response_public_key); }
 std::string Client::GetSessionToken() const { return DecryptField(m_enc_token); }
 std::string Client::GetLicenseKey()   const { return DecryptField(m_enc_license_key); }
 std::string Client::GetExpiresAt()    const { return DecryptField(m_enc_expires_at); }
@@ -379,6 +395,7 @@ Client::~Client() {
     wipe(m_enc_app_id);
     wipe(m_enc_app_secret);
     wipe(m_enc_version);
+    wipe(m_enc_response_public_key);
     wipe(m_enc_token);
     wipe(m_enc_license_key);
     wipe(m_enc_expires_at);

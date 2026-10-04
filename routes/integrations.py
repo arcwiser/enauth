@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 import aiosqlite
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from database import get_db
@@ -20,7 +20,28 @@ router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 def require_scope(required: str):
     ranks = {"read": 1, "write": 2, "admin": 3}
 
-    async def dependency(key=Depends(require_api_key)):
+    async def dependency(request: Request,
+                         x_api_key: Optional[str] = Header(None),
+                         x_discord_key: Optional[str] = Header(None),
+                         db: aiosqlite.Connection = Depends(get_db)):
+        if x_discord_key:
+            if len(x_discord_key) < 40 or not x_discord_key.startswith("enauth_discord_"):
+                raise HTTPException(401, "Invalid Discord integration key")
+            digest = hashlib.sha256(x_discord_key.encode("utf-8")).hexdigest()
+            async with db.execute(
+                """SELECT id,app_id FROM discord_integrations
+                   WHERE key_hash=? AND is_active=1 LIMIT 1""", (digest,)
+            ) as cur:
+                row = await cur.fetchone()
+            if not row:
+                raise HTTPException(401, "Invalid or revoked Discord integration key")
+            requested_app = request.path_params.get("app_id")
+            if requested_app and requested_app != row["app_id"]:
+                raise HTTPException(403, "Discord integration key is bound to another application")
+            await db.execute("UPDATE discord_integrations SET last_used=CURRENT_TIMESTAMP WHERE id=?", (row["id"],))
+            await db.commit()
+            return {"id": row["id"], "role": "owner", "scopes": "admin", "app_id": row["app_id"], "kind": "discord"}
+        key = await require_api_key(x_api_key, db)
         if key.get("role") != "owner":
             raise HTTPException(403, "Owner API key required")
         configured = str(key.get("scopes") or "read").lower()

@@ -103,11 +103,11 @@ HTTPS origin and keep `COOKIE_SECURE=true` in production.
 
 ## Discord management bot
 
-The optional bot in `discord_bot/` provides 35 private slash commands for
-licenses, sessions, builds, news, variables, logs, and HWID bans. Operational
-commands require a Discord role named `keygen`; only the Discord server owner
-can connect or disconnect the integration. It uses a separately revocable,
-scoped EnAuth API key and encrypts that key at rest. See
+The optional bot in `discord_bot/` provides private slash commands for
+licenses, sessions, builds, news, variables, logs, and HWID bans. Create its
+app-bound, separately revocable key from the owner-only **Discord bot** panel,
+invite the bot from that same page, then use the key with `/setup`. The key is
+shown once and encrypted at rest by the bot. See
 `discord_bot/README.md` for installation instructions.
 
 Then open:

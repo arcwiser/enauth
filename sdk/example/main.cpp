@@ -47,14 +47,16 @@ int main() {
     const std::string appId = OBFUSCATE("REPLACE_WITH_APPLICATION_ID");
     std::string appSecret = OBFUSCATE("REPLACE_WITH_APPLICATION_SECRET");
     const std::string appVersion = OBFUSCATE("1.0.0");
+    const std::string responsePublicKey = OBFUSCATE("REPLACE_WITH_RESPONSE_SIGNING_PUBLIC_KEY");
     const std::string productId = OBFUSCATE("");
     const std::string productLevel = OBFUSCATE("");
     const std::string downloadName = OBFUSCATE("");
     constexpr int heartbeatSeconds = 30;
 
     if (appId == "REPLACE_WITH_APPLICATION_ID" ||
-        appSecret == "REPLACE_WITH_APPLICATION_SECRET") {
-        std::cerr << "Configure the application ID and secret in main.cpp before building.\n";
+        appSecret == "REPLACE_WITH_APPLICATION_SECRET" ||
+        responsePublicKey == "REPLACE_WITH_RESPONSE_SIGNING_PUBLIC_KEY") {
+        std::cerr << "Configure the application ID, secret, and response-signing public key in main.cpp before building.\n";
         return 2;
     }
 
@@ -74,7 +76,7 @@ int main() {
         return 2;
     }
 
-    enauth::Client client(serverUrl, appId, appSecret, appVersion);
+    enauth::Client client(serverUrl, appId, appSecret, appVersion, responsePublicKey);
     ClearSensitive(appSecret);
 
     const auto init = client.Init();
@@ -99,10 +101,16 @@ int main() {
 
     ClearSensitive(login.token);
 
-    std::cout << "Authenticated successfully.\n";
-    if (!login.expires_at.empty()) {
-        std::cout << "License expires: " << login.expires_at << '\n';
+    const auto validation = client.ValidateSession();
+    if (!validation.success) {
+        std::cerr << "Session validation failed (" << StatusName(validation.status)
+                  << "): " << validation.message << '\n';
+        client.Logout();
+        return 1;
     }
+
+    std::cout << "Authenticated and session verified successfully.\n";
+    std::cout << "License expires: " << (login.expires_at.empty() ? "Lifetime" : login.expires_at) << '\n';
 
     for (const auto& [name, value] : login.variables) {
         std::cout << "Variable " << name << " = " << value << '\n';
@@ -111,14 +119,6 @@ int main() {
     const auto news = client.GetNews();
     if (news.success && !news.items.empty()) {
         std::cout << "Latest news: " << news.items.front().title << '\n';
-    }
-
-    const auto validation = client.ValidateSession();
-    if (!validation.success) {
-        std::cerr << "Session validation failed (" << StatusName(validation.status)
-                  << "): " << validation.message << '\n';
-        client.Logout();
-        return 1;
     }
 
     if (!downloadName.empty()) {

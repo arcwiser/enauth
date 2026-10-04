@@ -39,7 +39,8 @@ enauth::Client client(
     "https://your-server.com",  // Server URL
     "your-app-id",              // Application ID from admin panel
     "your-app-secret",          // 64-char hex secret from admin panel
-    "1.0.0"                    // Application version
+    "1.0.0",                   // Application version
+    "your-128-char-response-signing-public-key"
 );
 
 // Validate version with server
@@ -141,6 +142,8 @@ The SDK includes:
   device HWID, application secret, and file identity. A payload captured from
   one session cannot be decrypted with a different session context.
 - HMAC-SHA256 signature verification
+- ECDSA P-256 server response verification. Only the public key is embedded in
+  the SDK; the signing private key stays on the server.
 - Cryptographically random per-request replay nonces
 - Fail-closed server response HMAC and timestamp validation
 - Release builds enable CFG, CET shadow-stack compatibility, Spectre mitigations,
@@ -214,9 +217,13 @@ The example is preconfigured with the obfuscated production endpoint
 `https://auth.olsoftwares.com`. Change that literal in `example/main.cpp` when
 building for a different EnAuth deployment.
 
-Before building, replace `REPLACE_WITH_APPLICATION_ID` and
-`REPLACE_WITH_APPLICATION_SECRET` in `example/main.cpp` with the values from
-the admin panel. Version, optional product/level enforcement, protected
+Before building, replace `REPLACE_WITH_APPLICATION_ID`,
+`REPLACE_WITH_APPLICATION_SECRET`, and
+`REPLACE_WITH_RESPONSE_SIGNING_PUBLIC_KEY` in `example/main.cpp`. Retrieve the
+public signing key from the owner-only Discord integration page or
+`GET /api/admin/response-signing-public-key`. The server creates its private
+key on first startup at `RESPONSE_SIGNING_KEY_PATH`; back that file up and never
+ship it with a client. Version, optional product/level enforcement, protected
 download name, and heartbeat interval are compile-time settings in the same
 configuration block. The end user only enters their license key; the example
 does not read configuration from environment variables.

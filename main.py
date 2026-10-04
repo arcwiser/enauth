@@ -33,12 +33,15 @@ from routes.integrations import router as integrations_router
 from routes.status import router as status_router
 from utils.crypto  import generate_uid, hash_password, generate_app_secret
 from utils.logger import app_log
+from utils.response_signing import ensure_response_signing_key, response_public_key_hex
 
 # ─── Lifespan ────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_startup_configuration(debug_mode)
+    ensure_response_signing_key()
+    app_log.info("Response-signing public key: %s", response_public_key_hex())
     await init_db()
     await ensure_default_admin()
     cleanup_task = asyncio.create_task(_maintenance_loop())

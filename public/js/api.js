@@ -198,6 +198,10 @@ const API = {
   createBackup: () => api("POST", "/api/admin/backups"),
   deleteBackup: (name) => api("DELETE", `/api/admin/backups/${encodeURIComponent(name)}`),
   downloadBackup: (name) => fetch(BASE + `/api/admin/backups/${encodeURIComponent(name)}`, { credentials: "same-origin" }),
+  getDiscordIntegrations: () => api("GET", "/api/admin/discord-integrations"),
+  getResponseSigningPublicKey: () => api("GET", "/api/admin/response-signing-public-key"),
+  createDiscordIntegration: (app_id) => api("POST", "/api/admin/discord-integrations", { app_id }),
+  revokeDiscordIntegration: (id) => api("DELETE", `/api/admin/discord-integrations/${id}`),
 
   // Apps
   getApps:       (params = {}) => {
@@ -393,7 +397,7 @@ function buildSidebar(activePage) {
   const user = getUser();
   const groups = [
     ["Workspace", [["dashboard", "Overview", "grid"], ["apps", "Applications", "box"], ["products", "Product levels", "layers"], ["licenses", "Licenses", "key"]]],
-    ["Distribution", [["files", "Files", "file"], ["news", "Announcements", "message"], ["panels", "Customer panels", "window"], ["resellers", "Resellers", "users"]]],
+    ["Distribution", [["files", "Files", "file"], ["news", "Announcements", "message"], ["panels", "Customer panels", "window"], ["resellers", "Resellers", "users"], ["discord", "Discord bot", "message", true]]],
     ["Security", [["sessions", "Active sessions", "pulse"], ["bans", "Blocklist", "shield"], ["logs", "Event logs", "list"], ["audit", "Audit trail", "search"]]],
     ["Administration", [["users", "Team members", "users", true], ["api-keys", "API keys", "key"], ["variables", "Variables", "code", true], ["backups", "Backups", "shield", true], ["settings", "Settings", "settings"]]]
   ];

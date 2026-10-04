@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <sstream>
 #include <iomanip>
+#include <cstring>
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 static constexpr DWORD SALT_LEN      = 16;
@@ -161,6 +162,42 @@ std::string HmacSHA256Hex(const std::string& key, const std::string& msg) {
     BCryptDestroyHash(hHash);
     BCryptCloseAlgorithmProvider(hAlg, 0);
     return BytesToHex(digest);
+}
+
+bool VerifyEcdsaP256Signature(const std::string& publicKeyHex,
+                             const std::string& message,
+                             const std::string& signatureB64) {
+    if (publicKeyHex.size() != 128) return false;
+    std::vector<BYTE> coordinates;
+    try { coordinates = HexToBytes(publicKeyHex); }
+    catch (...) { return false; }
+    const auto signature = Base64Decode(signatureB64);
+    if (coordinates.size() != 64 || signature.size() != 64) return false;
+
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    BCRYPT_KEY_HANDLE publicKey = nullptr;
+    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_ECDSA_P256_ALGORITHM, nullptr, 0) != 0)
+        return false;
+
+    BCRYPT_ECCKEY_BLOB header{};
+    header.dwMagic = BCRYPT_ECDSA_PUBLIC_P256_MAGIC;
+    header.cbKey = 32;
+    std::vector<BYTE> blob(sizeof(header) + coordinates.size());
+    std::memcpy(blob.data(), &header, sizeof(header));
+    std::memcpy(blob.data() + sizeof(header), coordinates.data(), coordinates.size());
+    if (BCryptImportKeyPair(algorithm, nullptr, BCRYPT_ECCPUBLIC_BLOB, &publicKey,
+                            blob.data(), static_cast<ULONG>(blob.size()), 0) != 0) {
+        BCryptCloseAlgorithmProvider(algorithm, 0);
+        return false;
+    }
+
+    const auto digest = HexToBytes(SHA256Hex(message));
+    const NTSTATUS status = BCryptVerifySignature(
+        publicKey, nullptr, const_cast<PUCHAR>(digest.data()), static_cast<ULONG>(digest.size()),
+        const_cast<PUCHAR>(signature.data()), static_cast<ULONG>(signature.size()), 0);
+    BCryptDestroyKey(publicKey);
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    return status == 0;
 }
 
 // ─── AES-256-GCM Authenticated Encryption ────────────────────────────────────

@@ -26,6 +26,7 @@ from utils.crypto import (
     hash_license_key, mask_license_key, encrypt_license_key, display_license_key,
 )
 from utils.logger import app_log, log_action
+from utils.response_signing import response_public_key_hex
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 ADMIN_SESSION_HOURS = int(os.getenv("ADMIN_SESSION_HOURS", "8"))
@@ -1640,6 +1641,72 @@ async def dashboard(user=Depends(require_admin), db: aiosqlite.Connection = Depe
             "security_events": {**security_counts, "most_targeted_apps": top_targets},
         },
     }
+
+
+# ─── Discord integrations ────────────────────────────────────────────────────
+
+class CreateDiscordIntegrationBody(BaseModel):
+    app_id: str = Field(min_length=1, max_length=128)
+
+
+@router.get("/discord-integrations")
+async def list_discord_integrations(user=Depends(require_owner), db=Depends(get_db)):
+    async with db.execute(
+        """SELECT di.id,di.app_id,di.key_prefix,di.is_active,di.last_used,di.created_at,a.name AS app_name
+           FROM discord_integrations di JOIN applications a ON a.id=di.app_id
+           ORDER BY di.created_at DESC"""
+    ) as cur:
+        integrations = rows_to_list(await cur.fetchall())
+    client_id = os.getenv("DISCORD_CLIENT_ID", "").strip()
+    invite_url = (
+        f"https://discord.com/oauth2/authorize?client_id={client_id}&permissions=0&scope=bot%20applications.commands"
+        if client_id.isdigit() else None
+    )
+    return {"integrations": integrations, "client_id": client_id or None, "invite_url": invite_url}
+
+
+@router.get("/response-signing-public-key")
+async def get_response_signing_public_key(user=Depends(require_owner)):
+    return {"algorithm": "ECDSA-P256-SHA256", "public_key_hex": response_public_key_hex()}
+
+
+@router.post("/discord-integrations")
+async def create_discord_integration(body: CreateDiscordIntegrationBody,
+                                     user=Depends(require_owner), db=Depends(get_db)):
+    async with db.execute("SELECT id,name FROM applications WHERE id=?", (body.app_id,)) as cur:
+        app = await cur.fetchone()
+    if not app:
+        raise HTTPException(404, "Application not found")
+    raw_key = "enauth_discord_" + secrets.token_urlsafe(32)
+    key_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+    key_prefix = raw_key[:24]
+    integration_id = generate_uid()
+    await db.execute("UPDATE discord_integrations SET is_active=0 WHERE app_id=?", (body.app_id,))
+    await db.execute(
+        """INSERT INTO discord_integrations(id,app_id,key_hash,key_prefix,created_by)
+           VALUES(?,?,?,?,?)""",
+        (integration_id, body.app_id, key_hash, key_prefix, user["id"]),
+    )
+    await log_action(db, "discord_integration_created", app_id=body.app_id,
+                     details=f"integration={integration_id}")
+    await db.commit()
+    return {
+        "id": integration_id, "app_id": body.app_id, "app_name": app["name"],
+        "key": raw_key, "key_prefix": key_prefix,
+        "warning": "This key is shown once. Store it in the Discord bot configuration.",
+    }
+
+
+@router.delete("/discord-integrations/{integration_id}")
+async def revoke_discord_integration(integration_id: str, user=Depends(require_owner), db=Depends(get_db)):
+    async with db.execute("SELECT app_id FROM discord_integrations WHERE id=?", (integration_id,)) as cur:
+        row = await cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Discord integration not found")
+    await db.execute("UPDATE discord_integrations SET is_active=0 WHERE id=?", (integration_id,))
+    await log_action(db, "discord_integration_revoked", app_id=row["app_id"], details=integration_id)
+    await db.commit()
+    return {"ok": True}
 
 
 # ─── Licenses ────────────────────────────────────────────────────────────────

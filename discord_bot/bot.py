@@ -85,7 +85,7 @@ async def api(interaction: discord.Interaction, method: str, path: str, **kwargs
         raise RuntimeError("This server is not configured. The server owner must run /setup.")
     server, _, api_key = config
     headers = kwargs.pop("headers", {})
-    headers["X-API-Key"] = api_key
+    headers["X-Discord-Key"] = api_key
     timeout = aiohttp.ClientTimeout(total=30)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.request(method, server + path, headers=headers, **kwargs) as response:
@@ -133,7 +133,7 @@ keygen = app_commands.check(require_keygen)
 class SetupModal(discord.ui.Modal, title="Connect EnAuth"):
     server_url = discord.ui.TextInput(label="Server URL", default="https://auth.olsoftwares.com", max_length=200)
     app_id = discord.ui.TextInput(label="Application ID", max_length=100)
-    api_key = discord.ui.TextInput(label="EnAuth API key", placeholder="enauth_...", max_length=200)
+    api_key = discord.ui.TextInput(label="Discord integration key", placeholder="enauth_discord_...", max_length=200)
 
     async def on_submit(self, interaction: discord.Interaction):
         if not has_bot_access(interaction):
@@ -142,8 +142,8 @@ class SetupModal(discord.ui.Modal, title="Connect EnAuth"):
             )
             return
         server = str(self.server_url).rstrip("/")
-        if not server.startswith("https://") or not str(self.api_key).startswith("enauth_"):
-            await interaction.response.send_message("Use an HTTPS URL and a valid EnAuth API key.", ephemeral=True)
+        if not server.startswith("https://") or not str(self.api_key).startswith("enauth_discord_"):
+            await interaction.response.send_message("Use an HTTPS URL and a valid Discord integration key.", ephemeral=True)
             return
         save_config(interaction.guild_id, server, str(self.app_id), str(self.api_key), interaction.user.id)
         try:

@@ -14,13 +14,15 @@ then displays a product dropdown instead of requiring a product ID.
 Operational controls include `/pauseapp` and `/resumeapp`. Resuming first shows
 a compensation preview unless `confirm:true` is supplied. `/resellers` lists
 reseller IDs and `/creditreseller` credits a balance after explicit
-confirmation. These higher-impact commands require an `admin`-scope EnAuth API
-key in addition to the configured Discord role. Treat that role as privileged:
+confirmation. These higher-impact commands require the app-bound Discord
+integration key in addition to the configured Discord role. Treat that role as privileged:
 members who have it can replace or remove the Discord server's EnAuth connection.
 
-The bot intentionally uses a revocable EnAuth API key instead of an application
-secret. Create an `admin`-scope API key in the EnAuth dashboard. `/setup` opens
-a private modal and stores that key encrypted with `BOT_CONFIG_KEY`.
+The bot intentionally uses a dedicated, revocable, app-bound Discord key rather
+than an application secret or general admin API key. Open **Discord bot** in the
+EnAuth owner panel, select the application, and generate the key. It is shown
+once. `/setup` opens a private modal and stores that key encrypted with
+`BOT_CONFIG_KEY`.
 
 ## Ubuntu installation
 
@@ -47,6 +49,7 @@ systemctl enable --now enauth-bot
 journalctl -u enauth-bot -f
 ```
 
-Invite the bot with `bot` and `applications.commands` scopes. Assign the
+Set `DISCORD_CLIENT_ID` in the main EnAuth server's `.env`, restart EnAuth, then
+use **Invite bot to server** on the panel's Discord bot page. Assign the
 configured role only to trusted staff, then have a member holding it run
-`/setup`.
+`/setup` with the one-time-displayed Discord integration key.

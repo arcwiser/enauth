@@ -22,6 +22,7 @@ MODULES_TO_RESET = [
     "routes.client",
     "routes.status",
     "utils.logger",
+    "utils.response_signing",
 ]
 
 
@@ -42,6 +43,7 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
         os.environ["LICENSE_KEY_PEPPER"] = "test-license-pepper-that-is-long-enough"
         os.environ["BACKUP_DIR"] = str(self.workdir / "backups")
         os.environ["BACKUP_RETENTION"] = "2"
+        os.environ["RESPONSE_SIGNING_KEY_PATH"] = str(self.workdir / "response-signing-key.pem")
 
         for name in MODULES_TO_RESET:
             sys.modules.pop(name, None)
@@ -174,6 +176,44 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
         listing = await self.admin.list_backups(user={"role": "owner"})
         self.assertEqual(len(listing["backups"]), 2)
         self.assertGreater(second["size_bytes"], 0)
+
+    async def test_discord_key_is_app_bound_hashed_and_shown_once(self):
+        user_id, _ = await self._create_admin_user(two_factor_enabled=0)
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute(
+                "INSERT INTO applications(id,name,secret_key,owner_user_id) VALUES(?,?,?,?)",
+                ("app-discord", "Discord App", "s" * 64, user_id),
+            )
+            await db.commit()
+            result = await self.admin.create_discord_integration(
+                self.admin.CreateDiscordIntegrationBody(app_id="app-discord"),
+                user={"id": user_id, "role": "owner"}, db=db,
+            )
+            self.assertTrue(result["key"].startswith("enauth_discord_"))
+            async with db.execute("SELECT key_hash,key_prefix,app_id FROM discord_integrations") as cur:
+                stored = await cur.fetchone()
+        self.assertEqual(stored["app_id"], "app-discord")
+        self.assertNotEqual(stored["key_hash"], result["key"])
+        self.assertEqual(stored["key_hash"], __import__("hashlib").sha256(result["key"].encode()).hexdigest())
+
+    async def test_server_response_signature_uses_public_key_verification(self):
+        import base64
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+        signing = importlib.import_module("utils.response_signing")
+        signing.ensure_response_signing_key()
+        message = "app|123|encrypted"
+        raw = base64.b64decode(signing.sign_response(message))
+        public_hex = signing.response_public_key_hex()
+        numbers = ec.EllipticCurvePublicNumbers(
+            int(public_hex[:64], 16), int(public_hex[64:], 16), ec.SECP256R1()
+        )
+        numbers.public_key().verify(
+            encode_dss_signature(int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:], "big")),
+            message.encode(), ec.ECDSA(hashes.SHA256()),
+        )
 
     async def test_password_reset_token_is_not_written_to_logs(self):
         await self._create_admin_user(two_factor_enabled=0)
