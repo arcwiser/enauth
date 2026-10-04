@@ -288,6 +288,8 @@ const API = {
   },
   deleteFile: (id) => api("DELETE", `/api/admin/files/${id}`),
   updateFileVisibility: (id, b) => api("PUT", `/api/admin/files/${id}/visibility`, b),
+  revokeFile: (id, reason, block_client_version = true) => api("POST", `/api/admin/files/${id}/revoke`, { reason, block_client_version }),
+  restoreFile: (id) => api("POST", `/api/admin/files/${id}/restore`),
   bulkDeleteFiles: (ids) => api("POST", "/api/admin/files/bulk-delete", { ids }),
 
   // Panels

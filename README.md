@@ -399,6 +399,9 @@ Environment variables (see `.env.example`):
 
 - `TIMESTAMP_TOLERANCE`: Request timestamp tolerance in seconds (default: 60)
 - `SESSION_DURATION`: Client session duration in seconds (default: 86400)
+- `SESSION_TOKEN_SECONDS`: Protocol-v2 bearer-token lifetime before rotation (default: 300)
+- `AUTO_BACKUP_HOURS`: Verified scheduled-backup interval; `0` disables it
+- `BACKUP_ENCRYPTION_KEY`: Encrypts signing-key copies stored beside scheduled database backups
 - `MAX_LOGIN_STRIKES`: Maximum failed login attempts before lockout (default: 5)
 - `NONCE_CACHE_SIZE`: Maximum nonces to remember for replay protection (default: 10000)
 - `NONCE_TTL`: Nonce time-to-live in seconds (default: 120)

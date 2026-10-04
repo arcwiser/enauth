@@ -55,11 +55,8 @@
       </div>
       <div class="form-group">
         <label class="form-label">Scopes</label>
-        <select class="select" id="create-scopes">
-          <option value="read">Read Only</option>
-          <option value="write">Read & Write</option>
-          <option value="admin">Full Admin</option>
-        </select>
+        <input class="input" id="create-scopes" value="apps.read,licenses.generate" placeholder="apps.read,licenses.generate">
+        <div style="font-size:12px;color:var(--text3);margin-top:6px">Comma-separated. Examples: <code>licenses.generate</code>, <code>licenses.reveal</code>, <code>apps.modify</code>, <code>builds.delete</code>. Use <code>admin</code> only for full access.</div>
       </div>
       <div class="form-group">
         <label class="form-label">Expires (days, optional)</label>

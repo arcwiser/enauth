@@ -413,13 +413,14 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
             validate_resp = await self.client.client_validate.__wrapped__(
                 _FakeRequest(path=validate_path), validate_req, db
             )
-            self.assertTrue(self._verify_v2_response(
-                validate_resp, validate_path, validate_req.nonce
-            )["success"])
+            validated = self._verify_v2_response(validate_resp, validate_path, validate_req.nonce)
+            self.assertTrue(validated["success"])
+            self.assertNotEqual(validated["token"], login["token"])
+            self.assertIsNone(await self.client.get_app_session(db, login["token"], seeded["app_id"]))
 
             download_path = "/api/client/download"
             download_req = self._v2_request(seeded["app_id"], {
-                "token": login["token"], "hwid": "d" * 64, "name": "payload.bin",
+                "token": validated["token"], "hwid": "d" * 64, "name": "payload.bin",
             })
             download_resp = await self.client.client_download.__wrapped__(
                 _FakeRequest(path=download_path), download_req, db
@@ -427,6 +428,32 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
             download = self._verify_v2_response(download_resp, download_path, download_req.nonce)
             self.assertEqual(download["encryption"], "TLS-SIGNED-SESSION-v2")
             self.assertEqual(base64.b64decode(download["data"], validate=True), b"hello world")
+            self.assertNotEqual(download["token"], validated["token"])
+
+    async def test_product_version_policy_blocks_compromised_client(self):
+        seeded = await self._seed_app()
+        path = "/api/client/login"
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute(
+                """INSERT INTO products
+                   (id,app_id,name,level,required_client_version,blocked_client_versions)
+                   VALUES(?,?,?,?,?,?)""",
+                ("product-v", seeded["app_id"], "Protected", "protected", "2.0.0", '["1.0.0"]'),
+            )
+            await db.execute(
+                "INSERT INTO license_products(id,license_id,product_id,expires_at) VALUES(?,?,?,?)",
+                ("ent-v", seeded["license_id"], "product-v", "2099-12-31 23:59:59"),
+            )
+            await db.commit()
+            req = self._v2_request(seeded["app_id"], {
+                "version": "1.0.0", "license_key": seeded["license_key"],
+                "hwid": "f" * 64, "product_id": "product-v",
+            })
+            response = await self.client.client_login.__wrapped__(_FakeRequest(path=path), req, db)
+            payload = self._verify_v2_response(response, path, req.nonce)
+            self.assertEqual(payload["message"], "OUTDATED_VERSION")
+            self.assertEqual(payload["required_version"], "2.0.0")
 
     async def test_protocol_v2_replay_and_fake_license_are_rejected(self):
         seeded = await self._seed_app()

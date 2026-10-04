@@ -165,7 +165,7 @@ class DatabaseMigrationTests(unittest.IsolatedAsyncioTestCase):
                 version = (await cur.fetchone())[0]
             async with db.execute("PRAGMA table_info(app_files)") as cur:
                 columns = {row[1] for row in await cur.fetchall()}
-            self.assertEqual(version, 10)
+            self.assertEqual(version, 11)
         self.assertTrue({"release_version", "channel", "file_type", "is_archived"} <= columns)
 
 

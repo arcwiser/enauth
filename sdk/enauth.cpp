@@ -426,12 +426,15 @@ LoginResult Client::Login(const std::string& license_key,
     LoginResult result;
     try {
         std::string hw = hwid::Collect();
+        std::string version = GetVersion();
         std::string payload = std::string("{") +
             JsonStr(OBFUSCATE("license_key"), license_key) + "," +
-            JsonStr(OBFUSCATE("hwid"), hw);
+            JsonStr(OBFUSCATE("hwid"), hw) + "," +
+            JsonStr(OBFUSCATE("version"), version);
         if (!product_id.empty()) payload += "," + JsonStr(OBFUSCATE("product_id"), product_id);
         if (!level.empty())      payload += "," + JsonStr(OBFUSCATE("level"), level);
         payload += "}";
+        if (!version.empty()) SecureZeroMemory(version.data(), version.size());
         const std::string endpoint = OBFUSCATE("/api/client/login");
         std::string nonce;
         std::string body = BuildRequest(payload, nonce);
@@ -541,6 +544,8 @@ SimpleResult Client::Heartbeat() {
         result.success  = JsonBool(dec, OBFUSCATE("success"));
         result.message  = JsonGet(dec, OBFUSCATE("message"));
         result.status   = MessageToStatus(result.message);
+        const std::string rotatedToken = JsonGet(dec, OBFUSCATE("token"));
+        if (result.success && !rotatedToken.empty()) EncryptStore(m_enc_token, rotatedToken);
         if (!result.success) m_logged_in = false;
     } catch (const std::exception& e) {
         result.success = false;
@@ -588,6 +593,8 @@ SimpleResult Client::ValidateSession() {
         result.success  = JsonBool(dec, OBFUSCATE("success"));
         result.message  = JsonGet(dec, OBFUSCATE("message"));
         result.status   = MessageToStatus(result.message);
+        const std::string rotatedToken = JsonGet(dec, OBFUSCATE("token"));
+        if (result.success && !rotatedToken.empty()) EncryptStore(m_enc_token, rotatedToken);
     } catch (const std::exception& e) {
         result.success = false;
         result.status  = Status::NetworkError;
@@ -611,6 +618,8 @@ std::vector<unsigned char> Client::DownloadFile(const std::string& name) {
         std::string body = BuildRequest(payload, nonce);
         std::string raw = Post(endpoint, body);
         std::string dec = DecryptResponse(raw, endpoint, nonce);
+        const std::string rotatedToken = JsonGet(dec, OBFUSCATE("token"));
+        if (!rotatedToken.empty()) EncryptStore(m_enc_token, rotatedToken);
 
         if (JsonBool(dec, OBFUSCATE("success"))) {
             std::string b64_data = JsonGet(dec, OBFUSCATE("data"));

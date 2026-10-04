@@ -34,11 +34,11 @@
           <table>
             <thead><tr>
               <th style="width:40px"><input type="checkbox" id="select-all" onchange="toggleAll(this.checked)"></th>
-              <th>License Key</th><th>App</th><th>IP Address</th>
-              <th>HWID</th><th>Started</th><th>Last Heartbeat</th><th>Expires</th><th>Action</th>
+              <th>License Key</th><th>App / Product</th><th>Client</th><th>IP Address</th>
+              <th>HWID</th><th>Started</th><th>Last Activity</th><th>Token Expires</th><th>Action</th>
             </tr></thead>
             <tbody id="tbody">
-              <tr class="loading-row"><td colspan="9"><span class="spinner"></span></td></tr>
+              <tr class="loading-row"><td colspan="10"><span class="spinner"></span></td></tr>
             </tbody>
           </table>
         </div>
@@ -104,7 +104,7 @@
   async function load() {
     saveState();
     const tbody = document.getElementById("tbody");
-    tbody.innerHTML = `<tr class="loading-row"><td colspan="9"><span class="spinner"></span></td></tr>`;
+    tbody.innerHTML = `<tr class="loading-row"><td colspan="10"><span class="spinner"></span></td></tr>`;
     try {
       const rows = await API.getSessions({
         search: document.getElementById("search").value,
@@ -117,19 +117,20 @@
       document.getElementById("page-info").textContent = `Page ${page + 1}${shown.length ? ` · ${shown.length} rows` : ""}`;
 
       if (!shown.length) {
-        tbody.innerHTML = `<tr><td colspan="9"><div class="empty"><div class="empty-icon">🔗</div><div class="empty-text">No active sessions</div></div></td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="10"><div class="empty"><div class="empty-icon">🔗</div><div class="empty-text">No active sessions</div></div></td></tr>`;
         return;
       }
       tbody.innerHTML = shown.map(r => `
         <tr>
           <td><input type="checkbox" class="session-select" value="${r.id}" ${selected.has(r.id) ? "checked" : ""} onchange="toggleOne('${r.id}', this.checked)"></td>
           <td><span class="mono">${r.license_key}</span></td>
-          <td style="color:var(--text2)">${r.app_name}</td>
+          <td style="color:var(--text2)">${r.app_name}<div style="font-size:11px;color:var(--text-dim)">${escapeHtml(r.product_name || 'App-wide')}</div></td>
+          <td class="mono">${escapeHtml(r.client_version || 'legacy')}<div style="font-size:10px;color:var(--text-dim)">rotation #${r.token_generation || 0}</div></td>
           <td class="mono">${r.ip}</td>
           <td class="mono" style="color:var(--text3);font-size:11px" title="${r.hwid}">${r.hwid.slice(0,16)}…</td>
           <td style="font-size:12px;color:var(--text2)">${fmtDate(r.started_at)}</td>
           <td style="font-size:12px;color:var(--text2)">${relTime(r.last_heartbeat)}</td>
-          <td style="font-size:12px;color:var(--text2)">${fmtDate(r.expires_at)}</td>
+          <td style="font-size:12px;color:var(--text2)">${fmtDate(r.token_expires_at || r.expires_at)}<div style="font-size:10px;color:var(--text-dim)">session ${fmtDate(r.expires_at)}</div></td>
           <td><button class="btn btn-danger btn-sm" onclick="kill('${r.id}')">Kill</button></td>
         </tr>`).join("");
     } catch (e) { toast(e.message, "error"); }

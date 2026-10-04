@@ -195,8 +195,6 @@ async def help_command(interaction: discord.Interaction):
 `/sessions`, `/killsession`, `/killallsessions`, `/hwids`, `/banhwid`, `/unbanhwid`, `/logs`
 **Application**
 `/status`, `/stats`, `/levels`, `/apps`, `/setapp`, `/pauseapp`, `/resumeapp`, `/builds`, `/uploadbuild`, `/deletebuild`
-**Resellers**
-`/resellers`, `/creditreseller`
 **Content**
 `/news`, `/addnews`, `/deletenews`, `/variables`, `/setvariable`, `/deletevariable`
 **Integration**
@@ -470,31 +468,6 @@ async def resumeapp(interaction: discord.Interaction, compensation: str = "0h", 
         f"Application resumed. Extended `{result['affected_licenses']}` licenses by "
         f"`{result['extended_by_seconds']}` seconds.", ephemeral=True
     )
-
-
-@bot.tree.command(description="List resellers and balances")
-@keygen
-async def resellers(interaction: discord.Interaction):
-    rows = await api(interaction, "GET", "/api/integrations/resellers")
-    await interaction.response.send_message(render_rows(rows, ["id", "username", "balance", "is_active"]), ephemeral=True)
-
-
-@bot.tree.command(description="Credit a reseller balance")
-@keygen
-async def creditreseller(interaction: discord.Interaction, reseller_id: str, amount: float,
-                         reason: str = "Discord bot credit", confirm: bool = False):
-    if amount <= 0:
-        raise RuntimeError("Amount must be positive")
-    if not confirm:
-        await interaction.response.send_message(
-            f"This will credit `{amount:.2f}` to `{reseller_id}`. Run again with confirm=true.", ephemeral=True
-        )
-        return
-    result = await api(
-        interaction, "POST", f"/api/integrations/resellers/{reseller_id}/credit",
-        json={"amount": amount, "reason": reason},
-    )
-    await interaction.response.send_message(f"Balance credited. New balance: `{result['balance']}`", ephemeral=True)
 
 
 @bot.tree.command(description="Show this server's non-secret integration settings")

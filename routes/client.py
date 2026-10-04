@@ -31,6 +31,7 @@ router = APIRouter(prefix="/api/client", tags=["client"])
 import os
 TIMESTAMP_TOLERANCE  = int(os.getenv("TIMESTAMP_TOLERANCE", "60"))      # ±60 seconds — tight replay window
 SESSION_DURATION     = int(os.getenv("SESSION_DURATION", "86400"))       # 24 hours
+SESSION_TOKEN_SECONDS = max(60, int(os.getenv("SESSION_TOKEN_SECONDS", "300")))
 MAX_LOGIN_STRIKES    = int(os.getenv("MAX_LOGIN_STRIKES", "5"))          # lock key after 5 bad attempts (down from 10)
 NONCE_CACHE_SIZE     = int(os.getenv("NONCE_CACHE_SIZE", "10000"))      # max unique nonces to remember
 NONCE_TTL            = int(os.getenv("NONCE_TTL", "120"))                # seconds to keep a nonce (2× tolerance)
@@ -225,9 +226,26 @@ async def parse_request(req: EncryptedRequest, db, endpoint: str = "") -> tuple[
 async def get_app_session(db, token: str, app_id: str):
     """Resolve a session only inside the application that issued it."""
     async with db.execute(
-        "SELECT * FROM sessions WHERE token = ? AND app_id = ?", (token, app_id)
+        """SELECT * FROM sessions WHERE token=? AND app_id=? AND expires_at>CURRENT_TIMESTAMP
+           AND COALESCE(token_expires_at, expires_at)>CURRENT_TIMESTAMP""", (token, app_id)
     ) as cur:
         return await cur.fetchone()
+
+
+async def rotate_session_token(db, sess) -> str:
+    """Replace a bearer token after a successful protected request."""
+    new_token = generate_session_token()
+    absolute_expiry = datetime.strptime(sess["expires_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    token_expiry = min(datetime.now(timezone.utc) + timedelta(seconds=SESSION_TOKEN_SECONDS), absolute_expiry)
+    token_expiry_text = token_expiry.strftime("%Y-%m-%d %H:%M:%S")
+    cursor = await db.execute(
+        """UPDATE sessions SET token=?, token_expires_at=?, rotated_at=CURRENT_TIMESTAMP,
+           token_generation=token_generation+1 WHERE id=? AND token=?""",
+        (new_token, token_expiry_text, sess["id"], sess["token"]),
+    )
+    if cursor.rowcount != 1:
+        raise HTTPException(409, "SESSION_ROTATION_CONFLICT")
+    return new_token
 
 
 async def enforce_active_authorization(db, sess, app, ip: str) -> str | None:
@@ -353,6 +371,7 @@ async def client_login(request: Request, req: EncryptedRequest,
     hwid        = payload.get("hwid", "").strip()
     product_id  = (payload.get("product_id") or "").strip()
     level       = (payload.get("level") or "").strip().lower()
+    client_version = (payload.get("version") or (app["version"] if req.protocol == 1 else "")).strip()
 
     if not license_key or not hwid:
         return enc_resp({"success": False, "message": "MISSING_FIELDS"}, secret, req.app_id)
@@ -392,7 +411,8 @@ async def client_login(request: Request, req: EncryptedRequest,
         async with db.execute(
             """SELECT lp.expires_at, lp.is_paused AS entitlement_paused,
                       lp.pause_reason AS entitlement_pause_reason,
-                      p.id AS product_id, p.is_paused, p.pause_reason
+                      p.id AS product_id, p.is_paused, p.pause_reason,
+                      p.required_client_version, p.blocked_client_versions, p.version_kill_switch
                FROM license_products lp JOIN products p ON p.id=lp.product_id
                WHERE lp.license_id = ? AND lp.product_id = ? AND p.app_id = ?""",
             (lic["id"], product_id, app["id"]),
@@ -406,7 +426,9 @@ async def client_login(request: Request, req: EncryptedRequest,
         async with db.execute(
             """SELECT lp.expires_at, lp.is_paused AS entitlement_paused,
                       lp.pause_reason AS entitlement_pause_reason,
-                      p.id AS product_id, p.is_paused, p.pause_reason FROM license_products lp
+                      p.id AS product_id, p.is_paused, p.pause_reason,
+                      p.required_client_version, p.blocked_client_versions, p.version_kill_switch
+               FROM license_products lp
                JOIN products p ON lp.product_id = p.id
                WHERE lp.license_id = ? AND LOWER(p.level) = ? AND p.app_id = ?""",
             (lic["id"], level, app["id"]),
@@ -423,6 +445,26 @@ async def client_login(request: Request, req: EncryptedRequest,
     if entitlement and entitlement["entitlement_paused"]:
         return enc_resp({"success": False, "message": "ENTITLEMENT_PAUSED",
                          "reason": entitlement["entitlement_pause_reason"] or "License temporarily paused"}, secret, req.app_id)
+
+    if not client_version:
+        return enc_resp({"success": False, "message": "OUTDATED_VERSION",
+                         "required_version": app["version"]}, secret, req.app_id)
+    if entitlement:
+        try:
+            blocked_versions = set(json.loads(entitlement["blocked_client_versions"] or "[]"))
+        except (TypeError, ValueError):
+            blocked_versions = set()
+        required_version = entitlement["required_client_version"]
+        if entitlement["version_kill_switch"] or client_version in blocked_versions or (
+            required_version and client_version != required_version
+        ):
+            await log_action(db, "client_version_blocked", app_id=app["id"], ip=ip, hwid=hwid,
+                             details=f"product={entitlement['product_id']}; client={client_version}; required={required_version}")
+            return enc_resp({"success": False, "message": "OUTDATED_VERSION",
+                             "required_version": required_version or app["version"]}, secret, req.app_id)
+    elif client_version != app["version"]:
+        return enc_resp({"success": False, "message": "OUTDATED_VERSION",
+                         "required_version": app["version"]}, secret, req.app_id)
 
     # ── App-specific HWID ban check ──
     async with db.execute(
@@ -499,10 +541,14 @@ async def client_login(request: Request, req: EncryptedRequest,
     token      = generate_session_token()
     session_id = generate_uid()
     expires    = future(SESSION_DURATION)
+    token_expires = future(min(SESSION_DURATION, SESSION_TOKEN_SECONDS)) if req.protocol == 2 else expires
 
     await db.execute(
-        "INSERT INTO sessions (id, token, license_id, hwid, ip, app_id, product_id, expires_at) VALUES (?,?,?,?,?,?,?,?)",
-        (session_id, token, lic["id"], hwid, ip, app["id"], selected_product_id, expires),
+        """INSERT INTO sessions
+           (id,token,license_id,hwid,ip,app_id,product_id,expires_at,client_version,token_expires_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (session_id, token, lic["id"], hwid, ip, app["id"], selected_product_id,
+         expires, client_version, token_expires),
     )
 
     # ── Reset strikes on successful login ──
@@ -571,12 +617,10 @@ async def client_heartbeat(request: Request, req: EncryptedRequest,
                              ip=ip, hwid=sess["hwid"])
             return enc_resp({"success": False, "message": "BANNED_HWID"}, secret, req.app_id)
 
-    await db.execute(
-        "UPDATE sessions SET last_heartbeat = ?, ip = ? WHERE token = ?",
-        (utcnow(), ip, token),
-    )
+    new_token = await rotate_session_token(db, sess) if req.protocol == 2 else token
+    await db.execute("UPDATE sessions SET last_heartbeat=?, ip=? WHERE id=?", (utcnow(), ip, sess["id"]))
     await db.commit()
-    return enc_resp({"success": True, "message": "OK"}, secret, req.app_id)
+    return enc_resp({"success": True, "message": "OK", "token": new_token}, secret, req.app_id)
 
 
 # ─── /logout ─────────────────────────────────────────────────────────────────
@@ -635,7 +679,9 @@ async def client_validate(request: Request, req: EncryptedRequest,
     if authorization_failure:
         return enc_resp({"success": False, "message": authorization_failure}, secret, req.app_id)
 
-    return enc_resp({"success": True, "message": "OK",
+    new_token = await rotate_session_token(db, sess) if req.protocol == 2 else token
+    await db.commit()
+    return enc_resp({"success": True, "message": "OK", "token": new_token,
                      "expires_at": sess["expires_at"]}, secret, req.app_id)
 
 
@@ -672,7 +718,7 @@ async def client_download(request: Request, req: EncryptedRequest,
     # Select only an active, currently available release for this application.
     async with db.execute(
         """SELECT f.* FROM app_files f
-           WHERE f.app_id=? AND f.name=? AND f.is_active=1 AND f.is_archived=0
+           WHERE f.app_id=? AND f.name=? AND f.is_active=1 AND f.is_archived=0 AND f.is_revoked=0
              AND (f.available_from IS NULL OR f.available_from<=CURRENT_TIMESTAMP)
              AND (f.available_until IS NULL OR f.available_until>CURRENT_TIMESTAMP)""",
         (app["id"], name),
@@ -713,6 +759,7 @@ async def client_download(request: Request, req: EncryptedRequest,
         "INSERT INTO file_download_events(file_id,license_id,source,ip) VALUES(?,?,?,?)",
         (row["id"], sess["license_id"], "sdk", ip),
     )
+    new_token = await rotate_session_token(db, sess) if req.protocol == 2 else token
     await db.commit()
 
     return enc_resp({
@@ -727,4 +774,5 @@ async def client_download(request: Request, req: EncryptedRequest,
         "channel": row["channel"],
         "file_type": row["file_type"],
         "mandatory": bool(row["is_mandatory"]),
+        "token": new_token,
     }, secret, req.app_id)

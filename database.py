@@ -71,7 +71,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     product_id      TEXT,
     started_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
     last_heartbeat  DATETIME DEFAULT CURRENT_TIMESTAMP,
-    expires_at      DATETIME NOT NULL
+    expires_at      DATETIME NOT NULL,
+    client_version  TEXT,
+    token_expires_at DATETIME,
+    rotated_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    token_generation INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS request_nonces (
@@ -181,6 +185,9 @@ CREATE TABLE IF NOT EXISTS app_files (
     storage_provider TEXT NOT NULL DEFAULT 'database',
     storage_key TEXT,
     replaced_file_id TEXT,
+    is_revoked INTEGER NOT NULL DEFAULT 0,
+    revoked_at DATETIME,
+    revoke_reason TEXT,
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(app_id, name)
 );
@@ -228,6 +235,9 @@ CREATE TABLE IF NOT EXISTS products (
     service_status TEXT NOT NULL DEFAULT 'operational',
     status_message TEXT,
     status_color TEXT NOT NULL DEFAULT '#22c55e',
+    required_client_version TEXT,
+    blocked_client_versions TEXT NOT NULL DEFAULT '[]',
+    version_kill_switch INTEGER NOT NULL DEFAULT 0,
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(app_id, level)
 );
@@ -368,6 +378,21 @@ CREATE TABLE IF NOT EXISTS api_keys (
     last_used   DATETIME,
     expires_at  DATETIME,
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS download_tickets (
+    id TEXT PRIMARY KEY,
+    ticket_hash TEXT NOT NULL UNIQUE,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    license_id TEXT NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+    app_id TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    product_id TEXT,
+    file_id TEXT NOT NULL REFERENCES app_files(id) ON DELETE CASCADE,
+    hwid TEXT NOT NULL,
+    client_version TEXT,
+    expires_at DATETIME NOT NULL,
+    consumed_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 """

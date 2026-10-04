@@ -122,13 +122,16 @@
       tbody.innerHTML = files.map(f => `
         <tr>
           <td><input type="checkbox" class="file-select" value="${f.id}" ${selectedFiles.has(f.id) ? "checked" : ""} onchange="toggleFileSelect('${f.id}', this.checked)"></td>
-          <td><span class="mono">${f.name}</span></td>
+          <td><span class="mono">${f.name}</span>${f.is_revoked ? '<div><span class="badge badge-banned">REVOKED</span></div>' : ''}</td>
           <td style="color:var(--text2)">${f.app_name}</td>
           <td>${f.portal_visible ? '<span class="badge badge-active">Customer download</span>' : '<span class="badge">Private</span>'}</td>
           <td>${escapeHtml(f.product_name || 'All owned products')}</td>
           <td style="color:var(--text3);font-size:12px">${fmtDate(f.created_at)}</td>
           <td>
             <button class="btn btn-outline btn-sm" onclick="setVisibility('${f.id}',${f.portal_visible ? 'false' : 'true'},'${f.product_id || ''}')">${f.portal_visible ? 'Make Private' : 'Allow Download'}</button>
+            ${f.is_revoked
+              ? `<button class="btn btn-primary btn-sm" onclick="restoreBuild('${f.id}')">Restore Build</button>`
+              : `<button class="btn btn-warning btn-sm" onclick="revokeBuild('${f.id}','${escapeHtml(f.release_version || '')}')">Revoke Build</button>`}
             <button class="btn btn-ghost btn-sm" onclick="deleteFile('${f.id}')">🗑</button>
           </td>
         </tr>
@@ -197,6 +200,20 @@
       toast("Deleted", "success");
       load();
     } catch (e) { toast(e.message, "error"); }
+  }
+
+  async function revokeBuild(id, version) {
+    const reason = prompt(`Why is build ${version || ''} being revoked?`, "Compromised or vulnerable build");
+    if (!reason) return;
+    const block = confirm("Also block this client version and close matching active sessions?");
+    try { await API.revokeFile(id, reason, block); toast("Build revoked immediately", "warning"); load(); }
+    catch (e) { toast(e.message, "error"); }
+  }
+
+  async function restoreBuild(id) {
+    if (!confirm("Restore downloads for this build? Its client version remains blocked until you remove it from Version Rules.")) return;
+    try { await API.restoreFile(id); toast("Build restored; review product version rules", "success"); load(); }
+    catch (e) { toast(e.message, "error"); }
   }
 
   async function bulkDeleteFiles() {

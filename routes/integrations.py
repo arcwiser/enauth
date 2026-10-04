@@ -40,14 +40,25 @@ def require_scope(required: str):
                 raise HTTPException(403, "Discord integration key is bound to another application")
             await db.execute("UPDATE discord_integrations SET last_used=CURRENT_TIMESTAMP WHERE id=?", (row["id"],))
             await db.commit()
-            return {"id": row["id"], "role": "owner", "scopes": "admin", "app_id": row["app_id"], "kind": "discord"}
+            return {"id": row["id"], "role": "owner", "scopes": "*", "app_id": row["app_id"], "kind": "discord"}
         key = await require_api_key(x_api_key, db)
         if key.get("role") != "owner":
             raise HTTPException(403, "Owner API key required")
-        configured = str(key.get("scopes") or "read").lower()
-        granted = max((ranks.get(item.strip(), 0) for item in configured.split(",")), default=0)
-        if granted < ranks[required]:
-            raise HTTPException(403, f"API key requires {required} scope")
+        configured = {item.strip().lower() for item in str(key.get("scopes") or "read").split(",") if item.strip()}
+        if "*" not in configured and "admin" not in configured:
+            if required in ranks:
+                granted = max((ranks.get(item, 0) for item in configured), default=0)
+                allowed = granted >= ranks[required]
+            else:
+                resource, _, action = required.partition(".")
+                allowed = required in configured or f"{resource}.*" in configured
+                # Legacy write/read keys remain valid during migration.
+                if not allowed and action in {"read", "list"}:
+                    allowed = bool(configured & {"read", "write"})
+                elif not allowed and action not in {"read", "list", "reveal"}:
+                    allowed = "write" in configured
+            if not allowed:
+                raise HTTPException(403, f"API key requires {required} scope")
         return key
 
     return dependency
@@ -126,7 +137,7 @@ class HwidBody(BaseModel):
 
 
 @router.get("/apps")
-async def apps(_key=Depends(require_scope("read")), db=Depends(get_db)):
+async def apps(_key=Depends(require_scope("apps.read")), db=Depends(get_db)):
     async with db.execute(
         "SELECT id, name, version FROM applications ORDER BY name LIMIT 200"
     ) as cur:
@@ -134,7 +145,7 @@ async def apps(_key=Depends(require_scope("read")), db=Depends(get_db)):
 
 
 @router.get("/apps/{app_id}")
-async def app_details(app_id: str, _key=Depends(require_scope("read")), db=Depends(get_db)):
+async def app_details(app_id: str, _key=Depends(require_scope("apps.read")), db=Depends(get_db)):
     app = await require_app(db, app_id)
     async with db.execute(
         """SELECT id, name, level, is_active, service_status, status_color, status_message,
@@ -167,7 +178,7 @@ async def licenses(app_id: str, search: Optional[str] = None, limit: int = 25,
 
 
 @router.post("/apps/{app_id}/licenses")
-async def generate(app_id: str, body: GenerateBody, key=Depends(require_scope("write")), db=Depends(get_db)):
+async def generate(app_id: str, body: GenerateBody, key=Depends(require_scope("licenses.generate")), db=Depends(get_db)):
     await require_app(db, app_id)
     async with db.execute(
         "SELECT id, name, level FROM products WHERE app_id = ? AND level = ? AND is_active = 1",
@@ -258,7 +269,7 @@ async def upload_build(app_id: str, name: str = Form(...), file: UploadFile = Fi
                        platform: str = Form("windows"), architecture: str = Form("x64"),
                        release_notes: Optional[str] = Form(None), portal_visible: bool = Form(False),
                        is_mandatory: bool = Form(False), auto_replace: bool = Form(False),
-                       key=Depends(require_scope("admin")), db=Depends(get_db)):
+                       key=Depends(require_scope("builds.upload")), db=Depends(get_db)):
     await require_app(db, app_id)
     safe_name = Path(name).name.strip()
     if not safe_name or safe_name != name.strip():
@@ -338,7 +349,7 @@ async def stats(app_id: str, _key=Depends(require_scope("read")), db=Depends(get
 
 
 @router.get("/apps/{app_id}/licenses/{identifier}")
-async def license_details(app_id: str, identifier: str, _key=Depends(require_scope("read")), db=Depends(get_db)):
+async def license_details(app_id: str, identifier: str, _key=Depends(require_scope("licenses.reveal")), db=Depends(get_db)):
     item = await find_license(db, app_id, identifier)
     item.pop("key_hash", None)
     async with db.execute("SELECT hwid_hash, first_seen, last_seen FROM hwids WHERE license_id = ?", (item["id"],)) as cur:
@@ -457,7 +468,7 @@ async def extend(app_id: str, identifier: str, body: ExtendBody,
 
 
 @router.delete("/apps/{app_id}/licenses/{identifier}")
-async def delete_license(app_id: str, identifier: str, _key=Depends(require_scope("admin")), db=Depends(get_db)):
+async def delete_license(app_id: str, identifier: str, _key=Depends(require_scope("licenses.delete")), db=Depends(get_db)):
     item = await find_license(db, app_id, identifier)
     await log_action(db, "integration_deleted", app_id=app_id,
                      license_key=mask_license_key(item["key"]), details=f"License {item['id']} deleted")
@@ -496,7 +507,7 @@ async def kill_all_sessions(app_id: str, _key=Depends(require_scope("admin")), d
 
 
 @router.post("/apps/{app_id}/pause")
-async def pause_app(app_id: str, body: PauseBody, key=Depends(require_scope("admin")), db=Depends(get_db)):
+async def pause_app(app_id: str, body: PauseBody, key=Depends(require_scope("apps.modify")), db=Depends(get_db)):
     await require_app(db, app_id)
     async with db.execute("SELECT is_paused, paused_at FROM applications WHERE id = ?", (app_id,)) as cur:
         state = await cur.fetchone()
@@ -580,7 +591,9 @@ async def resume_app(app_id: str, body: ResumeBody, key=Depends(require_scope("a
 
 
 @router.get("/resellers")
-async def resellers(_key=Depends(require_scope("read")), db=Depends(get_db)):
+async def resellers(key=Depends(require_scope("resellers.read")), db=Depends(get_db)):
+    if key.get("kind") == "discord":
+        raise HTTPException(403, "Discord integrations cannot access reseller accounts")
     async with db.execute(
         "SELECT id, username, balance, is_active, created_at FROM resellers ORDER BY username LIMIT 200"
     ) as cur:
@@ -589,7 +602,9 @@ async def resellers(_key=Depends(require_scope("read")), db=Depends(get_db)):
 
 @router.post("/resellers/{reseller_id}/credit")
 async def credit_reseller(reseller_id: str, body: CreditResellerBody,
-                          key=Depends(require_scope("admin")), db=Depends(get_db)):
+                          key=Depends(require_scope("resellers.credit")), db=Depends(get_db)):
+    if key.get("kind") == "discord":
+        raise HTTPException(403, "Discord integrations cannot access reseller accounts")
     cursor = await db.execute("UPDATE resellers SET balance=balance+? WHERE id=?", (body.amount, reseller_id))
     if cursor.rowcount == 0:
         raise HTTPException(404, "Reseller not found")
@@ -619,7 +634,7 @@ async def builds(app_id: str, _key=Depends(require_scope("read")), db=Depends(ge
 
 
 @router.delete("/apps/{app_id}/builds/{file_id}")
-async def delete_build(app_id: str, file_id: str, _key=Depends(require_scope("admin")), db=Depends(get_db)):
+async def delete_build(app_id: str, file_id: str, _key=Depends(require_scope("builds.delete")), db=Depends(get_db)):
     cursor = await db.execute("DELETE FROM app_files WHERE id = ? AND app_id = ?", (file_id, app_id))
     await db.commit()
     if cursor.rowcount == 0:

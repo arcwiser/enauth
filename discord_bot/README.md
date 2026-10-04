@@ -12,10 +12,10 @@ that owns the selected product. `/addproduct` asks for the license and duration,
 then displays a product dropdown instead of requiring a product ID.
 
 Operational controls include `/pauseapp` and `/resumeapp`. Resuming first shows
-a compensation preview unless `confirm:true` is supplied. `/resellers` lists
-reseller IDs and `/creditreseller` credits a balance after explicit
-confirmation. These higher-impact commands require the app-bound Discord
-integration key in addition to the configured Discord role. Treat that role as privileged:
+a compensation preview unless `confirm:true` is supplied. Reseller accounts,
+balances, and reseller credentials are intentionally unavailable through the
+Discord integration and remain panel-only. Higher-impact commands require the
+app-bound Discord integration key in addition to the configured Discord role. Treat that role as privileged:
 members who have it can replace or remove the Discord server's EnAuth connection.
 
 The bot intentionally uses a dedicated, revocable, app-bound Discord key rather

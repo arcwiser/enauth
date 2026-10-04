@@ -23,10 +23,10 @@ from utils.crypto import (
     generate_license_key, generate_app_secret,
     generate_session_token, generate_uid,
     hash_password, verify_password,
-    hash_license_key, mask_license_key, encrypt_license_key, display_license_key,
+    hash_license_key, mask_license_key, encrypt_license_key, display_license_key, encrypt_bytes,
 )
 from utils.logger import app_log, log_action
-from utils.response_signing import response_public_key_hex
+from utils.response_signing import KEY_PATH as RESPONSE_SIGNING_KEY_PATH, response_public_key_hex
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 ADMIN_SESSION_HOURS = int(os.getenv("ADMIN_SESSION_HOURS", "8"))
@@ -38,6 +38,7 @@ COOKIE_SECURE = os.getenv("COOKIE_SECURE", "true").lower() == "true"
 SERVER_STARTED_MONOTONIC = time.monotonic()
 BACKUP_DIR = Path(os.getenv("BACKUP_DIR", str(Path(__file__).resolve().parent.parent / "backups"))).resolve()
 BACKUP_RETENTION = max(1, min(int(os.getenv("BACKUP_RETENTION", "14")), 100))
+BACKUP_ENCRYPTION_KEY = os.getenv("BACKUP_ENCRYPTION_KEY", "")
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -81,7 +82,7 @@ async def cleanup_runtime_state(db: aiosqlite.Connection):
     await db.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (now,))
     await db.execute("DELETE FROM reseller_sessions WHERE expires_at <= ?", (now,))
     await db.execute("DELETE FROM portal_sessions WHERE expires_at <= ?", (now,))
-    await db.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
+    await db.execute("DELETE FROM sessions WHERE expires_at <= ? OR COALESCE(token_expires_at, expires_at) <= ?", (now, now))
     await db.execute("DELETE FROM temp_2fa_sessions WHERE expires_at <= ?", (now,))
     await db.execute("DELETE FROM logs WHERE timestamp < datetime(?, '-30 days')", (now,))
     await db.commit()
@@ -166,6 +167,10 @@ async def list_backups(user=Depends(require_owner)):
 
 @router.post("/backups")
 async def create_backup(user=Depends(require_owner), db: aiosqlite.Connection = Depends(get_db)):
+    return await create_verified_backup(db, "manual")
+
+
+async def create_verified_backup(db: aiosqlite.Connection, source: str = "automatic") -> dict:
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     destination = BACKUP_DIR / f"enauth-{stamp}.db"
@@ -180,10 +185,19 @@ async def create_backup(user=Depends(require_owner), db: aiosqlite.Connection = 
     if not check or check[0] != "ok":
         destination.unlink(missing_ok=True)
         raise HTTPException(500, "Backup integrity verification failed")
+    if BACKUP_ENCRYPTION_KEY and RESPONSE_SIGNING_KEY_PATH.is_file():
+        encrypted_key = encrypt_bytes(RESPONSE_SIGNING_KEY_PATH.read_bytes(), BACKUP_ENCRYPTION_KEY)
+        key_backup = destination.with_suffix(".signing-key.enc")
+        key_backup.write_text(encrypted_key, encoding="ascii")
+        try:
+            key_backup.chmod(0o600)
+        except OSError:
+            pass
     files = sorted(BACKUP_DIR.glob("enauth-*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
     for expired in files[BACKUP_RETENTION:]:
         expired.unlink(missing_ok=True)
-    await log_action(db, "backup_created", details=destination.name)
+        expired.with_suffix(".signing-key.enc").unlink(missing_ok=True)
+    await log_action(db, "backup_created", details=f"{destination.name}; source={source}; signing_key={bool(BACKUP_ENCRYPTION_KEY)}")
     await db.commit()
     return _backup_info(destination)
 
@@ -502,6 +516,28 @@ class UpdateProductBody(BaseModel):
     service_status: Optional[str] = None
     status_message: Optional[str] = Field(default=None, max_length=500)
     status_color: Optional[str] = None
+    required_client_version: Optional[str] = Field(default=None, max_length=64)
+    blocked_client_versions: Optional[list[str]] = Field(default=None, max_length=100)
+    version_kill_switch: Optional[bool] = None
+
+    @field_validator("required_client_version")
+    @classmethod
+    def validate_required_client_version(cls, value):
+        if value is None or not value.strip():
+            return value
+        if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._+\-]{0,63}", value.strip()):
+            raise ValueError("Invalid client version")
+        return value.strip()
+
+    @field_validator("blocked_client_versions")
+    @classmethod
+    def validate_blocked_client_versions(cls, values):
+        if values is None:
+            return values
+        for value in values:
+            if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._+\-]{0,63}", value.strip()):
+                raise ValueError("Invalid blocked client version")
+        return values
 
     @field_validator("service_status")
     @classmethod
@@ -617,6 +653,13 @@ async def update_product(product_id: str, body: UpdateProductBody, user=Depends(
         updates.append("status_message = ?"); args.append(body.status_message.strip() or None)
     if body.status_color is not None:
         updates.append("status_color = ?"); args.append(body.status_color)
+    if body.required_client_version is not None:
+        updates.append("required_client_version = ?"); args.append(body.required_client_version.strip() or None)
+    if body.blocked_client_versions is not None:
+        cleaned = sorted({v.strip() for v in body.blocked_client_versions if v.strip()})
+        updates.append("blocked_client_versions = ?"); args.append(json.dumps(cleaned))
+    if body.version_kill_switch is not None:
+        updates.append("version_kill_switch = ?"); args.append(1 if body.version_kill_switch else 0)
     if not updates:
         raise HTTPException(400, "Nothing to update")
     args.append(product_id)
@@ -2331,11 +2374,12 @@ async def list_sessions(search: Optional[str] = None, app_id: Optional[str] = No
                         limit: int = 100, offset: int = 0,
                         user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
     owner_id = auth_owner_id(user)
-    sql = """SELECT s.*, l.key as license_key, a.name as app_name
+    sql = """SELECT s.*, l.key as license_key, a.name as app_name, p.name as product_name
            FROM sessions s
            JOIN licenses l ON l.id = s.license_id
            JOIN applications a ON a.id = s.app_id
-           WHERE s.expires_at > ?"""
+           LEFT JOIN products p ON p.id = s.product_id
+           WHERE s.expires_at > ? AND COALESCE(s.token_expires_at, s.expires_at) > CURRENT_TIMESTAMP"""
     args = [utcnow()]
     if owner_id:
         sql += " AND a.owner_user_id = ?"
@@ -2886,13 +2930,13 @@ class PasswordResetVerifyBody(BaseModel):
 
 class CreateApiKeyBody(BaseModel):
     name: str = Field(min_length=1, max_length=100)
-    scopes: Literal["read", "write", "admin"] = "read"
+    scopes: str = Field(default="read", min_length=1, max_length=1000)
     expires_days: Optional[int] = Field(default=None, ge=1, le=3650)
 
 
 class UpdateApiKeyBody(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
-    scopes: Optional[Literal["read", "write", "admin"]] = None
+    scopes: Optional[str] = Field(default=None, min_length=1, max_length=1000)
     is_active: Optional[bool] = None
 
 
@@ -3302,7 +3346,8 @@ async def list_files(app_id: Optional[str] = None, search: Optional[str] = None,
                      user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
     owner_id = auth_owner_id(user)
     sql = """SELECT f.id, f.app_id, f.name, f.is_secret, f.portal_visible, f.product_id,
-                    f.created_at, a.name as app_name, p.name as product_name
+                    f.created_at, f.release_version, f.is_revoked, f.revoked_at, f.revoke_reason,
+                    a.name as app_name, p.name as product_name
              FROM app_files f 
              JOIN applications a ON a.id = f.app_id
              LEFT JOIN products p ON p.id=f.product_id"""
@@ -3377,6 +3422,11 @@ class FileVisibilityBody(BaseModel):
     product_id: Optional[str] = None
 
 
+class RevokeBuildBody(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+    block_client_version: bool = True
+
+
 @router.put("/files/{file_id}/visibility")
 async def update_file_visibility(file_id: str, body: FileVisibilityBody,
                                  user=Depends(require_admin), db=Depends(get_db)):
@@ -3397,6 +3447,61 @@ async def update_file_visibility(file_id: str, body: FileVisibilityBody,
                      (1 if body.portal_visible else 0, body.product_id, file_id))
     await db.commit()
     return {"ok": True}
+
+
+@router.post("/files/{file_id}/revoke")
+async def revoke_file_build(file_id: str, body: RevokeBuildBody,
+                            user=Depends(require_admin), db=Depends(get_db)):
+    owner_id = auth_owner_id(user)
+    sql = """SELECT f.* FROM app_files f JOIN applications a ON a.id=f.app_id WHERE f.id=?"""
+    args = [file_id]
+    if owner_id:
+        sql += " AND a.owner_user_id=?"; args.append(owner_id)
+    async with db.execute(sql, args) as cur:
+        file_row = await cur.fetchone()
+    if not file_row:
+        raise HTTPException(404, "File not found")
+    await db.execute(
+        """UPDATE app_files SET is_revoked=1,is_active=0,revoked_at=CURRENT_TIMESTAMP,revoke_reason=?
+           WHERE id=?""", (body.reason.strip(), file_id),
+    )
+    if body.block_client_version and file_row["release_version"]:
+        async with db.execute(
+            """SELECT product_id FROM app_file_products WHERE file_id=?
+               UNION SELECT product_id FROM app_files WHERE id=? AND product_id IS NOT NULL""",
+            (file_id, file_id),
+        ) as cur:
+            product_ids = [row[0] for row in await cur.fetchall()]
+        for product_id in product_ids:
+            async with db.execute("SELECT blocked_client_versions FROM products WHERE id=?", (product_id,)) as cur:
+                product = await cur.fetchone()
+            versions = set(json.loads(product[0] or "[]")) if product else set()
+            versions.add(file_row["release_version"])
+            await db.execute("UPDATE products SET blocked_client_versions=? WHERE id=?",
+                             (json.dumps(sorted(versions)), product_id))
+            await db.execute("DELETE FROM sessions WHERE product_id=? AND client_version=?",
+                             (product_id, file_row["release_version"]))
+    await log_action(db, "build_revoked", app_id=file_row["app_id"],
+                     details=f"file={file_id}; version={file_row['release_version']}; reason={body.reason.strip()}")
+    await db.commit()
+    return {"ok": True}
+
+
+@router.post("/files/{file_id}/restore")
+async def restore_file_build(file_id: str, user=Depends(require_admin), db=Depends(get_db)):
+    owner_id = auth_owner_id(user)
+    sql = """UPDATE app_files SET is_revoked=0,is_active=1,revoked_at=NULL,revoke_reason=NULL
+             WHERE id=?"""
+    args = [file_id]
+    if owner_id:
+        sql += " AND app_id IN (SELECT id FROM applications WHERE owner_user_id=?)"
+        args.append(owner_id)
+    cursor = await db.execute(sql, args)
+    if cursor.rowcount != 1:
+        raise HTTPException(404, "File not found")
+    await log_action(db, "build_restored", details=f"file={file_id}; blocked versions unchanged")
+    await db.commit()
+    return {"ok": True, "note": "Remove the version from the product block list separately when safe."}
 
 @router.delete("/files/{file_id}")
 async def delete_file(file_id: str, user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):

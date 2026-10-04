@@ -151,6 +151,22 @@
     catch (e) { toast(e.message, "error"); }
   }
 
+  async function configureVersions(id, required, blocked, killSwitch) {
+    const requiredVersion = prompt("Required client version (blank uses the app version):", required || "") ?? required;
+    const blockedText = prompt("Blocked versions, separated by commas:", (blocked || []).join(", "));
+    if (blockedText === null) return;
+    const enableKillSwitch = confirm("Enable the emergency version kill switch?\n\nOK blocks every login for this product. Cancel leaves it disabled.");
+    try {
+      await API.updateProduct(id, {
+        required_client_version: requiredVersion,
+        blocked_client_versions: blockedText.split(",").map(v => v.trim()).filter(Boolean),
+        version_kill_switch: enableKillSwitch,
+      });
+      toast(enableKillSwitch ? "Product login kill switch enabled" : "Version policy updated", enableKillSwitch ? "warning" : "success");
+      await load();
+    } catch (e) { toast(e.message, "error"); }
+  }
+
   async function load() {
     const tbody = document.getElementById("tbody");
     tbody.innerHTML = `<tr class="loading-row"><td colspan="6"><span class="spinner"></span></td></tr>`;
@@ -182,6 +198,7 @@
               <div class="action-group">
                 <button class="btn btn-sm btn-outline" onclick="addPricing('${p.id}')">+ Pricing</button>
                 <button class="btn btn-sm btn-outline" onclick="setProductStatus('${p.id}','${p.service_status || 'operational'}','${p.status_color || '#22c55e'}')">Set Status</button>
+                <button class="btn btn-sm ${p.version_kill_switch ? 'btn-danger' : 'btn-outline'}" onclick='configureVersions(${JSON.stringify(p.id)},${JSON.stringify(p.required_client_version || "")},${JSON.stringify(JSON.parse(p.blocked_client_versions || "[]"))},${Boolean(p.version_kill_switch)})'>${p.version_kill_switch ? 'Version Blocked' : 'Version Rules'}</button>
                 ${p.is_paused
                   ? `<button class="btn btn-sm btn-primary" onclick="resumeLevel('${p.id}')">Resume + Comp</button>`
                   : `<button class="btn btn-sm btn-warning" onclick="pauseLevel('${p.id}')">Pause</button>`}

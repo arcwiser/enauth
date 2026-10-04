@@ -4,6 +4,7 @@ import secrets
 import string
 import asyncio
 import contextlib
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -28,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from database import init_db, get_db, DB_PATH
 from routes.client import router as client_router, limiter
-from routes.admin  import router as admin_router, cleanup_runtime_state
+from routes.admin  import router as admin_router, cleanup_runtime_state, create_verified_backup
 from routes.integrations import router as integrations_router
 from routes.status import router as status_router
 from utils.crypto  import generate_uid, hash_password, generate_app_secret
@@ -60,6 +61,9 @@ def validate_startup_configuration(debug_mode: bool):
     if len(license_pepper) < 32:
         print("CRITICAL ERROR: LICENSE_KEY_PEPPER must contain at least 32 characters.")
         sys.exit(1)
+    if int(os.getenv("AUTO_BACKUP_HOURS", "0")) > 0 and len(os.getenv("BACKUP_ENCRYPTION_KEY", "")) < 32:
+        print("CRITICAL ERROR: BACKUP_ENCRYPTION_KEY must contain at least 32 characters when scheduled backups are enabled.")
+        sys.exit(1)
     if not debug_mode and os.getenv("COOKIE_SECURE", "true").lower() != "true":
         print("CRITICAL ERROR: COOKIE_SECURE must be true in production mode.")
         print("Use DEBUG=true only for intentional local HTTP development.")
@@ -80,11 +84,16 @@ def validate_startup_configuration(debug_mode: bool):
 async def _maintenance_loop():
     """Periodically prune expired sessions and stale runtime state."""
     import aiosqlite
+    auto_backup_seconds = max(0, int(os.getenv("AUTO_BACKUP_HOURS", "0"))) * 3600
+    last_backup = 0.0
     while True:
         try:
             async with aiosqlite.connect(DB_PATH) as db:
                 db.row_factory = aiosqlite.Row
                 await cleanup_runtime_state(db)
+                if auto_backup_seconds and time.monotonic() - last_backup >= auto_backup_seconds:
+                    await create_verified_backup(db, "scheduled")
+                    last_backup = time.monotonic()
         except Exception as exc:
             app_log.error(f"[maintenance] cleanup failed: {exc}")
         await asyncio.sleep(600)
