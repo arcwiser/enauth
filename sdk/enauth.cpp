@@ -646,7 +646,6 @@ std::vector<unsigned char> Client::DownloadFile(const std::string& name) {
             JsonStr(OBFUSCATE("hwid"), deviceHwid) + "," +
             JsonStr(OBFUSCATE("name"), name) + "," +
             JsonStr(OBFUSCATE("ticket"), ticket) + "}";
-        SecureZeroMemory(ticket.data(), ticket.size());
         SecureZeroMemory(ticketToken.data(), ticketToken.size());
         
         const std::string endpoint = OBFUSCATE("/api/client/download");
@@ -661,10 +660,21 @@ std::vector<unsigned char> Client::DownloadFile(const std::string& name) {
             std::string b64_data = JsonGet(dec, OBFUSCATE("data"));
             const std::string encryption = JsonGet(dec, OBFUSCATE("encryption"));
             const std::string fileId = JsonGet(dec, OBFUSCATE("file_id"));
-            if (!b64_data.empty() && encryption == OBFUSCATE("TLS-SIGNED-SESSION-v2") &&
-                !fileId.empty()) {
-                std::vector<unsigned char> decoded = Base64Decode(b64_data);
-                std::string plaintext(decoded.begin(), decoded.end());
+            if (!b64_data.empty() && !fileId.empty() &&
+                (encryption == OBFUSCATE("AES-256-GCM-TICKET-v2") ||
+                 encryption == OBFUSCATE("TLS-SIGNED-SESSION-v2"))) {
+                std::string plaintext;
+                if (encryption == OBFUSCATE("AES-256-GCM-TICKET-v2")) {
+                    const std::string context = OBFUSCATE("download-v2|") + token + "|" + deviceHwid + "|" + fileId;
+                    std::string downloadSecret = HmacSHA256Hex(ticket, context);
+                    plaintext = AES256CBCDecrypt(b64_data, downloadSecret);
+                    SecureZeroMemory(downloadSecret.data(), downloadSecret.size());
+                } else {
+                    std::vector<unsigned char> legacyDecoded = Base64Decode(b64_data);
+                    plaintext.assign(legacyDecoded.begin(), legacyDecoded.end());
+                    if (!legacyDecoded.empty()) SecureZeroMemory(legacyDecoded.data(), legacyDecoded.size());
+                }
+                std::vector<unsigned char> decoded(plaintext.begin(), plaintext.end());
                 const std::string expectedHash = JsonGet(dec, OBFUSCATE("sha256"));
                 const bool validHash = decoded.size() <= 100u * 1024u * 1024u &&
                     expectedHash.size() == 64 && SHA256Hex(plaintext) == expectedHash &&
@@ -675,8 +685,10 @@ std::vector<unsigned char> Client::DownloadFile(const std::string& name) {
                     if (!decoded.empty()) SecureZeroMemory(decoded.data(), decoded.size());
                     SecureZeroMemory(token.data(), token.size());
                     SecureZeroMemory(deviceHwid.data(), deviceHwid.size());
+                    SecureZeroMemory(ticket.data(), ticket.size());
                     return {};
                 }
+                SecureZeroMemory(ticket.data(), ticket.size());
                 SecureZeroMemory(token.data(), token.size());
                 SecureZeroMemory(deviceHwid.data(), deviceHwid.size());
                 return decoded;
@@ -684,6 +696,7 @@ std::vector<unsigned char> Client::DownloadFile(const std::string& name) {
         }
         if (!token.empty()) SecureZeroMemory(token.data(), token.size());
         if (!deviceHwid.empty()) SecureZeroMemory(deviceHwid.data(), deviceHwid.size());
+        if (!ticket.empty()) SecureZeroMemory(ticket.data(), ticket.size());
     } catch (...) {}
     return {};
 }

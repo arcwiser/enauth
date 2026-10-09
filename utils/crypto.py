@@ -79,6 +79,12 @@ def derive_session_download_secret(app_secret: str, token: str, hwid: str, file_
     return hmaclib.new(app_secret.encode("utf-8"), context, hashlib.sha256).hexdigest()
 
 
+def derive_ticket_download_secret(ticket: str, token: str, hwid: str, file_id: str) -> str:
+    """Derive an authenticated payload key unique to a one-use ticket and bound session."""
+    context = f"download-v2|{token}|{hwid}|{file_id}".encode("utf-8")
+    return hmaclib.new(ticket.encode("utf-8"), context, hashlib.sha256).hexdigest()
+
+
 def decrypt_payload(data_b64: str, app_secret: str) -> dict:
     """Decrypt base64(salt[16] + nonce[12] + ciphertext+tag) with AES-256-GCM."""
     raw = base64.b64decode(data_b64)

@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 
 from utils.crypto import (
     compute_signature, decrypt_bytes, decrypt_payload, derive_session_download_secret,
-    encrypt_payload, hash_license_key, mask_license_key,
+    derive_ticket_download_secret, encrypt_payload, hash_license_key, mask_license_key,
 )
 
 
@@ -400,6 +400,7 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
             db.row_factory = aiosqlite.Row
             login_req = self._v2_request(seeded["app_id"], {
                 "version": "1.0.0", "license_key": seeded["license_key"], "hwid": "d" * 64,
+                "sdk_version": "2.2.0",
             })
             login_resp = await self.client.client_login.__wrapped__(
                 _FakeRequest(path=login_path), login_req, db
@@ -448,8 +449,11 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
                 _FakeRequest(path=download_path), download_req, db
             )
             download = self._verify_v2_response(download_resp, download_path, download_req.nonce)
-            self.assertEqual(download["encryption"], "TLS-SIGNED-SESSION-v2")
-            self.assertEqual(base64.b64decode(download["data"], validate=True), b"hello world")
+            self.assertEqual(download["encryption"], "AES-256-GCM-TICKET-v2")
+            download_secret = derive_ticket_download_secret(
+                ticket["ticket"], ticket["token"], "d" * 64, seeded["file_id"]
+            )
+            self.assertEqual(decrypt_bytes(download["data"], download_secret), b"hello world")
             self.assertNotEqual(download["token"], validated["token"])
 
             replay_req = self._v2_request(seeded["app_id"], {

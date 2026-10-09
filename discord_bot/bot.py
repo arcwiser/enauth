@@ -219,11 +219,14 @@ async def help_command(interaction: discord.Interaction):
 **Sessions and security**
 `/sessions`, `/killsession`, `/killallsessions`, `/hwids`, `/banhwid`, `/unbanhwid`, `/logs`, `/securitysummary`, `/resetrequests`, `/reviewreset`
 **Application**
-`/status`, `/health`, `/stats`, `/sdkstatus`, `/expiring`, `/levels`, `/productstatus`, `/apps`, `/setapp`, `/pauseapp`, `/resumeapp`, `/builds`, `/uploadbuild`, `/deletebuild`
+`/status`, `/health`, `/stats`, `/sdkstatus`, `/expiring`, `/levels`, `/productstatus`, `/apps`, `/setapp`, `/pauseapp`, `/resumeapp`, `/builds`, `/upload`, `/uploadbuild`, `/deletebuild`
 **Content**
 `/news`, `/addnews`, `/deletenews`, `/variables`, `/setvariable`, `/deletevariable`
 **Integration**
 `/config`, `/whoami`, `/setup`, `/disconnect`
+
+Use `/upload` for the normal guided path. Use `/uploadbuild` only when you need
+advanced channel, platform, visibility, or replacement controls.
 
 Every operational command requires the configured Discord role."""
     await interaction.response.send_message(commands_text, ephemeral=True)
@@ -761,6 +764,16 @@ async def uploadbuild(interaction: discord.Interaction, file: discord.Attachment
                       auto_replace: bool = False, customer_download: bool = False,
                       mandatory: bool = False, name: str = "", release_notes: str = ""):
     await interaction.response.defer(ephemeral=True)
+    result = await upload_build_file(interaction, file, version, product, file_type, channel, platform,
+                                     architecture, auto_replace, customer_download, mandatory, name, release_notes)
+    await send_upload_result(interaction, result)
+
+
+async def upload_build_file(interaction, file, version, product="", file_type="payload", channel="stable",
+                            platform="windows", architecture="x64", auto_replace=False,
+                            customer_download=False, mandatory=False, name="", release_notes=""):
+    if file.size > 100 * 1024 * 1024:
+        raise RuntimeError("Build exceeds EnAuth's 100 MB upload limit")
     data = await file.read()
     form = aiohttp.FormData()
     form.add_field("name", name or file.filename)
@@ -775,12 +788,38 @@ async def uploadbuild(interaction: discord.Interaction, file: discord.Attachment
     form.add_field("is_mandatory", str(mandatory).lower())
     form.add_field("release_notes", release_notes)
     form.add_field("file", data, filename=file.filename, content_type=file.content_type or "application/octet-stream")
-    result = await api(interaction, "POST", f"/api/integrations/apps/{configured_app(interaction)}/builds", data=form)
+    return await api(interaction, "POST", f"/api/integrations/apps/{configured_app(interaction)}/builds", data=form)
+
+
+async def send_upload_result(interaction, result):
     replaced = f" Replaced and archived `{result['replaced_file_id']}`." if result.get("replaced_file_id") else ""
-    await interaction.followup.send(
-        f"Uploaded `{result['name']}` v`{result['version']}` to `{result['channel']}` "
-        f"({result['size']} bytes).\nSHA-256: `{result['sha256']}`.{replaced}", ephemeral=True
+    embed = discord.Embed(title="Build published", color=discord.Color.green())
+    embed.add_field(name="File", value=f"`{result['name']}`", inline=False)
+    embed.add_field(name="Version", value=f"`{result['version']}`")
+    embed.add_field(name="Channel", value=f"`{result['channel']}`")
+    embed.add_field(name="Size", value=f"{result['size'] / 1048576:.2f} MB")
+    embed.add_field(name="SHA-256", value=f"`{result['sha256']}`", inline=False)
+    if replaced:
+        embed.add_field(name="Previous release", value=replaced, inline=False)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="upload", description="Quickly publish a build with safe production defaults")
+@app_commands.autocomplete(product=product_choices)
+@app_commands.choices(kind=[
+    app_commands.Choice(name="Protected payload", value="payload"),
+    app_commands.Choice(name="Auto-updating loader", value="loader"),
+])
+@keygen
+async def quick_upload(interaction: discord.Interaction, file: discord.Attachment, version: str,
+                       kind: app_commands.Choice[str], product: str = "", release_notes: str = ""):
+    await interaction.response.defer(ephemeral=True)
+    result = await upload_build_file(
+        interaction, file, version, product=product, file_type=kind.value,
+        auto_replace=True, customer_download=(kind.value == "loader"),
+        mandatory=(kind.value == "loader"), release_notes=release_notes,
     )
+    await send_upload_result(interaction, result)
 
 
 @bot.tree.command(description="List protected builds")

@@ -97,6 +97,11 @@ if (!fileData.empty()) {
 }
 ```
 
+SDK 2.2 downloads are returned in an authenticated AES-256-GCM envelope derived
+from the one-use ticket, current rotating session token, device HWID, and exact
+file ID. `DownloadFile` verifies the signed server response and SHA-256 digest,
+then returns the plaintext bytes in memory; it does not save them to disk.
+
 ### 6. Get News
 
 ```cpp
@@ -152,6 +157,14 @@ The SDK includes:
   CMake project and can be disabled explicitly with
   `-DENAUTH_ENABLE_ANTI_DEBUG=OFF` for development troubleshooting.
 - Replay attack protection
+- Short-lived, one-use file tickets bound to the license, application, product,
+  session, HWID, client version, file ID, file version, and file digest
+- SDK 2.2 protected files use a fresh authenticated AES-256-GCM ticket envelope.
+  The response is also sent with `no-store` cache controls to discourage browsers,
+  proxies, and other intermediaries from retaining it.
+- The SDK decrypts the file only after signature and ticket checks, verifies its
+  SHA-256 digest, and keeps the result in memory unless the application chooses
+  to write it elsewhere.
 - Layered runtime secret storage using a per-process AES-256-GCM key plus a
   position-varying XOR transform (replacing the previous single-byte XOR-only storage)
 - Local anti-debugging and integrity checks enabled by default in the example build
@@ -172,6 +185,18 @@ if (client.AutoUpdateLoader("loader.exe", "1.2.0")) {
 The loader release is delivered through a one-use download ticket, the signed
 response is verified, and its SHA-256 digest is checked before replacement.
 The running process is never overwritten in place.
+
+### Protection boundary
+
+These controls prevent ordinary link sharing, ticket replay, using a ticket on a
+different device or session, undetected response modification, and casual theft
+from HTTP caches or temporary download files. They cannot make extraction
+impossible on a customer-controlled computer: executable plaintext must exist in
+memory while it runs, so a sufficiently capable local attacker can still inspect
+or dump that process. Keep valuable authorization and secrets on the server,
+deliver only what the current entitlement needs, revoke compromised versions,
+and prefer a small loader plus a protected payload over shipping permanent
+credentials in the client.
 
 ## HWID Collection
 

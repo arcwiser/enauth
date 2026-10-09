@@ -20,7 +20,7 @@ from utils.crypto import (
     verify_signature, compute_signature,
     generate_session_token, generate_uid,
     is_valid_hwid, hash_license_key, mask_license_key,
-    encrypt_bytes, derive_session_download_secret,
+    encrypt_bytes, derive_session_download_secret, derive_ticket_download_secret,
 )
 from utils.response_signing import sign_response
 from utils.logger import log_action
@@ -900,7 +900,13 @@ async def client_download(request: Request, req: EncryptedRequest,
         if failure:
             return enc_resp({"success": False, "message": failure}, secret, req.app_id)
 
-    if req.protocol == 2:
+    if req.protocol == 2 and version_at_least(sess["sdk_version"] or "", "2.2.0"):
+        download_secret = derive_ticket_download_secret(ticket, token, sess["hwid"], row["id"])
+        content_b64 = encrypt_bytes(row["content"], download_secret)
+        content_encryption = "AES-256-GCM-TICKET-v2"
+    elif req.protocol == 2:
+        # Compatibility path for already-deployed protocol-2 clients. New SDKs
+        # negotiate the authenticated ticket envelope above automatically.
         content_b64 = base64.b64encode(row["content"]).decode("ascii")
         content_encryption = "TLS-SIGNED-SESSION-v2"
     else:

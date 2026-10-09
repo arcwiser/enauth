@@ -19,7 +19,7 @@
 
 namespace enauth {
 
-inline constexpr const char* SDK_VERSION = "2.1.0";
+inline constexpr const char* SDK_VERSION = "2.2.0";
 
 namespace hwid { std::string Collect(); }
 
