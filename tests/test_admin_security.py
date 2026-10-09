@@ -332,6 +332,39 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([(r["release_version"], r["is_active"], r["is_archived"]) for r in rows],
                              [("1.0.0", 0, 1), ("1.1.0", 1, 0)])
 
+    async def test_security_control_center_and_lockdown_do_not_expose_secrets(self):
+        caller = {"id": "owner-1", "username": "owner", "role": "owner", "_source": "admin_users"}
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("INSERT INTO applications(id,name,secret_key) VALUES(?,?,?)",
+                             ("app-sec", "Secure App", "never-return-this-secret"))
+            await db.execute("INSERT INTO licenses(id,key,key_hash,app_id) VALUES(?,?,?,?)",
+                             ("lic-sec", "masked", "a" * 64, "app-sec"))
+            await db.execute(
+                """INSERT INTO sessions(id,token,license_id,hwid,ip,app_id,expires_at,token_expires_at,protocol)
+                   VALUES(?,?,?,?,?,?,datetime('now','+1 hour'),datetime('now','+5 minutes'),2)""",
+                ("sess-sec", "token-sec", "lic-sec", "h" * 64, "127.0.0.1", "app-sec"),
+            )
+            await db.commit()
+            overview = await self.admin.security_control_center(user=caller, db=db)
+            self.assertEqual(overview["applications"][0]["active_sessions"], 1)
+            self.assertNotIn("never-return-this-secret", str(overview))
+
+            with self.assertRaises(HTTPException):
+                await self.admin.emergency_app_lockdown(
+                    "app-sec", self.admin.EmergencyLockdownBody(reason="incident", confirmation="wrong"),
+                    user=caller, db=db,
+                )
+            result = await self.admin.emergency_app_lockdown(
+                "app-sec", self.admin.EmergencyLockdownBody(
+                    reason="Suspected credential theft", confirmation="LOCK app-sec"),
+                user=caller, db=db,
+            )
+            self.assertEqual(result["revoked_sessions"], 1)
+            async with db.execute("SELECT is_paused FROM applications WHERE id='app-sec'") as cur:
+                app = await cur.fetchone()
+            self.assertEqual(app["is_paused"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

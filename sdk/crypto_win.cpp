@@ -41,9 +41,18 @@ static std::string BytesToHex(const std::vector<BYTE>& bytes) {
 }
 
 static std::vector<BYTE> HexToBytes(const std::string& hex) {
+    if (hex.empty() || (hex.size() % 2) != 0)
+        throw std::runtime_error("Invalid hexadecimal input");
     std::vector<BYTE> out;
-    for (size_t i = 0; i + 1 < hex.size(); i += 2)
-        out.push_back((BYTE)std::stoul(hex.substr(i, 2), nullptr, 16));
+    out.reserve(hex.size() / 2);
+    auto nibble = [](char c) -> BYTE {
+        if (c >= '0' && c <= '9') return static_cast<BYTE>(c - '0');
+        if (c >= 'a' && c <= 'f') return static_cast<BYTE>(c - 'a' + 10);
+        if (c >= 'A' && c <= 'F') return static_cast<BYTE>(c - 'A' + 10);
+        throw std::runtime_error("Invalid hexadecimal input");
+    };
+    for (size_t i = 0; i < hex.size(); i += 2)
+        out.push_back(static_cast<BYTE>((nibble(hex[i]) << 4) | nibble(hex[i + 1])));
     return out;
 }
 
@@ -51,22 +60,28 @@ static std::vector<BYTE> HexToBytes(const std::string& hex) {
 
 std::string Base64Encode(const std::vector<BYTE>& data) {
     DWORD needed = 0;
-    CryptBinaryToStringA(data.data(), (DWORD)data.size(),
-                         CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, nullptr, &needed);
+    if (!CryptBinaryToStringA(data.data(), (DWORD)data.size(),
+                              CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, nullptr, &needed))
+        throw std::runtime_error("Base64 encoding failed");
     std::string out(needed, '\0');
-    CryptBinaryToStringA(data.data(), (DWORD)data.size(),
-                         CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, &out[0], &needed);
+    if (!CryptBinaryToStringA(data.data(), (DWORD)data.size(),
+                              CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, &out[0], &needed))
+        throw std::runtime_error("Base64 encoding failed");
     while (!out.empty() && out.back() == '\0') out.pop_back();
     return out;
 }
 
 std::vector<BYTE> Base64Decode(const std::string& b64) {
     DWORD needed = 0;
-    CryptStringToBinaryA(b64.c_str(), (DWORD)b64.size(),
-                         CRYPT_STRING_BASE64, nullptr, &needed, nullptr, nullptr);
+    if (b64.empty() || !CryptStringToBinaryA(b64.c_str(), (DWORD)b64.size(),
+                         CRYPT_STRING_BASE64 | CRYPT_STRING_STRICT,
+                         nullptr, &needed, nullptr, nullptr))
+        throw std::runtime_error("Invalid base64 input");
     std::vector<BYTE> out(needed);
-    CryptStringToBinaryA(b64.c_str(), (DWORD)b64.size(),
-                         CRYPT_STRING_BASE64, out.data(), &needed, nullptr, nullptr);
+    if (!CryptStringToBinaryA(b64.c_str(), (DWORD)b64.size(),
+                         CRYPT_STRING_BASE64 | CRYPT_STRING_STRICT,
+                         out.data(), &needed, nullptr, nullptr))
+        throw std::runtime_error("Invalid base64 input");
     out.resize(needed);
     return out;
 }

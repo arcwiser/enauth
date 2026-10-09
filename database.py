@@ -75,7 +75,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     client_version  TEXT,
     token_expires_at DATETIME,
     rotated_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
-    token_generation INTEGER NOT NULL DEFAULT 0
+    token_generation INTEGER NOT NULL DEFAULT 0,
+    protocol        INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS request_nonces (
@@ -390,6 +391,8 @@ CREATE TABLE IF NOT EXISTS download_tickets (
     file_id TEXT NOT NULL REFERENCES app_files(id) ON DELETE CASCADE,
     hwid TEXT NOT NULL,
     client_version TEXT,
+    file_sha256 TEXT,
+    file_version TEXT,
     expires_at DATETIME NOT NULL,
     consumed_at DATETIME,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP

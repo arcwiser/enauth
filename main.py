@@ -35,6 +35,7 @@ from routes.status import router as status_router
 from utils.crypto  import generate_uid, hash_password, generate_app_secret
 from utils.logger import app_log
 from utils.response_signing import ensure_response_signing_key, response_public_key_hex
+from utils.request_limits import RequestBodyLimitMiddleware
 
 # ─── Lifespan ────────────────────────────────────────────────────────────────
 
@@ -120,18 +121,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MAX_REQUEST_BYTES = int(os.getenv("MAX_REQUEST_BYTES", str(105 * 1024 * 1024)))
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    max_request_bytes=int(os.getenv("MAX_REQUEST_BYTES", str(105 * 1024 * 1024))),
+    max_json_bytes=int(os.getenv("MAX_JSON_BYTES", str(2 * 1024 * 1024))),
+)
 
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
-    content_length = request.headers.get("content-length")
-    if content_length:
-        try:
-            if int(content_length) > MAX_REQUEST_BYTES:
-                return JSONResponse({"detail": "Request body too large"}, status_code=413)
-        except ValueError:
-            return JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
-
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"

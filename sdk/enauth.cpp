@@ -5,6 +5,7 @@
  */
 #include "enauth.h"
 #include "string_obfuscation.h"
+#include "protocol_json.h"
 #include <chrono>
 #include <tlhelp32.h>
 #include <vector>
@@ -65,47 +66,24 @@ namespace enauth {
 // ─── JSON helpers (minimal, no external dep) ─────────────────────────────────
 
 static std::string JsonStr(const std::string& k, const std::string& v) {
-    return "\"" + k + "\":\"" + v + "\"";
+    return nlohmann::json(k).dump() + ":" + nlohmann::json(v).dump();
 }
 static std::string JsonInt(const std::string& k, long long v) {
     return "\"" + k + "\":" + std::to_string(v);
 }
 
 static std::string JsonGet(const std::string& json, const std::string& key) {
-    std::string needle = "\"" + key + "\"";
-    auto pos = json.find(needle);
-    if (pos == std::string::npos) return {};
-    pos = json.find(':', pos + needle.size());
-    if (pos == std::string::npos) return {};
-    ++pos;
-    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n' || json[pos] == '\r')) ++pos;
-    
-    if (pos >= json.size()) return {};
-
-    if (json[pos] == '"') {
-        auto start = pos + 1;
-        auto end   = json.find('"', start);
-        if (end == std::string::npos) return {};
-        return json.substr(start, end - start);
-    }
-    
-    // Handle objects, arrays, or numbers/booleans
-    auto start = pos;
-    int depth = 0;
-    while (pos < json.size()) {
-        if (json[pos] == '{' || json[pos] == '[') depth++;
-        else if (json[pos] == '}' || json[pos] == ']') {
-            if (depth == 0) break;
-            depth--;
-        }
-        else if (depth == 0 && (json[pos] == ',' || json[pos] == '}')) break;
-        pos++;
-    }
-    return json.substr(start, pos - start);
+    const auto document = detail::ParseObject(json);
+    if (!document.is_object()) throw std::runtime_error("Expected JSON object");
+    auto field = document.find(key);
+    if (field == document.end() || field->is_null()) return {};
+    return field->is_string() ? field->get<std::string>() : field->dump();
 }
 
 static bool JsonBool(const std::string& json, const std::string& key) {
-    return JsonGet(json, key) == OBFUSCATE("true");
+    const auto document = detail::ParseObject(json);
+    return document.is_object() && document.contains(key) &&
+        document[key].is_boolean() && document[key].get<bool>();
 }
 
 static long long UnixTime() {
@@ -130,8 +108,10 @@ static std::string WideToUtf8(const wchar_t* text) {
         return {};
     }
 
-    std::string result(static_cast<size_t>(required - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text, -1, result.data(), required, nullptr, nullptr);
+    std::string result(static_cast<size_t>(required), '\0');
+    if (!WideCharToMultiByte(CP_UTF8, 0, text, -1, result.data(), required, nullptr, nullptr))
+        throw std::runtime_error("UTF-8 conversion failed");
+    result.resize(static_cast<size_t>(required - 1));
     return result;
 }
 
@@ -158,7 +138,7 @@ std::string Client::Post(const std::string& endpoint, const std::string& body) {
     std::wstring host(wHost, comps.dwHostNameLength);
     std::transform(host.begin(), host.end(), host.begin(), ::towlower);
     const bool localhost = host == L"localhost" || host == L"127.0.0.1" || host == L"::1";
-    if (!https && !localhost)
+    if (!https && !(localhost && comps.nScheme == INTERNET_SCHEME_HTTP))
         throw std::runtime_error(OBFUSCATE("HTTPS is required for non-local EnAuth servers"));
 
     HINTERNET hSession = WinHttpOpen(W_OBFUSCATE(L"EnAuth/1.0").c_str(),
@@ -181,6 +161,15 @@ std::string Client::Post(const std::string& endpoint, const std::string& body) {
         throw std::runtime_error(OBFUSCATE("WinHttpOpenRequest failed"));
     }
 
+    DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+    if (!WinHttpSetOption(hReq, WINHTTP_OPTION_REDIRECT_POLICY,
+                         &redirectPolicy, sizeof(redirectPolicy))) {
+        WinHttpCloseHandle(hReq);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        throw std::runtime_error("Cannot disable HTTP redirects");
+    }
+
 #ifdef ENAUTH_ENABLE_ANTI_DEBUG
     SecurityCheck();
 #endif
@@ -199,11 +188,14 @@ std::string Client::Post(const std::string& endpoint, const std::string& body) {
                             WINHTTP_NO_HEADER_INDEX);
         DWORD avail = 0;
         while (WinHttpQueryDataAvailable(hReq, &avail) && avail > 0) {
-            if (response.size() + avail > 4 * 1024 * 1024) {
+            // Download content is base64 inside a second base64 signed envelope.
+            const size_t limit = endpoint == "/api/client/download" ?
+                190u * 1024u * 1024u : 4u * 1024u * 1024u;
+            if (avail > limit - response.size()) {
                 WinHttpCloseHandle(hReq);
                 WinHttpCloseHandle(hConnect);
                 WinHttpCloseHandle(hSession);
-                throw std::runtime_error(OBFUSCATE("Server response exceeded 4 MiB"));
+                throw std::runtime_error(OBFUSCATE("Server response exceeded size limit"));
             }
             std::string chunk(avail, '\0');
             DWORD read = 0;
@@ -244,30 +236,25 @@ std::string Client::BuildRequest(const std::string& json_payload, std::string& r
 std::string Client::DecryptResponse(const std::string& json_response,
                                     const std::string& endpoint,
                                     const std::string& requestNonce) {
-    if (JsonGet(json_response, OBFUSCATE("protocol")) != "2") {
-        std::string detail = JsonGet(json_response, OBFUSCATE("detail"));
-        if (!detail.empty()) {
-            return OBFUSCATE("{\"success\":false,\"message\":\"") + detail + OBFUSCATE("\"}");
-        }
+    const auto envelope = detail::ParseObject(json_response);
+    if (!envelope.contains("protocol") || !envelope["protocol"].is_number_integer() ||
+        envelope["protocol"] != 2) {
         throw std::runtime_error(OBFUSCATE("Protocol 2 response required"));
     }
-    const std::string payload = JsonGet(json_response, OBFUSCATE("payload"));
-    const std::string serverSig = JsonGet(json_response, OBFUSCATE("server_sig"));
-    const std::string tsText = JsonGet(json_response, OBFUSCATE("ts"));
-    const std::string validUntilText = JsonGet(json_response, OBFUSCATE("valid_until"));
-    const std::string returnedNonce = JsonGet(json_response, OBFUSCATE("request_nonce"));
-    const std::string returnedEndpoint = JsonGet(json_response, OBFUSCATE("endpoint"));
-    const std::string returnedAppId = JsonGet(json_response, OBFUSCATE("app_id"));
+    const std::string payload = detail::StringField(envelope, "payload");
+    const std::string serverSig = detail::StringField(envelope, "server_sig");
+    const long long responseTs = detail::TimeField(envelope, "ts");
+    const long long validUntil = detail::TimeField(envelope, "valid_until");
+    const std::string tsText = std::to_string(responseTs);
+    const std::string validUntilText = std::to_string(validUntil);
+    const std::string returnedNonce = detail::StringField(envelope, "request_nonce");
+    const std::string returnedEndpoint = detail::StringField(envelope, "endpoint");
+    const std::string returnedAppId = detail::StringField(envelope, "app_id");
     if (payload.empty() || serverSig.empty() || tsText.empty() || validUntilText.empty())
         throw std::runtime_error(OBFUSCATE("Unsigned server response"));
-    long long responseTs = 0;
-    try { responseTs = std::stoll(tsText); }
-    catch (...) { throw std::runtime_error(OBFUSCATE("Invalid server timestamp")); }
-    long long validUntil = 0;
-    try { validUntil = std::stoll(validUntilText); }
-    catch (...) { throw std::runtime_error(OBFUSCATE("Invalid response expiry")); }
     const long long now = UnixTime();
-    if (responseTs > now + 60 || validUntil < now || validUntil - responseTs > 120)
+    if (responseTs < 0 || responseTs > now + 60 || validUntil < now ||
+        validUntil < responseTs || validUntil - responseTs > 120)
         throw std::runtime_error(OBFUSCATE("Stale server response"));
 
     std::string appId = GetAppId();
@@ -286,7 +273,11 @@ std::string Client::DecryptResponse(const std::string& json_response,
     if (!responsePublicKey.empty()) SecureZeroMemory(responsePublicKey.data(), responsePublicKey.size());
     if (!appId.empty()) SecureZeroMemory(&appId[0], appId.size());
     const auto decoded = Base64Decode(payload);
-    return std::string(decoded.begin(), decoded.end());
+    std::string result(decoded.begin(), decoded.end());
+    const auto parsed = detail::ParseObject(result);
+    if (!parsed.contains("success") || !parsed["success"].is_boolean())
+        throw std::runtime_error("Invalid response success field");
+    return result;
 }
 
 Status Client::MessageToStatus(const std::string& msg) {
@@ -331,6 +322,7 @@ Client::Client(const std::string& server_url, const std::string& app_id,
 }
 
 void Client::EncryptStore(std::vector<unsigned char>& target, const std::string& source) {
+    std::lock_guard<std::recursive_mutex> lock(m_request_mutex);
     std::string layered(source);
     for (size_t i = 0; i < layered.size(); ++i)
         layered[i] = static_cast<char>(static_cast<unsigned char>(layered[i]) ^
@@ -344,6 +336,7 @@ void Client::EncryptStore(std::vector<unsigned char>& target, const std::string&
 }
 
 std::string Client::DecryptField(const std::vector<unsigned char>& field) const {
+    std::lock_guard<std::recursive_mutex> lock(m_request_mutex);
     if (field.empty()) return {};
     std::string encrypted(field.begin(), field.end());
     std::string memoryKey = GetMemoryKey();
@@ -393,6 +386,7 @@ Client::~Client() {
 std::string Client::GetHwid() const { return hwid::Collect(); }
 
 InitResult Client::Init() {
+    std::lock_guard<std::recursive_mutex> lock(m_request_mutex);
     SecurityCheck();
     InitResult result;
     try {
@@ -423,6 +417,7 @@ InitResult Client::Init() {
 LoginResult Client::Login(const std::string& license_key,
                            const std::string& product_id,
                            const std::string& level) {
+    std::lock_guard<std::recursive_mutex> lock(m_request_mutex);
     LoginResult result;
     try {
         std::string hw = hwid::Collect();
@@ -492,6 +487,7 @@ LoginResult Client::Login(const std::string& license_key,
 }
 
 NewsResult Client::GetNews() {
+    std::lock_guard<std::recursive_mutex> lock(m_request_mutex);
     NewsResult result;
     try {
         const std::string endpoint = OBFUSCATE("/api/client/news");
@@ -530,6 +526,7 @@ NewsResult Client::GetNews() {
 }
 
 SimpleResult Client::Heartbeat() {
+    std::lock_guard<std::recursive_mutex> lock(m_request_mutex);
     SimpleResult result;
     try {
         std::string token = GetSessionToken();
@@ -556,6 +553,7 @@ SimpleResult Client::Heartbeat() {
 }
 
 SimpleResult Client::Logout() {
+    std::lock_guard<std::recursive_mutex> lock(m_request_mutex);
     SimpleResult result;
     try {
         std::string token = GetSessionToken();
@@ -579,6 +577,7 @@ SimpleResult Client::Logout() {
 }
 
 SimpleResult Client::ValidateSession() {
+    std::lock_guard<std::recursive_mutex> lock(m_request_mutex);
     SimpleResult result;
     try {
         std::string token = GetSessionToken();
@@ -604,6 +603,7 @@ SimpleResult Client::ValidateSession() {
 }
 
 std::vector<unsigned char> Client::DownloadFile(const std::string& name) {
+    std::lock_guard<std::recursive_mutex> lock(m_request_mutex);
     SecurityCheck();
     try {
         std::string token = GetSessionToken();
@@ -657,7 +657,10 @@ std::vector<unsigned char> Client::DownloadFile(const std::string& name) {
                 std::vector<unsigned char> decoded = Base64Decode(b64_data);
                 std::string plaintext(decoded.begin(), decoded.end());
                 const std::string expectedHash = JsonGet(dec, OBFUSCATE("sha256"));
-                const bool validHash = !expectedHash.empty() && SHA256Hex(plaintext) == expectedHash;
+                const bool validHash = decoded.size() <= 100u * 1024u * 1024u &&
+                    expectedHash.size() == 64 && SHA256Hex(plaintext) == expectedHash &&
+                    expectedHash == JsonGet(ticketResponse, "sha256") &&
+                    fileId == JsonGet(ticketResponse, "file_id");
                 if (!plaintext.empty()) SecureZeroMemory(plaintext.data(), plaintext.size());
                 if (!validHash) {
                     if (!decoded.empty()) SecureZeroMemory(decoded.data(), decoded.size());
@@ -677,6 +680,7 @@ std::vector<unsigned char> Client::DownloadFile(const std::string& name) {
 }
 
 bool Client::AutoUpdateLoader(const std::string& name, const std::string& currentVersion) {
+    std::lock_guard<std::recursive_mutex> lock(m_request_mutex);
     if (!m_logged_in || name.empty() || currentVersion.empty()) return false;
     try {
         std::string token = GetSessionToken();

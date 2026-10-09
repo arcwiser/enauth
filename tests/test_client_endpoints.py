@@ -1,4 +1,5 @@
 import importlib
+import asyncio
 import base64
 import hashlib
 import json
@@ -534,6 +535,155 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("CLIENT_UPDATE_REQUIRED", str(rejected.exception))
             finally:
                 self.client.ALLOW_LEGACY_PROTOCOL = previous
+
+    async def _call_v2(self, db, seeded, endpoint, payload):
+        path = f"/api/client/{endpoint.replace('_', '-')}"
+        req = self._v2_request(seeded["app_id"], payload)
+        response = await getattr(self.client, f"client_{endpoint}").__wrapped__(
+            _FakeRequest(path=path), req, db
+        )
+        return self._verify_v2_response(response, path, req.nonce)
+
+    async def _login_v2(self, db, seeded, **extra):
+        return await self._call_v2(db, seeded, "login", {
+            "version": "1.0.0", "license_key": seeded["license_key"], "hwid": "d" * 64,
+            **extra,
+        })
+
+    async def _ticket_v2(self, db, seeded, token):
+        return await self._call_v2(db, seeded, "download_ticket", {
+            "token": token, "hwid": "d" * 64, "name": "payload.bin",
+        })
+
+    async def _download_v2(self, db, seeded, ticket):
+        return await self._call_v2(db, seeded, "download", {
+            "token": ticket["token"], "hwid": "d" * 64, "name": "payload.bin",
+            "ticket": ticket["ticket"],
+        })
+
+    async def test_v2_session_cannot_downgrade_to_legacy_download(self):
+        seeded = await self._seed_app()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            login = await self._login_v2(db, seeded)
+            req = self._encrypted_request(seeded["app_id"], seeded["secret"], {
+                "token": login["token"], "hwid": "d" * 64, "name": "payload.bin",
+            })
+            response = await self.client.client_download.__wrapped__(_FakeRequest(), req, db)
+            payload = self._decrypt_response(response, seeded["secret"])
+            self.assertFalse(payload["success"])
+            self.assertNotIn("data", payload)
+
+    async def test_download_ticket_rechecks_file_access_window_and_limits(self):
+        seeded = await self._seed_app()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("INSERT INTO products(id,app_id,name,level) VALUES(?,?,?,?)",
+                             ("private-product", seeded["app_id"], "Private", "private"))
+            await db.commit()
+            cases = (
+                ("UPDATE app_files SET available_until='2000-01-01 00:00:00'", (), "FILE_NOT_FOUND"),
+                ("UPDATE app_files SET available_from='2099-01-01 00:00:00'", (), "FILE_NOT_FOUND"),
+                ("INSERT INTO app_file_products(file_id,product_id) VALUES(?,?)",
+                 (seeded["file_id"], "private-product"), "PRODUCT_NOT_AUTHORIZED"),
+                ("UPDATE app_files SET product_id='private-product'", (), "PRODUCT_NOT_AUTHORIZED"),
+                ("UPDATE app_files SET download_limit=1", (), "DOWNLOAD_LIMIT_REACHED"),
+            )
+            for sql, params, expected in cases:
+                with self.subTest(sql=sql):
+                    await db.execute("UPDATE app_files SET available_from=NULL,available_until=NULL,product_id=NULL,download_limit=NULL")
+                    await db.execute("DELETE FROM app_file_products")
+                    await db.execute("DELETE FROM file_download_events")
+                    await db.commit()
+                    login = await self._login_v2(db, seeded)
+                    ticket = await self._ticket_v2(db, seeded, login["token"])
+                    self.assertTrue(ticket["success"])
+                    await db.execute(sql, params)
+                    if expected == "DOWNLOAD_LIMIT_REACHED":
+                        await db.execute(
+                            "INSERT INTO file_download_events(file_id,license_id,source) VALUES(?,?,?)",
+                            (seeded["file_id"], seeded["license_id"], "portal"),
+                        )
+                    await db.commit()
+                    download = await self._download_v2(db, seeded, ticket)
+                    self.assertFalse(download["success"])
+                    self.assertEqual(download["message"], expected)
+                    await db.rollback()
+
+    async def test_download_ticket_rejects_changed_build_or_content(self):
+        seeded = await self._seed_app()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            for sql in (
+                "UPDATE app_files SET release_version='2.0.0'",
+                "UPDATE app_files SET content=X'6576696c'",
+            ):
+                with self.subTest(sql=sql):
+                    await db.execute("UPDATE app_files SET release_version='1.0.0',content=?,file_sha256=NULL", (b"hello world",))
+                    await db.commit()
+                    login = await self._login_v2(db, seeded)
+                    ticket = await self._ticket_v2(db, seeded, login["token"])
+                    await db.execute(sql)
+                    await db.commit()
+                    download = await self._download_v2(db, seeded, ticket)
+                    self.assertFalse(download["success"])
+                    self.assertNotIn("data", download)
+                    await db.rollback()
+
+    async def test_protected_routes_enforce_hwid_bans(self):
+        seeded = await self._seed_app()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            login = await self._login_v2(db, seeded)
+            await db.execute("INSERT INTO banned_hwids(hwid,app_id,reason) VALUES(?,?,?)",
+                             ("d" * 64, seeded["app_id"], "Compromised"))
+            await db.commit()
+            response = await self._call_v2(db, seeded, "validate", {
+                "token": login["token"], "hwid": "d" * 64,
+            })
+            self.assertEqual(response["message"], "BANNED_HWID")
+
+    async def test_existing_session_rechecks_product_version_policy(self):
+        seeded = await self._seed_app()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("INSERT INTO products(id,app_id,name,level) VALUES(?,?,?,?)",
+                             ("product-policy", seeded["app_id"], "Policy", "policy"))
+            await db.execute("INSERT INTO license_products(id,license_id,product_id) VALUES(?,?,?)",
+                             ("ent-policy", seeded["license_id"], "product-policy"))
+            await db.commit()
+            for field, value in (("version_kill_switch", 1), ("blocked_client_versions", '["1.0.0"]'),
+                                 ("required_client_version", "2.0.0")):
+                with self.subTest(field=field):
+                    await db.execute("UPDATE products SET version_kill_switch=0,blocked_client_versions='[]',required_client_version=NULL")
+                    await db.commit()
+                    login = await self._login_v2(db, seeded, product_id="product-policy")
+                    self.assertTrue(login["success"])
+                    await db.execute(f"UPDATE products SET {field}=?", (value,))
+                    await db.commit()
+                    response = await self._call_v2(db, seeded, "validate", {
+                        "token": login["token"], "hwid": "d" * 64,
+                    })
+                    self.assertEqual(response["message"], "OUTDATED_VERSION")
+
+    async def test_concurrent_ticket_use_returns_bytes_only_once(self):
+        seeded = await self._seed_app()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            login = await self._login_v2(db, seeded)
+            ticket = await self._ticket_v2(db, seeded, login["token"])
+
+        async def consume():
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                return await self._download_v2(db, seeded, ticket)
+
+        results = await asyncio.gather(consume(), consume())
+        self.assertEqual(sum(bool(result["success"]) for result in results), 1)
+        self.assertEqual(sum("data" in result for result in results), 1)
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("SELECT COUNT(*) FROM file_download_events") as cur:
+                self.assertEqual((await cur.fetchone())[0], 1)
 
 
 if __name__ == "__main__":

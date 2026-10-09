@@ -402,6 +402,8 @@ Environment variables (see `.env.example`):
 - `SESSION_TOKEN_SECONDS`: Protocol-v2 bearer-token lifetime before rotation (default: 300)
 - `DOWNLOAD_TICKET_SECONDS`: One-use SDK download-ticket lifetime (default: 60)
 - `MAX_BUILD_BYTES`: Maximum uploaded build/loader size, capped at 100 MiB
+- `MAX_REQUEST_BYTES`: Multipart request limit for the three upload endpoints (default and ceiling: 105 MiB)
+- `MAX_JSON_BYTES`: Limit for all other request bodies (default: 2 MiB); actual streamed bytes are counted even without Content-Length
 - `AUTO_BACKUP_HOURS`: Verified scheduled-backup interval; `0` disables it
 - `BACKUP_ENCRYPTION_KEY`: Encrypts signing-key copies stored beside scheduled database backups
 

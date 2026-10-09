@@ -13,12 +13,29 @@ from routes.admin import require_api_key
 from utils.crypto import (generate_license_key, generate_uid, hash_license_key,
                           mask_license_key, encrypt_license_key, display_license_key)
 from utils.logger import log_action
+from utils.uploads import read_build_upload, validate_release_name, validate_release_version
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
 
-def require_scope(required: str):
+def has_scope(key: dict, required: str) -> bool:
+    """Evaluate both explicit permissions and the documented legacy scopes."""
     ranks = {"read": 1, "write": 2, "admin": 3}
+    configured = {item.strip().lower() for item in str(key.get("scopes") or "read").split(",") if item.strip()}
+    if configured & {"*", "admin"}:
+        return True
+    if required in ranks:
+        return max((ranks.get(item, 0) for item in configured), default=0) >= ranks[required]
+    resource, _, action = required.partition(".")
+    if required in configured or f"{resource}.*" in configured:
+        return True
+    if action in {"read", "list"}:
+        return bool(configured & {"read", "write"})
+    # Revealing existing credentials always requires an explicit permission.
+    return action != "reveal" and "write" in configured
+
+
+def require_scope(required: str):
 
     async def dependency(request: Request,
                          x_api_key: Optional[str] = Header(None),
@@ -38,27 +55,18 @@ def require_scope(required: str):
             requested_app = request.path_params.get("app_id")
             if requested_app and requested_app != row["app_id"]:
                 raise HTTPException(403, "Discord integration key is bound to another application")
+            if not requested_app and not (
+                request.method == "GET" and request.url.path.rstrip("/") == "/api/integrations/apps"
+            ):
+                raise HTTPException(403, "Discord integrations cannot access global resources")
             await db.execute("UPDATE discord_integrations SET last_used=CURRENT_TIMESTAMP WHERE id=?", (row["id"],))
             await db.commit()
             return {"id": row["id"], "role": "owner", "scopes": "*", "app_id": row["app_id"], "kind": "discord"}
         key = await require_api_key(x_api_key, db)
         if key.get("role") != "owner":
             raise HTTPException(403, "Owner API key required")
-        configured = {item.strip().lower() for item in str(key.get("scopes") or "read").split(",") if item.strip()}
-        if "*" not in configured and "admin" not in configured:
-            if required in ranks:
-                granted = max((ranks.get(item, 0) for item in configured), default=0)
-                allowed = granted >= ranks[required]
-            else:
-                resource, _, action = required.partition(".")
-                allowed = required in configured or f"{resource}.*" in configured
-                # Legacy write/read keys remain valid during migration.
-                if not allowed and action in {"read", "list"}:
-                    allowed = bool(configured & {"read", "write"})
-                elif not allowed and action not in {"read", "list", "reveal"}:
-                    allowed = "write" in configured
-            if not allowed:
-                raise HTTPException(403, f"API key requires {required} scope")
+        if not has_scope(key, required):
+            raise HTTPException(403, f"API key requires {required} scope")
         return key
 
     return dependency
@@ -139,7 +147,8 @@ class HwidBody(BaseModel):
 @router.get("/apps")
 async def apps(_key=Depends(require_scope("apps.read")), db=Depends(get_db)):
     async with db.execute(
-        "SELECT id, name, version FROM applications ORDER BY name LIMIT 200"
+        "SELECT id, name, version FROM applications WHERE (? IS NULL OR id=?) ORDER BY name LIMIT 200",
+        (_key.get("app_id"), _key.get("app_id")),
     ) as cur:
         return [dict(row) for row in await cur.fetchall()]
 
@@ -159,7 +168,7 @@ async def app_details(app_id: str, _key=Depends(require_scope("apps.read")), db=
 
 @router.get("/apps/{app_id}/licenses")
 async def licenses(app_id: str, search: Optional[str] = None, limit: int = 25,
-                   _key=Depends(require_scope("read")), db=Depends(get_db)):
+                   _key=Depends(require_scope("licenses.read")), db=Depends(get_db)):
     await require_app(db, app_id)
     limit = max(1, min(limit, 50))
     sql = "SELECT id, key, key_ciphertext, status, expires_at, max_hwids, notes, created_at FROM licenses WHERE app_id = ?"
@@ -172,7 +181,8 @@ async def licenses(app_id: str, search: Optional[str] = None, limit: int = 25,
     async with db.execute(sql, args) as cur:
         rows = [dict(row) for row in await cur.fetchall()]
     for row in rows:
-        row["key"] = display_license_key(row["key"], row.get("key_ciphertext"))
+        row["key"] = (display_license_key(row["key"], row.get("key_ciphertext"))
+                      if has_scope(_key, "licenses.reveal") else mask_license_key(row["key"]))
         row.pop("key_ciphertext", None)
     return rows
 
@@ -258,7 +268,12 @@ async def logs(app_id: str, limit: int = 20, _key=Depends(require_scope("read"))
            WHERE app_id = ? ORDER BY timestamp DESC LIMIT ?""",
         (app_id, max(1, min(limit, 50))),
     ) as cur:
-        return [dict(row) for row in await cur.fetchall()]
+        rows = [dict(row) for row in await cur.fetchall()]
+    if not has_scope(_key, "licenses.reveal"):
+        for row in rows:
+            if row["license_key"]:
+                row["license_key"] = mask_license_key(row["license_key"])
+    return rows
 
 
 @router.post("/apps/{app_id}/builds")
@@ -271,9 +286,8 @@ async def upload_build(app_id: str, name: str = Form(...), file: UploadFile = Fi
                        is_mandatory: bool = Form(False), auto_replace: bool = Form(False),
                        key=Depends(require_scope("builds.upload")), db=Depends(get_db)):
     await require_app(db, app_id)
-    safe_name = Path(name).name.strip()
-    if not safe_name or safe_name != name.strip():
-        raise HTTPException(400, "Invalid build name")
+    safe_name = validate_release_name(name)
+    release_version = validate_release_version(release_version)
     allowed_channels = {"stable", "beta", "nightly", "private"}
     allowed_types = {"loader", "payload", "update", "config", "symbols", "documentation"}
     allowed_platforms = {"windows", "linux", "macos", "any"}
@@ -289,20 +303,24 @@ async def upload_build(app_id: str, name: str = Form(...), file: UploadFile = Fi
         async with db.execute("SELECT 1 FROM products WHERE id=? AND app_id=?", (product_id, app_id)) as cur:
             if not await cur.fetchone():
                 raise HTTPException(404, f"Product not found for this application: {product_id}")
-    max_bytes = min(int(os.getenv("MAX_BUILD_BYTES", str(100 * 1024 * 1024))), 100 * 1024 * 1024)
-    content = await file.read(max_bytes + 1)
-    if len(content) > max_bytes:
-        raise HTTPException(413, f"Build exceeds configured limit of {max_bytes} bytes")
+    content = await read_build_upload(file)
+    if file_type == "loader" and platform == "windows":
+        if not safe_name.lower().endswith(".exe") or not content.startswith(b"MZ"):
+            raise HTTPException(400, "Windows loaders must be .exe files")
     file_id = generate_uid()
     digest = hashlib.sha256(content).hexdigest()
     async with db.execute(
-        "SELECT id FROM app_files WHERE app_id=? AND name=? AND is_active=1", (app_id, safe_name)
+        "SELECT id,file_type,release_version FROM app_files WHERE app_id=? AND name=?", (app_id, safe_name)
     ) as cur:
         previous = await cur.fetchone()
     if previous and not auto_replace:
         raise HTTPException(409, "An active build with this name exists; enable auto replace")
     if previous:
-        archived_name = f"{safe_name}.archived.{previous['id'][:8]}"
+        if previous["file_type"] != file_type:
+            raise HTTPException(409, "Cannot replace a different file type")
+        if previous["release_version"] == release_version:
+            raise HTTPException(409, "Publish a new version when replacing a build")
+        archived_name = f"{safe_name}.archived.{previous['id']}"
         await db.execute(
             "UPDATE app_files SET name=?, is_active=0, is_archived=1 WHERE id=?",
             (archived_name, previous["id"]),
@@ -367,7 +385,7 @@ async def license_details(app_id: str, identifier: str, _key=Depends(require_sco
 
 @router.get("/apps/{app_id}/licenses/{identifier}/history")
 async def license_history(app_id: str, identifier: str, limit: int = 50,
-                          _key=Depends(require_scope("read")), db=Depends(get_db)):
+                          _key=Depends(require_scope("licenses.read")), db=Depends(get_db)):
     item = await find_license(db, app_id, identifier)
     async with db.execute(
         """SELECT action, ip, hwid, details, timestamp FROM logs
@@ -376,7 +394,8 @@ async def license_history(app_id: str, identifier: str, limit: int = 50,
         (app_id, item["key"], mask_license_key(item["key"]), max(1, min(limit, 100))),
     ) as cur:
         events = [dict(row) for row in await cur.fetchall()]
-    return {"license_id": item["id"], "key": item["key"], "events": events}
+    visible_key = item["key"] if has_scope(_key, "licenses.reveal") else mask_license_key(item["key"])
+    return {"license_id": item["id"], "key": visible_key, "events": events}
 
 
 @router.post("/apps/{app_id}/licenses/{identifier}/products")
@@ -486,7 +505,11 @@ async def sessions(app_id: str, limit: int = 25, _key=Depends(require_scope("rea
            WHERE s.app_id = ? ORDER BY s.last_heartbeat DESC LIMIT ?""",
         (app_id, max(1, min(limit, 50))),
     ) as cur:
-        return [dict(row) for row in await cur.fetchall()]
+        rows = [dict(row) for row in await cur.fetchall()]
+    if not has_scope(_key, "licenses.reveal"):
+        for row in rows:
+            row["license_key"] = mask_license_key(row["license_key"])
+    return rows
 
 
 @router.delete("/apps/{app_id}/sessions/{session_id}")

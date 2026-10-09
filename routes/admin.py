@@ -2,6 +2,7 @@ import asyncio
 import csv
 from pydantic import field_validator, model_validator
 import io
+import json
 import os
 import time
 from pathlib import Path
@@ -27,6 +28,7 @@ from utils.crypto import (
 )
 from utils.logger import app_log, log_action
 from utils.response_signing import KEY_PATH as RESPONSE_SIGNING_KEY_PATH, response_public_key_hex
+from utils.uploads import read_build_upload, validate_release_name, validate_release_version
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 ADMIN_SESSION_HOURS = int(os.getenv("ADMIN_SESSION_HOURS", "8"))
@@ -39,6 +41,18 @@ SERVER_STARTED_MONOTONIC = time.monotonic()
 BACKUP_DIR = Path(os.getenv("BACKUP_DIR", str(Path(__file__).resolve().parent.parent / "backups"))).resolve()
 BACKUP_RETENTION = max(1, min(int(os.getenv("BACKUP_RETENTION", "14")), 100))
 BACKUP_ENCRYPTION_KEY = os.getenv("BACKUP_ENCRYPTION_KEY", "")
+
+
+class SessionRevokeFilterBody(BaseModel):
+    app_id: str = Field(min_length=1, max_length=128)
+    product_id: Optional[str] = Field(default=None, max_length=128)
+    license_id: Optional[str] = Field(default=None, max_length=128)
+    reason: str = Field(default="Administrative revocation", min_length=3, max_length=300)
+
+
+class EmergencyLockdownBody(BaseModel):
+    reason: str = Field(min_length=3, max_length=300)
+    confirmation: str = Field(min_length=1, max_length=200)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -136,8 +150,7 @@ async def require_admin(request: Request,
 
 
 async def require_owner(user=Depends(require_admin)):
-    if user["role"] != "owner":
-        raise HTTPException(403, "Owner role required")
+    require_panel_owner(user)
     return user
 
 
@@ -401,7 +414,13 @@ async def setup_two_factor(request: Request = None, user=Depends(require_admin),
     provisioning_url = totp.provisioning_uri(name=user["username"], issuer_name="EnAuth Admin")
 
     # Store it as a temporary/pending secret in db (do not enable yet)
-    await db.execute("UPDATE admin_users SET two_factor_secret = ? WHERE id = ?", (secret, user["id"]))
+    cursor = await db.execute(
+        "UPDATE admin_users SET two_factor_secret = ? WHERE id = ? AND COALESCE(two_factor_enabled, 0) = 0",
+        (secret, user["id"]),
+    )
+    if cursor.rowcount != 1:
+        await db.rollback()
+        raise HTTPException(409, "Disable existing two-factor authentication with its current code before replacing it.")
     await db.commit()
 
     return {"secret": secret, "provisioning_uri": provisioning_url}
@@ -490,13 +509,20 @@ async def verify_two_factor(response: Response, request: Request = None, body: T
     if not totp.verify(body.code.strip()):
         raise HTTPException(401, "Invalid verification code.")
 
-    # Successful verification! Create active admin session token
+    # Consume the challenge atomically before creating a session. Concurrent
+    # submissions of the same code/challenge must not create multiple sessions.
+    consumed = await db.execute(
+        "DELETE FROM temp_2fa_sessions WHERE token = ? AND expires_at > ?",
+        (body.temp_token, utcnow()),
+    )
+    if consumed.rowcount != 1:
+        await db.rollback()
+        raise HTTPException(401, "Invalid or expired temporary session.")
     token = generate_session_token()
     await db.execute(
         "INSERT INTO admin_sessions (id, user_id, token, expires_at) VALUES (?, ?, ?, ?)",
         (generate_uid(), user["id"], token, future_hours(ADMIN_SESSION_HOURS)),
     )
-    await db.execute("DELETE FROM temp_2fa_sessions WHERE token = ?", (body.temp_token,))
     await db.commit()
     set_admin_cookie(response, token)
     return {"username": user["username"], "role": user["role"]}
@@ -1685,6 +1711,148 @@ async def dashboard(user=Depends(require_admin), db: aiosqlite.Connection = Depe
             "security_events": {**security_counts, "most_targeted_apps": top_targets},
         },
     }
+
+
+@router.get("/security/control-center")
+async def security_control_center(user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
+    """Operational and security state without returning secrets or raw session tokens."""
+    owner_id = auth_owner_id(user)
+    ownership_sql = "WHERE a.owner_user_id = ?" if owner_id else ""
+    ownership_args = [owner_id] if owner_id else []
+    async with db.execute(
+        f"""SELECT a.id,a.name,a.version,a.is_paused,a.pause_reason,
+                   CASE WHEN a.is_paused=1 THEN 'offline' ELSE 'operational' END AS service_status,
+                   (SELECT COUNT(*) FROM licenses l WHERE l.app_id=a.id) AS licenses,
+                   (SELECT COUNT(*) FROM sessions s WHERE s.app_id=a.id
+                    AND s.expires_at>datetime('now')) AS active_sessions,
+                   (SELECT COUNT(*) FROM app_files f WHERE f.app_id=a.id
+                    AND f.is_revoked=1) AS revoked_builds
+            FROM applications a
+            {ownership_sql}
+            ORDER BY a.name""",
+        ownership_args,
+    ) as cur:
+        apps = rows_to_list(await cur.fetchall())
+
+    app_ids = [app["id"] for app in apps]
+    event_counts = {"failed_auth": 0, "replay": 0, "hwid_limit": 0, "suspicious": 0}
+    recent_events = []
+    outstanding_tickets = 0
+    if app_ids:
+        marks = _qmarks(len(app_ids))
+        async with db.execute(
+            f"""SELECT
+                SUM(CASE WHEN action LIKE '%fail%' THEN 1 ELSE 0 END) failed_auth,
+                SUM(CASE WHEN LOWER(COALESCE(details,'')) LIKE '%replay%' THEN 1 ELSE 0 END) replay,
+                SUM(CASE WHEN action='login_hwid_limit' THEN 1 ELSE 0 END) hwid_limit,
+                SUM(CASE WHEN action='suspicious_login' THEN 1 ELSE 0 END) suspicious
+                FROM logs WHERE timestamp>=datetime('now','-24 hours') AND app_id IN ({marks})""",
+            app_ids,
+        ) as cur:
+            row = await cur.fetchone()
+            if row:
+                event_counts = {key: int(row[key] or 0) for key in event_counts}
+        async with db.execute(
+            f"""SELECT id,app_id,action,ip,details,timestamp FROM logs
+                WHERE app_id IN ({marks}) AND
+                (action LIKE '%fail%' OR action IN ('suspicious_login','login_hwid_limit','build_revoked','emergency_lockdown'))
+                ORDER BY timestamp DESC LIMIT 30""",
+            app_ids,
+        ) as cur:
+            recent_events = rows_to_list(await cur.fetchall())
+        async with db.execute(
+            f"""SELECT COUNT(*) FROM download_tickets
+                WHERE app_id IN ({marks}) AND consumed_at IS NULL AND expires_at>datetime('now')""",
+            app_ids,
+        ) as cur:
+            outstanding_tickets = int((await cur.fetchone())[0])
+
+    settings = {
+        "secure_cookies": COOKIE_SECURE,
+        "cors_restricted": os.getenv("CORS_ORIGINS", "*").strip() != "*",
+        "debug_disabled": os.getenv("DEBUG", "false").lower() != "true",
+        "license_pepper_configured": bool(os.getenv("LICENSE_KEY_PEPPER", "").strip()),
+        "legacy_protocol_disabled": os.getenv("ALLOW_LEGACY_PROTOCOL", "true").lower() != "true",
+        "backup_encryption_configured": bool(BACKUP_ENCRYPTION_KEY),
+        "automatic_backups_enabled": int(os.getenv("AUTO_BACKUP_HOURS", "0")) > 0,
+    }
+    return {
+        "generated_at": utcnow(),
+        "applications": apps,
+        "events_24h": event_counts,
+        "recent_security_events": recent_events,
+        "outstanding_download_tickets": outstanding_tickets,
+        "security_settings": settings,
+        "security_score": round(100 * sum(bool(v) for v in settings.values()) / len(settings)),
+    }
+
+
+@router.post("/security/sessions/revoke")
+async def revoke_filtered_sessions(body: SessionRevokeFilterBody, user=Depends(require_admin),
+                                   db: aiosqlite.Connection = Depends(get_db)):
+    await _owned_app(body.app_id, auth_owner_id(user), db)
+    conditions = ["app_id=?"]
+    args = [body.app_id]
+    if body.product_id:
+        product = await _owned_product(body.product_id, auth_owner_id(user), db)
+        if product["app_id"] != body.app_id:
+            raise HTTPException(400, "Product does not belong to the application")
+        conditions.append("product_id=?"); args.append(body.product_id)
+    if body.license_id:
+        async with db.execute("SELECT app_id FROM licenses WHERE id=?", (body.license_id,)) as cur:
+            license_row = await cur.fetchone()
+        if not license_row or license_row["app_id"] != body.app_id:
+            raise HTTPException(404, "License not found for this application")
+        conditions.append("license_id=?"); args.append(body.license_id)
+    where = " AND ".join(conditions)
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        async with db.execute(f"SELECT COUNT(*) FROM sessions WHERE {where}", args) as cur:
+            count = int((await cur.fetchone())[0])
+        await db.execute(f"DELETE FROM sessions WHERE {where}", args)
+        await db.execute(f"DELETE FROM download_tickets WHERE {where}", args)
+        await log_action(db, "sessions_revoked", app_id=body.app_id,
+                         details=f"count={count}; reason={body.reason.strip()}")
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    return {"ok": True, "revoked_sessions": count}
+
+
+@router.post("/security/apps/{app_id}/lockdown")
+async def emergency_app_lockdown(app_id: str, body: EmergencyLockdownBody,
+                                 user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
+    app = await _owned_app(app_id, auth_owner_id(user), db)
+    if not secrets.compare_digest(body.confirmation, f"LOCK {app_id}"):
+        raise HTTPException(400, f"Type LOCK {app_id} to confirm")
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        async with db.execute("SELECT COUNT(*) FROM sessions WHERE app_id=?", (app_id,)) as cur:
+            session_count = int((await cur.fetchone())[0])
+        now = utcnow()
+        await db.execute(
+            "UPDATE applications SET is_paused=1,paused_at=?,pause_reason=? WHERE id=?",
+            (now, body.reason.strip(), app_id),
+        )
+        async with db.execute("SELECT COUNT(*) FROM licenses WHERE app_id=?", (app_id,)) as cur:
+            affected = int((await cur.fetchone())[0])
+        await db.execute(
+            """INSERT INTO outage_events(id,app_id,event_type,service_status,status_color,
+               public_message,started_at,affected_licenses) VALUES(?,?,?,?,?,?,?,?)""",
+            (generate_uid(), app_id, "emergency_lockdown", "offline", "#ef4444",
+             body.reason.strip(), now, affected),
+        )
+        await db.execute("DELETE FROM sessions WHERE app_id=?", (app_id,))
+        await db.execute("DELETE FROM download_tickets WHERE app_id=?", (app_id,))
+        await log_action(db, "emergency_lockdown", app_id=app_id,
+                         details=f"{app['name']}; sessions={session_count}; reason={body.reason.strip()}")
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    return {"ok": True, "app_id": app_id, "revoked_sessions": session_count,
+            "downloads_invalidated": True, "authentication_paused": True}
 
 
 # ─── Discord integrations ────────────────────────────────────────────────────
@@ -2979,6 +3147,8 @@ async def create_user(body: CreateUserBody, user=Depends(require_owner),
 async def update_user(user_id: str, body: UpdateUserBody,
                       caller=Depends(require_admin),
                       db: aiosqlite.Connection = Depends(get_db)):
+    if caller.get("_source") != "admin_users":
+        raise HTTPException(403, "Administrative account required")
     # Non-owners can only update themselves
     if caller["role"] != "owner" and caller["id"] != user_id:
         raise HTTPException(403, "Forbidden")
@@ -2996,6 +3166,10 @@ async def update_user(user_id: str, body: UpdateUserBody,
         raise HTTPException(400, "Nothing to update")
     args.append(user_id)
     await db.execute(f"UPDATE admin_users SET {', '.join(updates)} WHERE id = ?", args)
+    if body.password:
+        await db.execute("DELETE FROM admin_sessions WHERE user_id = ?", (user_id,))
+        await db.execute("DELETE FROM temp_2fa_sessions WHERE user_id = ?", (user_id,))
+        await db.execute("DELETE FROM password_reset_tokens WHERE user_id = ?", (user_id,))
     await db.commit()
     return {"ok": True}
 
@@ -3053,13 +3227,25 @@ async def verify_password_reset(request: Request = None, body: PasswordResetVeri
     if datetime.now(timezone.utc) > expires_at:
         raise HTTPException(400, "Reset token expired")
 
-    # Mark token as used
-    await db.execute("UPDATE password_reset_tokens SET used_at = ? WHERE id = ?", (utcnow(), reset_token["id"]))
+    # Only one concurrent request may redeem a reset token.
+    consumed = await db.execute(
+        "UPDATE password_reset_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL AND expires_at > ?",
+        (utcnow(), reset_token["id"], utcnow()),
+    )
+    if consumed.rowcount != 1:
+        await db.rollback()
+        raise HTTPException(400, "Invalid or expired reset token")
 
     # Update password
     await db.execute(
         "UPDATE admin_users SET password_hash = ? WHERE id = ?",
         (hash_password(body.new_password), reset_token["user_id"])
+    )
+    await db.execute("DELETE FROM admin_sessions WHERE user_id = ?", (reset_token["user_id"],))
+    await db.execute("DELETE FROM temp_2fa_sessions WHERE user_id = ?", (reset_token["user_id"],))
+    await db.execute(
+        "UPDATE password_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL",
+        (utcnow(), reset_token["user_id"]),
     )
     await log_action(db, "password_reset", details=f"Password reset for user_id: {reset_token['user_id']}")
     await db.commit()
@@ -3373,27 +3559,32 @@ async def upload_loader_release(app_id: str = Form(...), version: str = Form(...
     ) as cur:
         if not await cur.fetchone():
             raise HTTPException(404, "Application not found")
-    safe_name = Path(logical_name).name.strip()
-    if not safe_name or safe_name != logical_name.strip() or not safe_name.lower().endswith(".exe"):
+    safe_name = validate_release_name(logical_name)
+    if not safe_name.lower().endswith(".exe"):
         raise HTTPException(400, "Loader name must be a plain .exe filename")
-    clean_version = version.strip()
-    if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._+\-]{0,63}", clean_version):
-        raise HTTPException(400, "Invalid loader version")
-    max_bytes = 100 * 1024 * 1024
-    content = await file.read(max_bytes + 1)
-    if len(content) > max_bytes:
-        raise HTTPException(413, "Loader exceeds the 100 MB upload limit")
+    clean_version = validate_release_version(version)
+    archive_prefix = f"{safe_name}.archived."
+    async with db.execute(
+        """SELECT 1 FROM app_files WHERE app_id=? AND file_type='loader' AND release_version=?
+           AND (name=? OR substr(name,1,?)=?)""",
+        (app_id, clean_version, safe_name, len(archive_prefix), archive_prefix),
+    ) as cur:
+        if await cur.fetchone():
+            raise HTTPException(409, "This loader version already exists; publish a new version")
+    content = await read_build_upload(file)
     if not content.startswith(b"MZ"):
         raise HTTPException(400, "Loader must be a Windows executable")
     async with db.execute(
-        "SELECT id FROM app_files WHERE app_id=? AND name=? AND file_type='loader' AND is_active=1",
+        "SELECT id,file_type FROM app_files WHERE app_id=? AND name=?",
         (app_id, safe_name),
     ) as cur:
         previous = await cur.fetchone()
     if previous:
+        if previous["file_type"] != "loader":
+            raise HTTPException(409, "This filename belongs to a different file type")
         await db.execute(
             "UPDATE app_files SET name=?,is_active=0,is_archived=1 WHERE id=?",
-            (f"{safe_name}.archived.{previous['id'][:8]}", previous["id"]),
+            (f"{safe_name}.archived.{previous['id']}", previous["id"]),
         )
     file_id = generate_uid()
     digest = hashlib.sha256(content).hexdigest()
@@ -3460,33 +3651,45 @@ async def upload_file(
     db: aiosqlite.Connection = Depends(get_db)
 ):
     owner_id = auth_owner_id(user)
-    if owner_id:
-        async with db.execute("SELECT 1 FROM applications WHERE id = ? AND owner_user_id = ?", (app_id, owner_id)) as cur:
-            if not await cur.fetchone():
-                raise HTTPException(404, "App not found")
+    async with db.execute(
+        "SELECT 1 FROM applications WHERE id=?" + (" AND owner_user_id=?" if owner_id else ""),
+        (app_id, owner_id) if owner_id else (app_id,),
+    ) as cur:
+        if not await cur.fetchone():
+            raise HTTPException(404, "App not found")
+    safe_name = validate_release_name(name)
     if product_id:
         async with db.execute("SELECT 1 FROM products WHERE id=? AND app_id=?", (product_id, app_id)) as cur:
             if not await cur.fetchone():
                 raise HTTPException(404, "Product not found for this app")
     
-    content = await file.read(100 * 1024 * 1024 + 1)
-    if len(content) > 100 * 1024 * 1024:
-        raise HTTPException(413, "File too large (max 100 MB)")
+    # Release rows are immutable. An in-place overwrite would preserve old
+    # tickets, hashes, versions and revocation flags for entirely new bytes.
+    async with db.execute("SELECT 1 FROM app_files WHERE app_id=? AND name=?", (app_id, safe_name)) as cur:
+        if await cur.fetchone():
+            raise HTTPException(409, "A file with this name exists; publish a new release or remove the old file first")
+    content = await read_build_upload(file)
+    digest = hashlib.sha256(content).hexdigest()
         
     fid = generate_uid()
     try:
         await db.execute(
-            """INSERT INTO app_files (id, app_id, name, content, is_secret, portal_visible, product_id)
-               VALUES (?,?,?,?,?,?,?) ON CONFLICT(app_id, name) DO UPDATE SET content=excluded.content,
-               is_secret=excluded.is_secret, portal_visible=excluded.portal_visible, product_id=excluded.product_id""",
-            (fid, app_id, name.strip(), content, 1 if is_secret else 0,
-             1 if portal_visible else 0, product_id or None)
+            """INSERT INTO app_files
+               (id,app_id,name,content,is_secret,portal_visible,product_id,file_sha256,file_size,mime_type)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (fid, app_id, safe_name, content, 1 if is_secret else 0,
+             1 if portal_visible else 0, product_id or None, digest, len(content), file.content_type)
         )
+        if product_id:
+            await db.execute("INSERT INTO app_file_products(file_id,product_id) VALUES(?,?)", (fid, product_id))
+        await log_action(db, "file_uploaded", app_id=app_id,
+                         details=f"name={safe_name}; sha256={digest}; size={len(content)}")
         await db.commit()
-    except Exception as e:
-        raise HTTPException(500, f"Upload failed: {str(e)}")
+    except aiosqlite.IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "A file with this name already exists") from None
         
-    return {"id": fid, "name": name}
+    return {"id": fid, "name": safe_name, "sha256": digest, "size": len(content)}
 
 
 class FileVisibilityBody(BaseModel):

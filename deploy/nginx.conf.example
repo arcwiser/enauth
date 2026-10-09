@@ -13,8 +13,9 @@ server {
     ssl_certificate     /etc/letsencrypt/live/enauth.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/enauth.example.com/privkey.pem;
 
-    # Adjust these values for your deployment if needed.
-    client_max_body_size 20m;
+    # 100 MiB files plus multipart overhead. EnAuth separately enforces a
+    # 2 MiB default limit for ordinary API requests, including chunked bodies.
+    client_max_body_size 105m;
 
     location / {
         proxy_pass http://127.0.0.1:8080;

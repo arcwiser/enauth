@@ -118,6 +118,9 @@ const API = {
 
   // Dashboard
   dashboard: ()        => api("GET",  "/api/admin/dashboard"),
+  getControlCenter: () => api("GET", "/api/admin/security/control-center"),
+  revokeScopedSessions: (body) => api("POST", "/api/admin/security/sessions/revoke", body),
+  emergencyLockdown: (appId, body) => api("POST", `/api/admin/security/apps/${encodeURIComponent(appId)}/lockdown`, body),
 
   // Licenses
   getLicenses: (params = {}) => {
@@ -408,7 +411,7 @@ function buildSidebar(activePage) {
   const groups = [
     ["Workspace", [["dashboard", "Overview", "grid"], ["apps", "Applications", "box"], ["products", "Product levels", "layers"], ["licenses", "Licenses", "key"]]],
     ["Distribution", [["loaders", "Loader releases", "box"], ["files", "Files", "file"], ["news", "Announcements", "message"], ["panels", "Customer panels", "window"], ["resellers", "Resellers", "users"], ["discord", "Discord bot", "message", true]]],
-    ["Security", [["sessions", "Active sessions", "pulse"], ["bans", "Blocklist", "shield"], ["logs", "Event logs", "list"], ["audit", "Audit trail", "search"]]],
+    ["Security", [["control", "Control center", "shield"], ["sessions", "Active sessions", "pulse"], ["bans", "Blocklist", "shield"], ["logs", "Event logs", "list"], ["audit", "Audit trail", "search"]]],
     ["Administration", [["users", "Team members", "users", true], ["api-keys", "API keys", "key"], ["variables", "Variables", "code", true], ["backups", "Backups", "shield", true], ["settings", "Settings", "settings"]]]
   ];
   const paths = {

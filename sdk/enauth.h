@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <mutex>
 
 #include <winhttp.h>
 
@@ -148,6 +149,7 @@ public:
 
     /** Get a global variable value by name. Returns empty if not found. */
     std::string GetVariable(const std::string& name, const std::string& fallback = "") {
+        std::lock_guard<std::recursive_mutex> lock(m_request_mutex);
         auto it = m_variables.find(name);
         return (it != m_variables.end()) ? it->second : fallback;
     }
@@ -156,7 +158,7 @@ public:
 
     /**
      * Start a background thread that sends a heartbeat every `interval_sec` seconds.
-     * `on_expire` is called on the main thread context if the session expires.
+     * `on_expire` runs on the heartbeat worker; it must not destroy this client.
      * Call StopHeartbeat() before destroying the client.
      */
     void StartHeartbeatThread(int interval_sec = 60,
@@ -164,6 +166,8 @@ public:
     void StopHeartbeatThread();
 
 private:
+    // Serialize requests across token reads, network calls and token rotation.
+    mutable std::recursive_mutex m_request_mutex;
     // Per-instance layered storage: a runtime XOR transform inside an
     // independently randomized AES-256-GCM envelope for every field.
     unsigned char m_xor_key = 0;
@@ -188,8 +192,8 @@ private:
     std::string DecryptField(const std::vector<unsigned char>& field) const;
     std::string GetMemoryKey() const;
 
-    bool        m_initialized = false;
-    bool        m_logged_in   = false;
+    std::atomic<bool> m_initialized{false};
+    std::atomic<bool> m_logged_in{false};
     std::map<std::string, std::string> m_variables;
 
     // Heartbeat thread

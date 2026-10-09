@@ -61,7 +61,7 @@ async def _check_and_store_nonce(db: aiosqlite.Connection, nonce: str, now: floa
     try:
         await db.execute(
             "INSERT INTO request_nonces(nonce_hash, expires_at) VALUES (?, ?)",
-            (nonce_hash, int(now) + NONCE_TTL),
+            (nonce_hash, int(now) + max(NONCE_TTL, 2 * TIMESTAMP_TOLERANCE + 1)),
         )
         await db.commit()
         return True
@@ -205,31 +205,44 @@ async def parse_request(req: EncryptedRequest, db, endpoint: str = "") -> tuple[
                 raise ValueError("payload must be an object")
         except Exception:
             raise HTTPException(400, "INVALID_PAYLOAD")
-        if not await _check_and_store_nonce(db, req.nonce, now):
-            raise HTTPException(400, "REPLAY_ATTACK")
-        return payload, dict(app)
+    else:
+        if not verify_signature(secret, req.data, req.ts, req.sig, req.app_id):
+            raise HTTPException(401, "INVALID_SIGNATURE")
+        try:
+            payload = decrypt_payload(req.data, secret)
+        except Exception:
+            raise HTTPException(400, "DECRYPT_FAILED")
 
-    if not verify_signature(secret, req.data, req.ts, req.sig, req.app_id):
-        raise HTTPException(401, "INVALID_SIGNATURE")
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "INVALID_PAYLOAD")
+    for field, limit in (("version", 128), ("license_key", 256), ("hwid", 128),
+                         ("product_id", 128), ("level", 128), ("token", 512),
+                         ("name", 255), ("ticket", 128)):
+        if field in payload and (not isinstance(payload[field], str) or len(payload[field]) > limit):
+            raise HTTPException(400, "INVALID_PAYLOAD")
 
-    # 4. Store the authenticated nonce atomically.
     if not await _check_and_store_nonce(db, req.nonce, now):
         raise HTTPException(400, "REPLAY_ATTACK")
 
-    # 5. Authenticated decryption (GCM tag validates integrity)
-    try:
-        payload = decrypt_payload(req.data, secret)
-    except Exception:
-        raise HTTPException(400, "DECRYPT_FAILED")
+    # Serialize mutable authorization checks with their writes. Otherwise two
+    # concurrent logins can both pass HWID limits, or a revoked/modified file
+    # can be delivered between a ticket check and its consumption.
+    await db.execute("BEGIN IMMEDIATE")
+    async with db.execute("SELECT * FROM applications WHERE id=?", (req.app_id,)) as cur:
+        app = await cur.fetchone()
+    if not app:
+        await db.rollback()
+        raise HTTPException(401, "INVALID_APP")
 
     return payload, dict(app)
 
 
-async def get_app_session(db, token: str, app_id: str):
+async def get_app_session(db, token: str, app_id: str, protocol: int | None = None):
     """Resolve a session only inside the application that issued it."""
     async with db.execute(
         """SELECT * FROM sessions WHERE token=? AND app_id=? AND expires_at>CURRENT_TIMESTAMP
-           AND COALESCE(token_expires_at, expires_at)>CURRENT_TIMESTAMP""", (token, app_id)
+           AND COALESCE(token_expires_at, expires_at)>CURRENT_TIMESTAMP
+           AND (? IS NULL OR protocol=?)""", (token, app_id, protocol, protocol)
     ) as cur:
         return await cur.fetchone()
 
@@ -246,23 +259,27 @@ async def rotate_session_token(db, sess) -> str:
         (new_token, token_expiry_text, sess["id"], sess["token"]),
     )
     if cursor.rowcount != 1:
+        await db.rollback()
         raise HTTPException(409, "SESSION_ROTATION_CONFLICT")
     return new_token
 
 
-async def resolve_download_file(db, app_id: str, name: str, sess):
+async def resolve_download_file(db, app_id: str, name: str, sess, file_id: str | None = None):
     async with db.execute(
         """SELECT f.* FROM app_files f
-           WHERE f.app_id=? AND f.name=? AND f.is_active=1 AND f.is_archived=0 AND f.is_revoked=0
+           WHERE f.app_id=? AND f.name=? AND (? IS NULL OR f.id=?)
+             AND f.is_active=1 AND f.is_archived=0 AND f.is_revoked=0
              AND (f.available_from IS NULL OR f.available_from<=CURRENT_TIMESTAMP)
              AND (f.available_until IS NULL OR f.available_until>CURRENT_TIMESTAMP)""",
-        (app_id, name),
+        (app_id, name, file_id, file_id),
     ) as cur:
         row = await cur.fetchone()
     if not row:
         return None, "FILE_NOT_FOUND"
     async with db.execute("SELECT product_id FROM app_file_products WHERE file_id=?", (row["id"],)) as cur:
         allowed_products = {item["product_id"] for item in await cur.fetchall()}
+    if not allowed_products and row["product_id"]:
+        allowed_products.add(row["product_id"])
     if allowed_products and sess["product_id"] not in allowed_products:
         return None, "PRODUCT_NOT_AUTHORIZED"
     if row["download_limit"]:
@@ -273,6 +290,20 @@ async def resolve_download_file(db, app_id: str, name: str, sess):
             if (await cur.fetchone())[0] >= row["download_limit"]:
                 return None, "DOWNLOAD_LIMIT_REACHED"
     return row, None
+
+
+def version_allowed(version: str, app, product=None) -> bool:
+    required = (product["required_client_version"] if product else None) or app["version"]
+    if not version or version != required:
+        return False
+    if product:
+        try:
+            blocked = json.loads(product["blocked_client_versions"] or "[]")
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(blocked, list) or product["version_kill_switch"] or version in blocked:
+            return False
+    return True
 
 
 async def enforce_active_authorization(db, sess, app, ip: str) -> str | None:
@@ -286,15 +317,17 @@ async def enforce_active_authorization(db, sess, app, ip: str) -> str | None:
     failure = None
     if not lic or lic["status"] != "active":
         failure = "EXPIRED_KEY" if lic and lic["status"] == "expired" else "BANNED_KEY"
-    elif lic["expires_at"] and lic["expires_at"] < utcnow():
+    elif not sess["product_id"] and lic["expires_at"] and lic["expires_at"] <= utcnow():
         failure = "EXPIRED_KEY"
     elif app["is_paused"]:
         failure = "APP_PAUSED"
 
+    entitlement = None
     if not failure and sess["product_id"]:
         async with db.execute(
             """SELECT p.is_paused AS product_paused,
-                      lp.is_paused AS entitlement_paused, lp.expires_at
+                      lp.is_paused AS entitlement_paused, lp.expires_at,
+                      p.required_client_version, p.blocked_client_versions, p.version_kill_switch
                FROM products p
                JOIN license_products lp ON lp.product_id=p.id AND lp.license_id=?
                WHERE p.id=? AND p.app_id=?""",
@@ -307,8 +340,16 @@ async def enforce_active_authorization(db, sess, app, ip: str) -> str | None:
             failure = "PRODUCT_PAUSED"
         elif entitlement["entitlement_paused"]:
             failure = "ENTITLEMENT_PAUSED"
-        elif entitlement["expires_at"] and entitlement["expires_at"] < utcnow():
+        elif entitlement["expires_at"] and entitlement["expires_at"] <= utcnow():
             failure = "EXPIRED_KEY"
+
+    if not failure and not version_allowed(sess["client_version"], app, entitlement):
+        failure = "OUTDATED_VERSION"
+    if not failure:
+        async with db.execute("SELECT 1 FROM banned_hwids WHERE hwid=? AND app_id=?",
+                              (sess["hwid"], app["id"])) as cur:
+            if await cur.fetchone():
+                failure = "BANNED_HWID"
 
     if failure:
         await db.execute("DELETE FROM sessions WHERE token=?", (sess["token"],))
@@ -476,22 +517,12 @@ async def client_login(request: Request, req: EncryptedRequest,
     if not client_version:
         return enc_resp({"success": False, "message": "OUTDATED_VERSION",
                          "required_version": app["version"]}, secret, req.app_id)
-    if entitlement:
-        try:
-            blocked_versions = set(json.loads(entitlement["blocked_client_versions"] or "[]"))
-        except (TypeError, ValueError):
-            blocked_versions = set()
-        required_version = entitlement["required_client_version"]
-        if entitlement["version_kill_switch"] or client_version in blocked_versions or (
-            required_version and client_version != required_version
-        ):
-            await log_action(db, "client_version_blocked", app_id=app["id"], ip=ip, hwid=hwid,
-                             details=f"product={entitlement['product_id']}; client={client_version}; required={required_version}")
-            return enc_resp({"success": False, "message": "OUTDATED_VERSION",
-                             "required_version": required_version or app["version"]}, secret, req.app_id)
-    elif client_version != app["version"]:
+    if not version_allowed(client_version, app, entitlement):
+        required_version = (entitlement["required_client_version"] if entitlement else None) or app["version"]
+        await log_action(db, "client_version_blocked", app_id=app["id"], ip=ip, hwid=hwid,
+                         details=f"product={product_id}; client={client_version}; required={required_version}")
         return enc_resp({"success": False, "message": "OUTDATED_VERSION",
-                         "required_version": app["version"]}, secret, req.app_id)
+                         "required_version": required_version}, secret, req.app_id)
 
     # ── App-specific HWID ban check ──
     async with db.execute(
@@ -514,7 +545,7 @@ async def client_login(request: Request, req: EncryptedRequest,
         return enc_resp({"success": False, "message": "BANNED_KEY"}, secret, req.app_id)
 
     effective_expiry = entitlement["expires_at"] if entitlement else lic["expires_at"]
-    if lic["status"] == "expired" or (effective_expiry and effective_expiry < utcnow()):
+    if lic["status"] == "expired" or (effective_expiry and effective_expiry <= utcnow()):
         await log_action(db, "login_expired", license_key=mask_license_key(license_key), app_id=app["id"],
                          ip=ip, hwid=hwid)
         return enc_resp({"success": False, "message": "EXPIRED_KEY"}, secret, req.app_id)
@@ -572,10 +603,10 @@ async def client_login(request: Request, req: EncryptedRequest,
 
     await db.execute(
         """INSERT INTO sessions
-           (id,token,license_id,hwid,ip,app_id,product_id,expires_at,client_version,token_expires_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+           (id,token,license_id,hwid,ip,app_id,product_id,expires_at,client_version,token_expires_at,protocol)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
         (session_id, token, lic["id"], hwid, ip, app["id"], selected_product_id,
-         expires, client_version, token_expires),
+         expires, client_version, token_expires, req.protocol),
     )
 
     # ── Reset strikes on successful login ──
@@ -619,7 +650,7 @@ async def client_heartbeat(request: Request, req: EncryptedRequest,
     secret = app["secret_key"]
     token  = payload.get("token", "")
 
-    sess = await get_app_session(db, token, app["id"])
+    sess = await get_app_session(db, token, app["id"], req.protocol)
 
     if not sess or sess["expires_at"] < utcnow():
         if sess:
@@ -631,18 +662,6 @@ async def client_heartbeat(request: Request, req: EncryptedRequest,
     authorization_failure = await enforce_active_authorization(db, sess, app, ip)
     if authorization_failure:
         return enc_resp({"success": False, "message": authorization_failure}, secret, req.app_id)
-
-    # ── Per-app HWID ban check ──
-    async with db.execute(
-        "SELECT 1 FROM banned_hwids WHERE hwid = ? AND app_id = ?",
-        (sess["hwid"], sess["app_id"]),
-    ) as cur:
-        if await cur.fetchone():
-            await db.execute("DELETE FROM sessions WHERE token = ?", (token,))
-            await db.commit()
-            await log_action(db, "heartbeat_hwid_banned", app_id=req.app_id,
-                             ip=ip, hwid=sess["hwid"])
-            return enc_resp({"success": False, "message": "BANNED_HWID"}, secret, req.app_id)
 
     new_token = await rotate_session_token(db, sess) if req.protocol == 2 else token
     await db.execute("UPDATE sessions SET last_heartbeat=?, ip=? WHERE id=?", (utcnow(), ip, sess["id"]))
@@ -666,7 +685,7 @@ async def client_logout(request: Request, req: EncryptedRequest,
     secret = app["secret_key"]
     token  = payload.get("token", "")
 
-    sess = await get_app_session(db, token, app["id"])
+    sess = await get_app_session(db, token, app["id"], req.protocol)
 
     if sess:
         if not await enforce_session_identity(db, payload, sess, app["id"], ip):
@@ -696,7 +715,7 @@ async def client_validate(request: Request, req: EncryptedRequest,
     secret = app["secret_key"]
     token  = payload.get("token", "")
 
-    sess = await get_app_session(db, token, app["id"])
+    sess = await get_app_session(db, token, app["id"], req.protocol)
 
     if not sess or sess["expires_at"] < utcnow():
         return enc_resp({"success": False, "message": "SESSION_EXPIRED"}, secret, req.app_id)
@@ -725,7 +744,7 @@ async def client_download_ticket(request: Request, req: EncryptedRequest,
         return enc_resp({"success": False, "message": "CLIENT_UPDATE_REQUIRED"}, secret, req.app_id)
     token = payload.get("token", "")
     name = payload.get("name", "").strip()
-    sess = await get_app_session(db, token, app["id"])
+    sess = await get_app_session(db, token, app["id"], req.protocol)
     if not sess:
         return enc_resp({"success": False, "message": "SESSION_EXPIRED"}, secret, req.app_id)
     if not await enforce_session_identity(db, payload, sess, app["id"], ip):
@@ -737,21 +756,26 @@ async def client_download_ticket(request: Request, req: EncryptedRequest,
     if failure:
         return enc_resp({"success": False, "message": failure}, secret, req.app_id)
 
+    content_sha256 = hashlib.sha256(row["content"]).hexdigest()
+    if row["file_sha256"] != content_sha256:
+        await db.execute("UPDATE app_files SET file_sha256=? WHERE id=?", (content_sha256, row["id"]))
     ticket = secrets.token_urlsafe(48)
     ticket_hash = hashlib.sha256(ticket.encode("utf-8")).hexdigest()
     ticket_expiry = future(DOWNLOAD_TICKET_SECONDS)
     await db.execute(
         """INSERT INTO download_tickets
-           (id,ticket_hash,session_id,license_id,app_id,product_id,file_id,hwid,client_version,expires_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?)""",
+           (id,ticket_hash,session_id,license_id,app_id,product_id,file_id,hwid,client_version,
+            file_sha256,file_version,expires_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
         (generate_uid(), ticket_hash, sess["id"], sess["license_id"], app["id"], sess["product_id"],
-         row["id"], sess["hwid"], sess["client_version"], ticket_expiry),
+         row["id"], sess["hwid"], sess["client_version"], content_sha256,
+         row["release_version"], ticket_expiry),
     )
     new_token = await rotate_session_token(db, sess)
     await db.commit()
     return enc_resp({"success": True, "message": "OK", "ticket": ticket,
                      "ticket_expires_at": ticket_expiry, "token": new_token,
-                     "file_id": row["id"], "sha256": row["file_sha256"],
+                     "file_id": row["id"], "sha256": content_sha256,
                      "version": row["release_version"], "file_type": row["file_type"]}, secret, req.app_id)
 
 
@@ -776,7 +800,7 @@ async def client_download(request: Request, req: EncryptedRequest,
     if not name:
         return enc_resp({"success": False, "message": "MISSING_FIELDS"}, secret, req.app_id)
 
-    sess = await get_app_session(db, token, app["id"])
+    sess = await get_app_session(db, token, app["id"], req.protocol)
 
     if not sess or sess["expires_at"] < utcnow():
         return enc_resp({"success": False, "message": "SESSION_EXPIRED"}, secret, req.app_id)
@@ -799,16 +823,26 @@ async def client_download(request: Request, req: EncryptedRequest,
              sess["hwid"], sess["client_version"]),
         )
         if cursor.rowcount != 1:
-            return enc_resp({"success": False, "message": "INVALID_DOWNLOAD_TICKET"}, secret, req.app_id)
-        async with db.execute(
-            """SELECT f.* FROM download_tickets dt JOIN app_files f ON f.id=dt.file_id
-               WHERE dt.ticket_hash=? AND f.name=? AND f.is_active=1 AND f.is_archived=0 AND f.is_revoked=0""",
-            (ticket_hash, name),
-        ) as cur:
-            row = await cur.fetchone()
-        if not row:
             await db.rollback()
             return enc_resp({"success": False, "message": "INVALID_DOWNLOAD_TICKET"}, secret, req.app_id)
+        async with db.execute(
+            "SELECT * FROM download_tickets WHERE ticket_hash=?", (ticket_hash,)
+        ) as cur:
+            ticket_row = await cur.fetchone()
+        async with db.execute("SELECT name FROM app_files WHERE id=?", (ticket_row["file_id"],)) as cur:
+            bound_file = await cur.fetchone()
+        if not bound_file or bound_file["name"] != name:
+            await db.rollback()
+            return enc_resp({"success": False, "message": "INVALID_DOWNLOAD_TICKET"}, secret, req.app_id)
+        row, failure = await resolve_download_file(db, app["id"], name, sess, ticket_row["file_id"])
+        if failure:
+            await db.rollback()
+            return enc_resp({"success": False, "message": failure}, secret, req.app_id)
+        actual_sha256 = hashlib.sha256(row["content"]).hexdigest()
+        if (actual_sha256 != ticket_row["file_sha256"] or
+                row["release_version"] != ticket_row["file_version"]):
+            await db.rollback()
+            return enc_resp({"success": False, "message": "BUILD_CHANGED"}, secret, req.app_id)
     else:
         row, failure = await resolve_download_file(db, app["id"], name, sess)
         if failure:
