@@ -337,6 +337,8 @@ const API = {
   downloadSdkRelease: (id) => fetch(BASE + `/api/admin/sdk/releases/${encodeURIComponent(id)}/download`, {credentials:"same-origin"}),
   getSdkCompatibility: () => api("GET", "/api/admin/sdk/compatibility"),
   updateSdkCompatibility: (appId,b) => api("PUT", `/api/admin/sdk/compatibility/${encodeURIComponent(appId)}`, b),
+  getHwidResetRequests: (status="pending") => api("GET", `/api/admin/hwid-reset-requests?status=${encodeURIComponent(status)}`),
+  reviewHwidResetRequest: (id,decision) => api("POST", `/api/admin/hwid-reset-requests/${encodeURIComponent(id)}/${encodeURIComponent(decision)}`),
 
   // Search and Activity
   globalSearch: (params = {}) => {
@@ -435,7 +437,7 @@ function buildSidebar(activePage) {
     ["Workspace", [["dashboard", "Overview", "grid"], ["apps", "Applications", "box"], ["products", "Product levels", "layers"], ["licenses", "Licenses", "key"]]],
     ["Distribution", [["loaders", "Loader releases", "box"], ["files", "Files", "file"], ["news", "Announcements", "message"], ["panels", "Customer panels", "window"], ["resellers", "Resellers", "users"], ["discord", "Discord bot", "message", true]]],
     ["Security", [["control", "Control center", "shield"], ["sessions", "Active sessions", "pulse"], ["bans", "Blocklist", "shield"], ["logs", "Event logs", "list"], ["audit", "Audit trail", "search"]]],
-    ["Operations", [["sdk", "SDK & documentation", "code"], ["health", "Server health", "pulse"]]],
+    ["Operations", [["sdk", "SDK & documentation", "code"], ["health", "Server health", "pulse"], ["requests", "Customer requests", "message"]]],
     ["Administration", [["users", "Team members", "users", true], ["api-keys", "API keys", "key"], ["variables", "Variables", "code", true], ["backups", "Backups", "shield", true], ["settings", "Settings", "settings"]]]
   ];
   const paths = {

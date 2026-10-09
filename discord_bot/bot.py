@@ -217,9 +217,9 @@ async def help_command(interaction: discord.Interaction):
     commands_text = """**Licenses**
 `/gen`, `/bulkgen`, `/license`, `/revealkey`, `/licenses`, `/keyhistory`, `/ban`, `/unban`, `/extend`, `/extendproduct`, `/addproduct`, `/deletekey`, `/resethwid`
 **Sessions and security**
-`/sessions`, `/killsession`, `/killallsessions`, `/hwids`, `/banhwid`, `/unbanhwid`, `/logs`
+`/sessions`, `/killsession`, `/killallsessions`, `/hwids`, `/banhwid`, `/unbanhwid`, `/logs`, `/resetrequests`, `/reviewreset`
 **Application**
-`/status`, `/stats`, `/levels`, `/apps`, `/setapp`, `/pauseapp`, `/resumeapp`, `/builds`, `/uploadbuild`, `/deletebuild`
+`/status`, `/health`, `/stats`, `/sdkstatus`, `/levels`, `/apps`, `/setapp`, `/pauseapp`, `/resumeapp`, `/builds`, `/uploadbuild`, `/deletebuild`
 **Content**
 `/news`, `/addnews`, `/deletenews`, `/variables`, `/setvariable`, `/deletevariable`
 **Integration**
@@ -297,6 +297,34 @@ def render_rows(rows, fields):
     for row in rows:
         lines.append(" | ".join(str(row.get(field) or "-") for field in fields))
     return "```\n" + "\n".join(lines)[:1800] + "\n```"
+
+
+def operational_embed(snapshot):
+    app = snapshot.get("app", {})
+    licenses = snapshot.get("licenses", {})
+    sessions = snapshot.get("sessions", {})
+    activity = snapshot.get("activity_24h", {})
+    paused = bool(app.get("is_paused"))
+    embed = discord.Embed(
+        title=f"{app.get('name', 'EnAuth')} operations",
+        description="Paused" if paused else "Operational",
+        color=discord.Color.orange() if paused else discord.Color.green(),
+        timestamp=datetime.utcnow(),
+    )
+    embed.add_field(name="Licenses", value=(
+        f"Total **{licenses.get('total') or 0}**\n"
+        f"Active **{licenses.get('active') or 0}** · Banned **{licenses.get('banned') or 0}**"
+    ))
+    embed.add_field(name="Live usage", value=(
+        f"Sessions **{sessions.get('active_sessions') or 0}**\n"
+        f"Users **{sessions.get('active_users') or 0}**"
+    ))
+    embed.add_field(name="Last 24 hours", value=(
+        f"Events **{activity.get('authentications') or 0}**\n"
+        f"Failures **{activity.get('failures') or 0}**"
+    ))
+    embed.set_footer(text=f"App {app.get('id', 'unknown')} · Version {app.get('version', 'unknown')}")
+    return embed
 
 
 @bot.tree.command(description="Show recent licenses")
@@ -429,6 +457,81 @@ async def status(interaction: discord.Interaction):
     async with aiohttp.ClientSession() as session:
         async with session.get(config[0] + "/health") as response: payload = await response.text()
     await interaction.response.send_message(f"HTTP {response.status}: `{payload}`", ephemeral=True)
+
+
+@bot.tree.command(description="Show application health, active users, and authentication activity")
+@keygen
+async def health(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    snapshot = await api(
+        interaction, "GET", f"/api/integrations/apps/{configured_app(interaction)}/operations"
+    )
+    await interaction.followup.send(embed=operational_embed(snapshot), ephemeral=True)
+
+
+@bot.tree.command(description="Show SDK enforcement policy and versions currently connected")
+@keygen
+async def sdkstatus(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    snapshot = await api(
+        interaction, "GET", f"/api/integrations/apps/{configured_app(interaction)}/operations"
+    )
+    policy = snapshot.get("sdk_policy") or {}
+    usage = snapshot.get("sdk_usage") or []
+    embed = discord.Embed(title="SDK compatibility", color=discord.Color.blurple())
+    embed.add_field(name="Minimum", value=f"`{policy.get('minimum_version') or 'not set'}`")
+    embed.add_field(name="Recommended", value=f"`{policy.get('recommended_version') or 'not set'}`")
+    embed.add_field(name="Enforcement", value="Enabled" if policy.get("enforce_minimum") else "Advisory")
+    versions = "\n".join(f"`{row.get('sdk_version') or 'unknown'}` — {row.get('sessions', 0)} session(s)" for row in usage)
+    embed.add_field(name="Connected versions", value=versions or "No active SDK sessions", inline=False)
+    if policy.get("upgrade_message"):
+        embed.add_field(name="Upgrade notice", value=str(policy["upgrade_message"])[:1000], inline=False)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(description="List customer HWID reset requests")
+@app_commands.choices(status=[
+    app_commands.Choice(name="Pending", value="pending"),
+    app_commands.Choice(name="Approved", value="approved"),
+    app_commands.Choice(name="Rejected", value="rejected"),
+    app_commands.Choice(name="All", value="all"),
+])
+@keygen
+async def resetrequests(interaction: discord.Interaction, status: str = "pending"):
+    selected_status = status
+    await interaction.response.defer(ephemeral=True)
+    rows = await api(
+        interaction, "GET", f"/api/integrations/apps/{configured_app(interaction)}/hwid-reset-requests",
+        params={"status": selected_status},
+    )
+    if not rows:
+        await interaction.followup.send(f"No `{selected_status}` HWID reset requests.", ephemeral=True)
+        return
+    embed = discord.Embed(title=f"HWID reset requests · {selected_status}", color=discord.Color.gold())
+    for row in rows[:10]:
+        embed.add_field(
+            name=f"{row.get('client_username') or 'Customer'} · {row['id'][:8]}",
+            value=f"Key `{row.get('key') or '-'}`\n{str(row.get('reason') or 'No reason')[:180]}\n`{row.get('created_at')}`",
+            inline=False,
+        )
+    if len(rows) > 10:
+        embed.set_footer(text=f"Showing 10 of {len(rows)} requests")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(description="Approve or reject a customer HWID reset request")
+@app_commands.choices(decision=[
+    app_commands.Choice(name="Approve and reset devices", value="approve"),
+    app_commands.Choice(name="Reject request", value="reject"),
+])
+@keygen
+async def reviewreset(interaction: discord.Interaction, request_id: str, decision: app_commands.Choice[str]):
+    await interaction.response.defer(ephemeral=True)
+    result = await api(
+        interaction, "POST",
+        f"/api/integrations/apps/{configured_app(interaction)}/hwid-reset-requests/{request_id}/{decision.value}",
+    )
+    await interaction.followup.send(f"Request `{request_id}` is now **{result['status']}**.", ephemeral=True)
 
 
 @bot.tree.command(description="Show application statistics")

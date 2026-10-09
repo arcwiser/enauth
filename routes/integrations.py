@@ -103,7 +103,9 @@ def require_scope(required: str):
 
 
 async def require_app(db: aiosqlite.Connection, app_id: str):
-    async with db.execute("SELECT id, name, version FROM applications WHERE id = ?", (app_id,)) as cur:
+    async with db.execute(
+        "SELECT id, name, version, is_paused, pause_reason FROM applications WHERE id = ?", (app_id,)
+    ) as cur:
         app = await cur.fetchone()
     if not app:
         raise HTTPException(404, "Application not found")
@@ -194,6 +196,95 @@ async def app_details(app_id: str, _key=Depends(require_scope("apps.read")), db=
     ) as cur:
         app["products"] = [dict(row) for row in await cur.fetchall()]
     return app
+
+
+@router.get("/apps/{app_id}/operations")
+async def app_operations(app_id: str, _key=Depends(require_scope("apps.read")), db=Depends(get_db)):
+    """A secret-free operational snapshot suitable for Discord and monitoring integrations."""
+    app = await require_app(db, app_id)
+    async with db.execute(
+        """SELECT COUNT(*) AS total,
+                  SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) AS active,
+                  SUM(CASE WHEN status='banned' THEN 1 ELSE 0 END) AS banned,
+                  SUM(CASE WHEN status='expired' THEN 1 ELSE 0 END) AS expired
+           FROM licenses WHERE app_id=?""", (app_id,),
+    ) as cur:
+        licenses = dict(await cur.fetchone())
+    async with db.execute(
+        """SELECT COUNT(*) AS active_sessions,COUNT(DISTINCT license_id) AS active_users
+           FROM sessions WHERE app_id=? AND expires_at>CURRENT_TIMESTAMP""", (app_id,),
+    ) as cur:
+        sessions = dict(await cur.fetchone())
+    async with db.execute(
+        """SELECT COUNT(*) AS authentications,
+                  SUM(CASE WHEN action LIKE '%fail%' OR action LIKE '%blocked%' THEN 1 ELSE 0 END) AS failures
+           FROM logs WHERE app_id=? AND timestamp>=datetime('now','-24 hours')""", (app_id,),
+    ) as cur:
+        activity = dict(await cur.fetchone())
+    async with db.execute(
+        """SELECT sdk_version,COUNT(*) AS sessions FROM sessions
+           WHERE app_id=? AND expires_at>CURRENT_TIMESTAMP
+           GROUP BY sdk_version ORDER BY sessions DESC LIMIT 10""", (app_id,),
+    ) as cur:
+        sdk_usage = [dict(row) for row in await cur.fetchall()]
+    async with db.execute("SELECT * FROM sdk_compatibility WHERE app_id=?", (app_id,)) as cur:
+        compatibility = await cur.fetchone()
+    return {"app": app, "licenses": licenses, "sessions": sessions, "activity_24h": activity,
+            "sdk_usage": sdk_usage, "sdk_policy": dict(compatibility) if compatibility else None}
+
+
+@router.get("/apps/{app_id}/hwid-reset-requests")
+async def integration_reset_requests(app_id: str, status: str = "pending",
+                                     _key=Depends(require_scope("licenses.read")), db=Depends(get_db)):
+    await require_app(db, app_id)
+    if status not in {"pending", "approved", "rejected", "all"}:
+        raise HTTPException(400, "Invalid request status")
+    sql = """SELECT r.id,r.reason,r.status,r.created_at,r.reviewed_at,
+                    l.id AS license_id,l.key,l.client_username
+             FROM hwid_reset_requests r JOIN licenses l ON l.id=r.license_id
+             WHERE l.app_id=?"""
+    args = [app_id]
+    if status != "all":
+        sql += " AND r.status=?"; args.append(status)
+    sql += " ORDER BY r.created_at DESC LIMIT 50"
+    async with db.execute(sql, args) as cur:
+        rows = [dict(row) for row in await cur.fetchall()]
+    for row in rows:
+        row["key"] = mask_license_key(row["key"])
+    return rows
+
+
+@router.post("/apps/{app_id}/hwid-reset-requests/{request_id}/{decision}")
+async def integration_review_reset(app_id: str, request_id: str, decision: str,
+                                   key=Depends(require_scope("licenses.modify")), db=Depends(get_db)):
+    await require_app(db, app_id)
+    if decision not in {"approve", "reject"}:
+        raise HTTPException(400, "Decision must be approve or reject")
+    async with db.execute(
+        """SELECT r.license_id FROM hwid_reset_requests r JOIN licenses l ON l.id=r.license_id
+           WHERE r.id=? AND r.status='pending' AND l.app_id=?""", (request_id, app_id),
+    ) as cur:
+        request_row = await cur.fetchone()
+    if not request_row:
+        raise HTTPException(404, "Pending reset request not found")
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        if decision == "approve":
+            await db.execute("DELETE FROM hwids WHERE license_id=?", (request_row["license_id"],))
+            await db.execute("DELETE FROM device_fingerprints WHERE license_id=?", (request_row["license_id"],))
+            await db.execute("DELETE FROM sessions WHERE license_id=?", (request_row["license_id"],))
+            await db.execute("UPDATE licenses SET hwid_reset_at=CURRENT_TIMESTAMP WHERE id=?", (request_row["license_id"],))
+        await db.execute(
+            """UPDATE hwid_reset_requests SET status=?,reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP
+               WHERE id=? AND status='pending'""",
+            ("approved" if decision == "approve" else "rejected", f"integration:{key['id']}", request_id),
+        )
+        await log_action(db, f"integration_hwid_request_{decision}d", app_id=app_id,
+                         details=f"request={request_id}; integration={key['id']}")
+        await db.commit()
+    except Exception:
+        await db.rollback(); raise
+    return {"ok": True, "status": "approved" if decision == "approve" else "rejected"}
 
 
 @router.get("/apps/{app_id}/licenses")
