@@ -217,9 +217,9 @@ async def help_command(interaction: discord.Interaction):
     commands_text = """**Licenses**
 `/gen`, `/bulkgen`, `/license`, `/revealkey`, `/licenses`, `/keyhistory`, `/ban`, `/unban`, `/extend`, `/extendproduct`, `/addproduct`, `/deletekey`, `/resethwid`
 **Sessions and security**
-`/sessions`, `/killsession`, `/killallsessions`, `/hwids`, `/banhwid`, `/unbanhwid`, `/logs`, `/resetrequests`, `/reviewreset`
+`/sessions`, `/killsession`, `/killallsessions`, `/hwids`, `/banhwid`, `/unbanhwid`, `/logs`, `/securitysummary`, `/resetrequests`, `/reviewreset`
 **Application**
-`/status`, `/health`, `/stats`, `/sdkstatus`, `/levels`, `/apps`, `/setapp`, `/pauseapp`, `/resumeapp`, `/builds`, `/uploadbuild`, `/deletebuild`
+`/status`, `/health`, `/stats`, `/sdkstatus`, `/expiring`, `/levels`, `/productstatus`, `/apps`, `/setapp`, `/pauseapp`, `/resumeapp`, `/builds`, `/uploadbuild`, `/deletebuild`
 **Content**
 `/news`, `/addnews`, `/deletenews`, `/variables`, `/setvariable`, `/deletevariable`
 **Integration**
@@ -257,6 +257,39 @@ async def simple_license_action(interaction, action, identifier):
     await interaction.followup.send(f"Done. License ID: `{result['id']}`", ephemeral=True)
 
 
+class DangerConfirmView(discord.ui.View):
+    def __init__(self, requester_id: int, prompt: str, action):
+        super().__init__(timeout=90)
+        self.requester_id = requester_id
+        self.prompt = prompt
+        self.action = action
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id or not has_bot_access(interaction):
+            await interaction.response.send_message("This confirmation belongs to another authorized user.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content=f"Processing: {self.prompt}", view=self)
+        try:
+            message = await self.action(interaction)
+            await interaction.followup.send(message, ephemeral=True)
+        except Exception as exc:
+            await interaction.followup.send(f"Action failed: {exc}", ephemeral=True)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content="Action cancelled.", view=self)
+        self.stop()
+
+
 @bot.tree.command(description="Ban a license and terminate its session")
 @keygen
 async def ban(interaction: discord.Interaction, license: str): await simple_license_action(interaction, "ban", license)
@@ -284,11 +317,14 @@ async def extend(interaction: discord.Interaction, license: str, time: str):
 
 @bot.tree.command(description="Permanently delete a license")
 @keygen
-async def deletekey(interaction: discord.Interaction, license: str, confirm: bool):
-    if not confirm:
-        await interaction.response.send_message("Set confirm to true to delete.", ephemeral=True); return
-    await api(interaction, "DELETE", f"/api/integrations/apps/{configured_app(interaction)}/licenses/{license}")
-    await interaction.response.send_message("License deleted.", ephemeral=True)
+async def deletekey(interaction: discord.Interaction, license: str):
+    async def perform(button_interaction):
+        await api(button_interaction, "DELETE", f"/api/integrations/apps/{configured_app(button_interaction)}/licenses/{license}")
+        return f"License `{license}` was permanently deleted."
+    await interaction.response.send_message(
+        f"Permanently delete `{license}`? This cannot be undone.",
+        view=DangerConfirmView(interaction.user.id, f"delete license {license}", perform), ephemeral=True,
+    )
 
 
 def render_rows(rows, fields):
@@ -486,6 +522,74 @@ async def sdkstatus(interaction: discord.Interaction):
     embed.add_field(name="Connected versions", value=versions or "No active SDK sessions", inline=False)
     if policy.get("upgrade_message"):
         embed.add_field(name="Upgrade notice", value=str(policy["upgrade_message"])[:1000], inline=False)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(description="Forecast product entitlements expiring soon")
+@keygen
+async def expiring(interaction: discord.Interaction, days: app_commands.Range[int, 1, 365] = 7):
+    await interaction.response.defer(ephemeral=True)
+    result = await api(
+        interaction, "GET", f"/api/integrations/apps/{configured_app(interaction)}/expiring",
+        params={"days": days, "limit": 25},
+    )
+    rows = result.get("items") or []
+    if not rows:
+        await interaction.followup.send(f"No entitlements expire within {days} day(s).", ephemeral=True)
+        return
+    embed = discord.Embed(title=f"Expiring within {days} day(s)", color=discord.Color.orange())
+    for row in rows[:12]:
+        embed.add_field(
+            name=f"{row.get('product')} · {row.get('level')}",
+            value=f"`{row.get('key')}`\n{row.get('client_username') or 'Unregistered'} · `{row.get('expires_at')}`",
+            inline=False,
+        )
+    embed.set_footer(text=f"Showing {min(len(rows), 12)} of {len(rows)}")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(description="Summarize suspicious authentication activity from the last 24 hours")
+@keygen
+async def securitysummary(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    result = await api(
+        interaction, "GET", f"/api/integrations/apps/{configured_app(interaction)}/security-summary"
+    )
+    embed = discord.Embed(title="Security summary · 24 hours", color=discord.Color.red())
+    embed.add_field(name="Suspicious devices", value=str(result.get("suspicious_devices") or 0))
+    embed.add_field(name="Banned HWIDs", value=str(result.get("banned_hwids") or 0))
+    events = result.get("events") or []
+    embed.add_field(
+        name="Security events",
+        value="\n".join(f"`{row['action']}` — **{row['count']}**" for row in events) or "No security events recorded",
+        inline=False,
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(description="Set the public status and message for one product")
+@app_commands.autocomplete(product=product_choices)
+@app_commands.choices(status=[
+    app_commands.Choice(name="Operational", value="operational"),
+    app_commands.Choice(name="Degraded", value="degraded"),
+    app_commands.Choice(name="Maintenance", value="maintenance"),
+    app_commands.Choice(name="Offline", value="offline"),
+])
+@keygen
+async def productstatus(interaction: discord.Interaction, product: str,
+                        status: app_commands.Choice[str], message: str = "", color: str = "#22c55e"):
+    await interaction.response.defer(ephemeral=True)
+    result = await api(
+        interaction, "PUT",
+        f"/api/integrations/apps/{configured_app(interaction)}/products/{product}/status",
+        json={"status": status.value, "message": message, "color": color},
+    )
+    embed = discord.Embed(
+        title=f"{result['product']} status updated",
+        description=message or "No public message",
+        color=int(result["color"].lstrip("#"), 16),
+    )
+    embed.add_field(name="Status", value=result["status"])
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 

@@ -2,6 +2,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -176,6 +177,12 @@ class HwidBody(BaseModel):
     reason: Optional[str] = Field(default=None, max_length=500)
 
 
+class ProductStatusBody(BaseModel):
+    status: str = Field(min_length=1, max_length=40)
+    color: str = Field(pattern=r"^#[0-9A-Fa-f]{6}$")
+    message: Optional[str] = Field(default=None, max_length=300)
+
+
 @router.get("/apps")
 async def apps(_key=Depends(require_scope("apps.read")), db=Depends(get_db)):
     async with db.execute(
@@ -231,6 +238,66 @@ async def app_operations(app_id: str, _key=Depends(require_scope("apps.read")), 
         compatibility = await cur.fetchone()
     return {"app": app, "licenses": licenses, "sessions": sessions, "activity_24h": activity,
             "sdk_usage": sdk_usage, "sdk_policy": dict(compatibility) if compatibility else None}
+
+
+@router.get("/apps/{app_id}/expiring")
+async def app_expiring(app_id: str, days: int = 7, limit: int = 25,
+                       _key=Depends(require_scope("licenses.read")), db=Depends(get_db)):
+    await require_app(db, app_id)
+    days, limit = max(1, min(days, 365)), max(1, min(limit, 50))
+    async with db.execute(
+        """SELECT l.id AS license_id,l.key,l.client_username,p.name AS product,p.level,lp.expires_at
+           FROM license_products lp JOIN licenses l ON l.id=lp.license_id
+           JOIN products p ON p.id=lp.product_id
+           WHERE l.app_id=? AND l.status='active' AND lp.expires_at IS NOT NULL
+             AND lp.expires_at>CURRENT_TIMESTAMP AND lp.expires_at<=datetime('now', ?)
+           ORDER BY lp.expires_at LIMIT ?""", (app_id, f"+{days} days", limit),
+    ) as cur:
+        rows = [dict(row) for row in await cur.fetchall()]
+    for row in rows:
+        row["key"] = mask_license_key(row["key"])
+    return {"days": days, "items": rows}
+
+
+@router.get("/apps/{app_id}/security-summary")
+async def app_security_summary(app_id: str, _key=Depends(require_scope("logs.read")), db=Depends(get_db)):
+    await require_app(db, app_id)
+    async with db.execute(
+        """SELECT action,COUNT(*) AS count FROM logs WHERE app_id=?
+           AND timestamp>=datetime('now','-24 hours')
+           AND (action LIKE '%fail%' OR action LIKE '%blocked%' OR action LIKE '%replay%' OR action LIKE '%ban%')
+           GROUP BY action ORDER BY count DESC LIMIT 10""", (app_id,),
+    ) as cur:
+        events = [dict(row) for row in await cur.fetchall()]
+    async with db.execute(
+        """SELECT COUNT(*) FROM device_fingerprints d JOIN licenses l ON l.id=d.license_id
+           WHERE l.app_id=? AND d.is_suspicious=1""", (app_id,),
+    ) as cur:
+        suspicious_devices = (await cur.fetchone())[0]
+    async with db.execute("SELECT COUNT(*) FROM banned_hwids WHERE app_id=?", (app_id,)) as cur:
+        banned_hwids = (await cur.fetchone())[0]
+    return {"window_hours": 24, "events": events, "suspicious_devices": suspicious_devices,
+            "banned_hwids": banned_hwids}
+
+
+@router.put("/apps/{app_id}/products/{product_id}/status")
+async def integration_product_status(app_id: str, product_id: str, body: ProductStatusBody,
+                                     key=Depends(require_scope("apps.modify")), db=Depends(get_db)):
+    async with db.execute("SELECT name FROM products WHERE id=? AND app_id=?", (product_id, app_id)) as cur:
+        product = await cur.fetchone()
+    if not product:
+        raise HTTPException(404, "Product not found for this application")
+    status = body.status.strip().lower().replace(" ", "-")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", status):
+        raise HTTPException(400, "Status may contain letters, numbers, dashes, and underscores")
+    await db.execute(
+        "UPDATE products SET service_status=?,status_color=?,status_message=? WHERE id=? AND app_id=?",
+        (status, body.color.lower(), (body.message or "").strip() or None, product_id, app_id),
+    )
+    await log_action(db, "integration_product_status", app_id=app_id,
+                     details=f"product={product_id}; status={status}; integration={key['id']}")
+    await db.commit()
+    return {"ok": True, "product": product["name"], "status": status, "color": body.color.lower()}
 
 
 @router.get("/apps/{app_id}/hwid-reset-requests")
