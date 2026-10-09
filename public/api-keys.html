@@ -25,6 +25,8 @@
             <tr>
               <th>Name</th>
               <th>Scopes</th>
+              <th>App binding</th>
+              <th>Usage</th>
               <th>Status</th>
               <th>Last Used</th>
               <th>Expires</th>
@@ -33,7 +35,7 @@
             </tr>
           </thead>
           <tbody id="api-keys-tbody">
-            <tr class="loading-row"><td colspan="7"><span class="spinner"></span></td></tr>
+            <tr class="loading-row"><td colspan="9"><span class="spinner"></span></td></tr>
           </tbody>
         </table>
       </div>
@@ -62,6 +64,8 @@
         <label class="form-label">Expires (days, optional)</label>
         <input class="input" id="create-expires" type="number" placeholder="Leave empty for no expiration">
       </div>
+      <div class="form-group"><label class="form-label">Restrict to application</label><select class="select" id="create-app"><option value="">All applications</option></select></div>
+      <div class="form-group"><label class="form-label">Allowed IPs/CIDRs</label><textarea class="input" id="create-ips" rows="3" placeholder="One per line, e.g. 203.0.113.10 or 10.0.0.0/24"></textarea><div style="font-size:12px;color:var(--text3);margin-top:6px">Leave empty to allow any source IP. Restrict production integrations whenever possible.</div></div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeModal('create-modal')">Cancel</button>
@@ -105,13 +109,15 @@
     try {
       const keys = await API.getApiKeys();
       if (!keys || keys.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--text3);padding:20px">No API keys found. Create one to get started.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;color:var(--text3);padding:20px">No API keys found. Create one to get started.</td></tr>`;
         return;
       }
       tbody.innerHTML = keys.map(k => `
         <tr>
           <td>${escapeHtml(k.name)}</td>
           <td><code style="font-size:11px">${escapeHtml(k.scopes)}</code></td>
+          <td>${escapeHtml(k.app_name||'All apps')}<div class="mono" style="font-size:10px;color:var(--text3)">${escapeHtml(k.allowed_ips||'Any IP')}</div></td>
+          <td>${Number(k.usage_count||0).toLocaleString()}<div class="mono" style="font-size:10px;color:var(--text3)">${escapeHtml(k.last_ip||'Never used')}</div></td>
           <td>
             <span class="badge ${k.is_active ? 'badge-green' : 'badge-red'}">
               ${k.is_active ? 'Active' : 'Inactive'}
@@ -127,7 +133,7 @@
         </tr>
       `).join("");
     } catch (err) {
-      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--error);padding:20px">Failed to load API keys</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;color:var(--error);padding:20px">Failed to load API keys</td></tr>`;
     }
   }
 
@@ -135,6 +141,7 @@
     document.getElementById("create-name").value = "";
     document.getElementById("create-scopes").value = "read";
     document.getElementById("create-expires").value = "";
+    document.getElementById("create-ips").value = "";
     openModal("create-modal");
   }
 
@@ -152,7 +159,9 @@
       const result = await API.createApiKey({
         name,
         scopes,
-        expires_days: expires ? parseInt(expires) : null
+        expires_days: expires ? parseInt(expires) : null,
+        app_id: document.getElementById("create-app").value || null,
+        allowed_ips: document.getElementById("create-ips").value.split(/[,\n]/).map(v=>v.trim()).filter(Boolean)
       });
 
       closeModal("create-modal");
@@ -206,7 +215,7 @@
     return date.toLocaleDateString() + " " + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
   }
 
-  loadApiKeys();
+  Promise.all([loadApiKeys(),API.getApps({limit:200}).then(rows=>{document.getElementById("create-app").innerHTML='<option value="">All applications</option>'+rows.map(a=>`<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}</option>`).join('')})]);
 </script>
 </body>
 </html>

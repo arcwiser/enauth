@@ -1,4 +1,6 @@
 import hashlib
+import ipaddress
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -65,8 +67,36 @@ def require_scope(required: str):
         key = await require_api_key(x_api_key, db)
         if key.get("role") != "owner":
             raise HTTPException(403, "Owner API key required")
+        requested_app = request.path_params.get("app_id")
+        bound_app = key.get("app_id")
+        if bound_app and requested_app and requested_app != bound_app:
+            raise HTTPException(403, "API key is bound to another application")
+        if bound_app and not requested_app and not (
+            request.method == "GET" and request.url.path.rstrip("/") == "/api/integrations/apps"
+        ):
+            raise HTTPException(403, "App-bound API keys cannot access global resources")
+        forwarded = request.headers.get("X-Forwarded-For") if os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true" else None
+        source_ip = (forwarded.split(",", 1)[0].strip() if forwarded else
+                     (request.client.host if request.client else "unknown"))
+        if key.get("allowed_ips"):
+            try:
+                configured_networks = json.loads(key["allowed_ips"])
+                source = ipaddress.ip_address(source_ip)
+                if not isinstance(configured_networks, list) or not any(
+                    source in ipaddress.ip_network(network, strict=False) for network in configured_networks
+                ):
+                    raise HTTPException(403, "API key is not allowed from this IP address")
+            except HTTPException:
+                raise
+            except (ValueError, TypeError, json.JSONDecodeError):
+                raise HTTPException(403, "API key IP policy is invalid")
         if not has_scope(key, required):
             raise HTTPException(403, f"API key requires {required} scope")
+        await db.execute(
+            "UPDATE api_keys SET usage_count=usage_count+1,last_ip=? WHERE id=?",
+            (source_ip, key["id"]),
+        )
+        await db.commit()
         return key
 
     return dependency

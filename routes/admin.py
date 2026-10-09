@@ -16,6 +16,7 @@ import aiosqlite
 import re
 import secrets
 import hashlib
+import ipaddress
 import pyotp
 
 from database import DB_PATH, get_db
@@ -3172,12 +3173,34 @@ class CreateApiKeyBody(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     scopes: str = Field(default="read", min_length=1, max_length=1000)
     expires_days: Optional[int] = Field(default=None, ge=1, le=3650)
+    app_id: Optional[str] = Field(default=None, max_length=128)
+    allowed_ips: list[str] = Field(default_factory=list, max_length=50)
+
+    @field_validator("allowed_ips")
+    @classmethod
+    def validate_allowed_ips(cls, values):
+        normalized = []
+        for value in values:
+            try:
+                normalized.append(str(ipaddress.ip_network(value.strip(), strict=False)))
+            except ValueError as exc:
+                raise ValueError(f"Invalid IP address or CIDR: {value}") from exc
+        return sorted(set(normalized))
 
 
 class UpdateApiKeyBody(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
     scopes: Optional[str] = Field(default=None, min_length=1, max_length=1000)
     is_active: Optional[bool] = None
+    app_id: Optional[str] = Field(default=None, max_length=128)
+    allowed_ips: Optional[list[str]] = Field(default=None, max_length=50)
+
+    @field_validator("allowed_ips")
+    @classmethod
+    def validate_allowed_ips(cls, values):
+        if values is None:
+            return values
+        return CreateApiKeyBody.validate_allowed_ips(values)
 
 
 @router.get("/users")
@@ -3336,8 +3359,10 @@ async def list_api_keys(user=Depends(require_admin), db: aiosqlite.Connection = 
     **Authentication**: Requires Bearer token from admin session.
     """
     async with db.execute(
-        """SELECT id, name, scopes, is_active, last_used, expires_at, created_at
-           FROM api_keys WHERE user_id = ? ORDER BY created_at DESC""",
+        """SELECT ak.id,ak.name,ak.scopes,ak.is_active,ak.last_used,ak.expires_at,ak.created_at,
+                  ak.app_id,ak.allowed_ips,ak.usage_count,ak.last_ip,a.name AS app_name
+           FROM api_keys ak LEFT JOIN applications a ON a.id=ak.app_id
+           WHERE ak.user_id = ? ORDER BY ak.created_at DESC""",
         (user["id"],)
     ) as cur:
         return rows_to_list(await cur.fetchall())
@@ -3377,16 +3402,21 @@ async def create_api_key(body: CreateApiKeyBody, user=Depends(require_admin), db
         expires_at = future_hours(body.expires_days * 24)
 
     key_id = generate_uid()
+    if body.app_id:
+        await _owned_app(body.app_id, auth_owner_id(user), db)
     await db.execute(
-        """INSERT INTO api_keys (id, user_id, key_hash, key_prefix, name, scopes, expires_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (key_id, user["id"], key_hash, key_prefix, body.name, body.scopes, expires_at)
+        """INSERT INTO api_keys
+           (id,user_id,key_hash,key_prefix,name,scopes,expires_at,app_id,allowed_ips)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (key_id, user["id"], key_hash, key_prefix, body.name, body.scopes, expires_at,
+         body.app_id, json.dumps(body.allowed_ips) if body.allowed_ips else None)
     )
     await log_action(db, "api_key_created", details=f"API key created: {body.name}")
     await db.commit()
 
     # Return the key only once
-    return {"id": key_id, "key": api_key, "name": body.name, "scopes": body.scopes, "expires_at": expires_at}
+    return {"id": key_id, "key": api_key, "name": body.name, "scopes": body.scopes,
+            "expires_at": expires_at, "app_id": body.app_id, "allowed_ips": body.allowed_ips}
 
 
 @router.put("/api-keys/{key_id}", tags=["API Keys"])
@@ -3422,6 +3452,13 @@ async def update_api_key(key_id: str, body: UpdateApiKeyBody, user=Depends(requi
     if body.is_active is not None:
         updates.append("is_active = ?")
         args.append(1 if body.is_active else 0)
+    if "app_id" in body.model_fields_set:
+        if body.app_id:
+            await _owned_app(body.app_id, auth_owner_id(user), db)
+        updates.append("app_id = ?"); args.append(body.app_id)
+    if body.allowed_ips is not None:
+        updates.append("allowed_ips = ?")
+        args.append(json.dumps(body.allowed_ips) if body.allowed_ips else None)
 
     if not updates:
         raise HTTPException(400, "Nothing to update")

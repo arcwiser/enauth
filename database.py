@@ -377,6 +377,10 @@ CREATE TABLE IF NOT EXISTS api_keys (
     scopes      TEXT DEFAULT 'read',
     is_active   INTEGER DEFAULT 1,
     last_used   DATETIME,
+    app_id      TEXT REFERENCES applications(id) ON DELETE CASCADE,
+    allowed_ips TEXT,
+    usage_count INTEGER NOT NULL DEFAULT 0,
+    last_ip     TEXT,
     expires_at  DATETIME,
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );

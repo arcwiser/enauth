@@ -77,7 +77,34 @@ class DiscordIntegrationControlTests(unittest.IsolatedAsyncioTestCase):
 
     def _request(self, path, method="GET", app_id=None):
         return Request({"type": "http", "method": method, "path": path, "headers": [],
-                        "path_params": {"app_id": app_id} if app_id else {}})
+                        "path_params": {"app_id": app_id} if app_id else {},
+                        "client": ("127.0.0.1", 12345)})
+
+    async def test_api_key_app_binding_ip_allowlist_and_usage_counter(self):
+        raw = await self._owner_api_key("apps.read")
+        await self.db.execute("INSERT INTO applications(id,name,secret_key) VALUES('app-2','Other','secret-2')")
+        await self.db.execute(
+            "UPDATE api_keys SET app_id='app-1',allowed_ips=? WHERE id='api-test'",
+            ('["127.0.0.0/8"]',),
+        )
+        await self.db.commit()
+        with self.assertRaises(HTTPException) as wrong_app:
+            await integrations.require_scope("apps.read")(
+                self._request("/api/integrations/apps/app-2", app_id="app-2"), raw, None, self.db)
+        self.assertEqual(wrong_app.exception.status_code, 403)
+        denied_request = Request({"type": "http", "method": "GET",
+                                  "path": "/api/integrations/apps/app-1", "headers": [],
+                                  "path_params": {"app_id": "app-1"},
+                                  "client": ("203.0.113.5", 12345)})
+        with self.assertRaises(HTTPException) as wrong_ip:
+            await integrations.require_scope("apps.read")(denied_request, raw, None, self.db)
+        self.assertEqual(wrong_ip.exception.status_code, 403)
+        key = await integrations.require_scope("apps.read")(
+            self._request("/api/integrations/apps/app-1", app_id="app-1"), raw, None, self.db)
+        self.assertEqual(key["app_id"], "app-1")
+        async with self.db.execute("SELECT usage_count,last_ip FROM api_keys WHERE id='api-test'") as cur:
+            usage = await cur.fetchone()
+        self.assertEqual((usage["usage_count"], usage["last_ip"]), (1, "127.0.0.1"))
 
     async def test_discord_key_cannot_access_global_resources_or_other_apps(self):
         raw = await self._discord_key()
