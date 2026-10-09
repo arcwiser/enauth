@@ -5,6 +5,7 @@ import string
 import asyncio
 import contextlib
 import time
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -131,12 +132,19 @@ app.add_middleware(
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
     started = time.perf_counter()
+    incoming_request_id = request.headers.get("X-Request-ID", "")
+    request_id = incoming_request_id if re.fullmatch(r"[A-Za-z0-9._-]{8,64}", incoming_request_id) else secrets.token_hex(12)
+    request.state.request_id = request_id
     try:
         response = await call_next(request)
     except Exception:
         record_request_metric(500, (time.perf_counter() - started) * 1000)
         raise
-    record_request_metric(response.status_code, (time.perf_counter() - started) * 1000)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    record_request_metric(response.status_code, elapsed_ms)
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Response-Time-Ms"] = f"{elapsed_ms:.2f}"
+    response.headers["Server-Timing"] = f"app;dur={elapsed_ms:.2f}"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"

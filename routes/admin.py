@@ -2148,6 +2148,54 @@ async def get_response_signing_public_key(user=Depends(require_owner)):
     return {"algorithm": "ECDSA-P256-SHA256", "public_key_hex": response_public_key_hex()}
 
 
+@router.get("/developer/overview")
+async def developer_overview(request: Request, user=Depends(require_admin),
+                             db: aiosqlite.Connection = Depends(get_db)):
+    """Non-secret integration inventory for the Developer Center."""
+    async with db.execute(
+        """SELECT ak.id,ak.name,ak.key_prefix,ak.scopes,ak.is_active,ak.last_used,ak.expires_at,
+                  ak.usage_count,ak.last_ip,ak.app_id,a.name AS app_name,ak.allowed_ips
+           FROM api_keys ak LEFT JOIN applications a ON a.id=ak.app_id
+           WHERE ak.user_id=? ORDER BY ak.last_used DESC,ak.created_at DESC""", (user["id"],),
+    ) as cur:
+        keys = rows_to_list(await cur.fetchall())
+    async with db.execute(
+        "SELECT COUNT(*) FROM applications WHERE (? IS NULL OR owner_user_id=?)",
+        (auth_owner_id(user), auth_owner_id(user)),
+    ) as cur:
+        application_count = (await cur.fetchone())[0]
+    scopes = [
+        {"name": "apps.read", "description": "Read application and product metadata"},
+        {"name": "apps.modify", "description": "Pause apps and change product status"},
+        {"name": "licenses.read", "description": "List licenses and customer requests"},
+        {"name": "licenses.generate", "description": "Generate new licenses"},
+        {"name": "licenses.modify", "description": "Ban, extend, reset, or update licenses"},
+        {"name": "licenses.reveal", "description": "Reveal stored plaintext license keys"},
+        {"name": "licenses.delete", "description": "Permanently delete licenses"},
+        {"name": "logs.read", "description": "Read application security events"},
+        {"name": "builds.read", "description": "List protected releases"},
+        {"name": "builds.upload", "description": "Publish or replace protected releases"},
+        {"name": "builds.delete", "description": "Delete protected releases"},
+    ]
+    return {
+        "api_base": str(request.base_url).rstrip("/") + "/api/integrations",
+        "openapi_url": "/api/admin/developer/openapi",
+        "interactive_docs_url": "/docs",
+        "response_signing": {"algorithm": "ECDSA-P256-SHA256", "public_key_hex": response_public_key_hex()},
+        "protocol": {"current": 2, "legacy_allowed": os.getenv("ALLOW_LEGACY_PROTOCOL", "true").lower() == "true"},
+        "limits": {"max_json_bytes": int(os.getenv("MAX_JSON_BYTES", str(2 * 1024 * 1024))),
+                   "max_upload_bytes": int(os.getenv("MAX_BUILD_UPLOAD_BYTES", str(100 * 1024 * 1024))),
+                   "session_token_seconds": int(os.getenv("SESSION_TOKEN_SECONDS", "300"))},
+        "application_count": application_count, "keys": keys, "scopes": scopes,
+    }
+
+
+@router.get("/developer/openapi")
+async def download_openapi(request: Request, user=Depends(require_admin)):
+    schema = request.app.openapi()
+    return JSONResponse(schema, headers={"Content-Disposition": 'attachment; filename="enauth-openapi.json"'})
+
+
 @router.post("/discord-integrations")
 async def create_discord_integration(body: CreateDiscordIntegrationBody,
                                      user=Depends(require_owner), db=Depends(get_db)):

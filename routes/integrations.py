@@ -205,6 +205,22 @@ async def app_details(app_id: str, _key=Depends(require_scope("apps.read")), db=
     return app
 
 
+@router.get("/apps/{app_id}/capabilities")
+async def integration_capabilities(app_id: str, key=Depends(require_scope("apps.read")), db=Depends(get_db)):
+    """Describe what the presented credential may do without exposing the credential itself."""
+    await require_app(db, app_id)
+    known = ["apps.read", "apps.modify", "licenses.read", "licenses.generate", "licenses.modify",
+             "licenses.reveal", "licenses.delete", "logs.read", "builds.read", "builds.upload", "builds.delete"]
+    return {
+        "app_id": app_id,
+        "credential_kind": key.get("kind", "api_key"),
+        "configured_scopes": [item.strip() for item in str(key.get("scopes") or "read").split(",") if item.strip()],
+        "capabilities": {scope: has_scope(key, scope) for scope in known},
+        "limits": {"max_list_size": 50, "max_bulk_generation": 500,
+                   "max_upload_bytes": int(os.getenv("MAX_BUILD_UPLOAD_BYTES", str(100 * 1024 * 1024)))},
+    }
+
+
 @router.get("/apps/{app_id}/operations")
 async def app_operations(app_id: str, _key=Depends(require_scope("apps.read")), db=Depends(get_db)):
     """A secret-free operational snapshot suitable for Discord and monitoring integrations."""

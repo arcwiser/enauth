@@ -212,6 +212,7 @@ const API = {
   downloadBackup: (name) => fetch(BASE + `/api/admin/backups/${encodeURIComponent(name)}`, { credentials: "same-origin" }),
   getDiscordIntegrations: () => api("GET", "/api/admin/discord-integrations"),
   getResponseSigningPublicKey: () => api("GET", "/api/admin/response-signing-public-key"),
+  getDeveloperOverview: () => api("GET", "/api/admin/developer/overview"),
   createDiscordIntegration: (app_id) => api("POST", "/api/admin/discord-integrations", { app_id }),
   revokeDiscordIntegration: (id) => api("DELETE", `/api/admin/discord-integrations/${id}`),
 
@@ -438,7 +439,7 @@ function buildSidebar(activePage) {
     ["Distribution", [["loaders", "Loader releases", "box"], ["files", "Files", "file"], ["news", "Announcements", "message"], ["panels", "Customer panels", "window"], ["resellers", "Resellers", "users"], ["discord", "Discord bot", "message", true]]],
     ["Security", [["control", "Control center", "shield"], ["sessions", "Active sessions", "pulse"], ["bans", "Blocklist", "shield"], ["logs", "Event logs", "list"], ["audit", "Audit trail", "search"]]],
     ["Operations", [["sdk", "SDK & documentation", "code"], ["health", "Server health", "pulse"], ["requests", "Customer requests", "message"]]],
-    ["Administration", [["users", "Team members", "users", true], ["api-keys", "API keys", "key"], ["variables", "Variables", "code", true], ["backups", "Backups", "shield", true], ["settings", "Settings", "settings"]]]
+    ["Administration", [["developer", "Developer API", "code"], ["users", "Team members", "users", true], ["api-keys", "API keys", "key"], ["variables", "Variables", "code", true], ["backups", "Backups", "shield", true], ["settings", "Settings", "settings"]]]
   ];
   const paths = {
     grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
