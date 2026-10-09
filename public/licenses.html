@@ -37,7 +37,8 @@
         <div class="toolbar-spacer"></div>
         <input type="file" id="import-csv-file" accept=".csv,text/csv" hidden onchange="importCsv(this.files[0]);this.value=''">
         <button class="btn btn-outline" onclick="document.getElementById('import-csv-file').click()">⬆ Import CSV</button>
-        <button class="btn btn-outline" onclick="exportCsv()">⬇ Export CSV</button>
+        <button class="btn btn-outline" onclick="exportSelectedCsv()">⬇ Export Selected</button>
+        <button class="btn btn-outline" onclick="exportCsv()">⬇ Export Filtered</button>
         <button class="btn btn-outline" onclick="bulkAction('ban')">Ban Selected</button>
         <button class="btn btn-outline" onclick="bulkAction('unban')">Unban Selected</button>
         <button class="btn btn-outline" onclick="bulkAction('delete')">Delete Selected</button>
@@ -191,6 +192,7 @@
     </div>
     <div class="modal-body" id="result-body"></div>
     <div class="modal-footer">
+      <button class="btn btn-outline" id="export-new-btn" onclick="exportGeneratedCsv()">⬇ Export New Keys</button>
       <button class="btn btn-primary" onclick="closeModal('result-modal');load()">Done</button>
     </div>
   </div>
@@ -219,10 +221,11 @@
   let products = [];
   let licenseTemplates = [];
   const selectedLicenses = new Set();
+  let lastGeneratedIds = [];
 
-  async function exportCsv() {
+  async function exportCsv(ids = []) {
     const params = new URLSearchParams();
-    const values = {
+    const values = ids.length ? { ids: ids.join(',') } : {
       search: document.getElementById("search").value,
       status: document.getElementById("filter-status").value,
       app_id: document.getElementById("filter-app").value,
@@ -243,6 +246,17 @@
       URL.revokeObjectURL(link.href);
       toast("License CSV exported", "success");
     } catch (error) { toast(error.message, "error"); }
+  }
+
+  function exportSelectedCsv() {
+    const ids = [...selectedLicenses];
+    if (!ids.length) return toast("Select one or more licenses first", "error");
+    exportCsv(ids);
+  }
+
+  function exportGeneratedCsv() {
+    if (!lastGeneratedIds.length) return toast("No newly generated keys are available", "error");
+    exportCsv(lastGeneratedIds);
   }
 
   async function importCsv(file) {
@@ -567,6 +581,7 @@
       }
 
       const res = await API.createLicense(payload);
+      lastGeneratedIds = (res.created || []).map(x => x.id);
       closeModal("create-modal");
       const body = document.getElementById("result-body");
       const prodList = (res.products || []).map(p => `

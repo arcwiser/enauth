@@ -2412,6 +2412,7 @@ async def export_licenses_csv(app_id: Optional[str] = None,
                               search: Optional[str] = None,
                               product_id: Optional[str] = None,
                               expired: Optional[bool] = None,
+                              ids: Optional[str] = None,
                               user=Depends(require_admin),
                               db: aiosqlite.Connection = Depends(get_db)):
     owner_id = auth_owner_id(user)
@@ -2426,6 +2427,12 @@ async def export_licenses_csv(app_id: Optional[str] = None,
     args = []
     if owner_id:
         sql += " AND a.owner_user_id=?"; args.append(owner_id)
+    selected_ids = list(dict.fromkeys(x.strip() for x in (ids or "").split(",") if x.strip()))
+    if len(selected_ids) > 200:
+        raise HTTPException(400, "A maximum of 200 selected licenses can be exported at once")
+    if selected_ids:
+        marks = ",".join("?" for _ in selected_ids)
+        sql += f" AND l.id IN ({marks})"; args.extend(selected_ids)
     if app_id:
         sql += " AND l.app_id=?"; args.append(app_id)
     if status:
@@ -2464,7 +2471,8 @@ async def export_licenses_csv(app_id: Optional[str] = None,
             "metadata": csv_safe(row.get("metadata")),
             "created_at": csv_safe(row["created_at"]),
         })
-    filename = f"enauth-licenses-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.csv"
+    scope = "selected" if selected_ids else "filtered"
+    filename = f"enauth-licenses-{scope}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.csv"
     return StreamingResponse(
         io.BytesIO(buffer.getvalue().encode("utf-8-sig")), media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"',

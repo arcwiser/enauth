@@ -402,7 +402,7 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
             )
             await db.commit()
             response = await self.admin.export_licenses_csv(
-                app_id="app-export", status=None, search=None, product_id=None, expired=None,
+                app_id="app-export", status=None, search=None, product_id=None, expired=None, ids=None,
                 user=caller, db=db,
             )
             content = b"".join([chunk async for chunk in response.body_iterator]).decode("utf-8-sig")
@@ -410,6 +410,20 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Lifetime", content)
             self.assertIn("'=unsafe formula", content)
             self.assertEqual(response.headers["cache-control"], "no-store, private")
+            await db.execute(
+                "INSERT INTO licenses(id,key,key_hash,key_ciphertext,app_id) VALUES(?,?,?,?,?)",
+                ("lic-other", "OTHER…9999", "c" * 64, encrypt_license_key("OTHER-KEY-999999"), "app-export"),
+            )
+            await db.commit()
+            selected_response = await self.admin.export_licenses_csv(
+                app_id=None, status=None, search=None, product_id=None, expired=None, ids="lic-export",
+                user=caller, db=db,
+            )
+            selected_content = b"".join(
+                [chunk async for chunk in selected_response.body_iterator]
+            ).decode("utf-8-sig")
+            self.assertIn(license_key, selected_content)
+            self.assertNotIn("OTHER-KEY-999999", selected_content)
 
     async def test_license_csv_import_previews_then_creates_entitlements(self):
         caller = {"id": "owner-1", "username": "owner", "role": "owner", "_source": "admin_users"}
