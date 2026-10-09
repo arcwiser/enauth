@@ -1820,6 +1820,77 @@ async def revoke_filtered_sessions(body: SessionRevokeFilterBody, user=Depends(r
     return {"ok": True, "revoked_sessions": count}
 
 
+@router.get("/security/sessions/revoke-preview")
+async def preview_filtered_session_revoke(app_id: str, product_id: Optional[str] = None,
+                                          license_id: Optional[str] = None,
+                                          user=Depends(require_admin), db=Depends(get_db)):
+    await _owned_app(app_id, auth_owner_id(user), db)
+    conditions, args = ["app_id=?"], [app_id]
+    if product_id:
+        product = await _owned_product(product_id, auth_owner_id(user), db)
+        if product["app_id"] != app_id:
+            raise HTTPException(400, "Product does not belong to the application")
+        conditions.append("product_id=?"); args.append(product_id)
+    if license_id:
+        async with db.execute("SELECT app_id FROM licenses WHERE id=?", (license_id,)) as cur:
+            license_row = await cur.fetchone()
+        if not license_row or license_row["app_id"] != app_id:
+            raise HTTPException(404, "License not found for this application")
+        conditions.append("license_id=?"); args.append(license_id)
+    where = " AND ".join(conditions)
+    async with db.execute(
+        f"""SELECT COUNT(*) AS sessions,COUNT(DISTINCT license_id) AS licenses,
+            COUNT(DISTINCT hwid) AS devices FROM sessions WHERE {where}""", args
+    ) as cur:
+        counts = dict(await cur.fetchone())
+    async with db.execute(
+        f"""SELECT COUNT(*) FROM download_tickets WHERE consumed_at IS NULL
+            AND expires_at>CURRENT_TIMESTAMP AND {where}""", args
+    ) as cur:
+        counts["download_tickets"] = int((await cur.fetchone())[0])
+    return counts
+
+
+@router.get("/security/events")
+async def list_security_events(app_id: Optional[str] = None, severity: Optional[str] = None,
+                               search: Optional[str] = None, limit: int = 50, offset: int = 0,
+                               user=Depends(require_admin), db=Depends(get_db)):
+    owner_id = auth_owner_id(user)
+    conditions = ["(lg.action LIKE '%fail%' OR lg.action IN ('suspicious_login','login_hwid_limit','build_revoked','emergency_lockdown','sessions_revoked','session_authorization_revoked'))"]
+    args = []
+    if owner_id:
+        conditions.append("a.owner_user_id=?"); args.append(owner_id)
+    if app_id:
+        await _owned_app(app_id, owner_id, db)
+        conditions.append("lg.app_id=?"); args.append(app_id)
+    if severity:
+        if severity not in {"critical", "warning", "info"}:
+            raise HTTPException(400, "Invalid severity")
+        severity_sql = {
+            "critical": "lg.action IN ('emergency_lockdown','build_revoked','suspicious_login')",
+            "warning": "(lg.action LIKE '%fail%' OR lg.action IN ('login_hwid_limit','session_authorization_revoked'))",
+            "info": "lg.action='sessions_revoked'",
+        }[severity]
+        conditions.append(severity_sql)
+    if search:
+        conditions.append("(lg.action LIKE ? OR lg.ip LIKE ? OR lg.details LIKE ?)")
+        term = f"%{search[:200]}%"; args.extend([term, term, term])
+    where = " AND ".join(conditions)
+    async with db.execute(f"SELECT COUNT(*) FROM logs lg LEFT JOIN applications a ON a.id=lg.app_id WHERE {where}", args) as cur:
+        total = int((await cur.fetchone())[0])
+    async with db.execute(
+        f"""SELECT lg.id,lg.app_id,a.name AS app_name,lg.action,lg.ip,lg.details,lg.timestamp,
+            CASE WHEN lg.action IN ('emergency_lockdown','build_revoked','suspicious_login') THEN 'critical'
+                 WHEN lg.action LIKE '%fail%' OR lg.action IN ('login_hwid_limit','session_authorization_revoked') THEN 'warning'
+                 ELSE 'info' END AS severity
+            FROM logs lg LEFT JOIN applications a ON a.id=lg.app_id WHERE {where}
+            ORDER BY lg.timestamp DESC LIMIT ? OFFSET ?""",
+        [*args, clamp_limit(limit, 50), clamp_offset(offset)],
+    ) as cur:
+        items = rows_to_list(await cur.fetchall())
+    return {"items": items, "total": total, "limit": clamp_limit(limit, 50), "offset": clamp_offset(offset)}
+
+
 @router.post("/security/apps/{app_id}/lockdown")
 async def emergency_app_lockdown(app_id: str, body: EmergencyLockdownBody,
                                  user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
@@ -3361,6 +3432,33 @@ async def update_api_key(key_id: str, body: UpdateApiKeyBody, user=Depends(requi
     await db.commit()
 
     return {"ok": True}
+
+
+@router.post("/api-keys/{key_id}/rotate", tags=["API Keys"])
+async def rotate_api_key(key_id: str, user=Depends(require_admin),
+                         db: aiosqlite.Connection = Depends(get_db)):
+    """Replace an API credential atomically and reveal the replacement once."""
+    async with db.execute(
+        "SELECT id,name,scopes,expires_at FROM api_keys WHERE id=? AND user_id=?",
+        (key_id, user["id"]),
+    ) as cur:
+        key = await cur.fetchone()
+    if not key:
+        raise HTTPException(404, "API key not found")
+    replacement = f"enauth_{secrets.token_urlsafe(32)}"
+    replacement_hash = hashlib.sha256(replacement.encode("utf-8")).hexdigest()
+    cursor = await db.execute(
+        """UPDATE api_keys SET key_hash=?,key_prefix=?,is_active=1,last_used=NULL
+           WHERE id=? AND user_id=?""",
+        (replacement_hash, replacement[:20], key_id, user["id"]),
+    )
+    if cursor.rowcount != 1:
+        await db.rollback()
+        raise HTTPException(409, "API key changed during rotation")
+    await log_action(db, "api_key_rotated", details=f"API key rotated: {key_id}")
+    await db.commit()
+    return {"id": key_id, "key": replacement, "name": key["name"],
+            "scopes": key["scopes"], "expires_at": key["expires_at"]}
 
 
 @router.delete("/api-keys/{key_id}", tags=["API Keys"])

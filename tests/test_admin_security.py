@@ -361,9 +361,31 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
                 user=caller, db=db,
             )
             self.assertEqual(result["revoked_sessions"], 1)
+            events = await self.admin.list_security_events(
+                app_id="app-sec", severity="critical", search=None, limit=20, offset=0,
+                user=caller, db=db,
+            )
+            self.assertEqual(events["items"][0]["action"], "emergency_lockdown")
             async with db.execute("SELECT is_paused FROM applications WHERE id='app-sec'") as cur:
                 app = await cur.fetchone()
             self.assertEqual(app["is_paused"], 1)
+
+    async def test_api_key_rotation_invalidates_old_key_and_reveals_new_key_once(self):
+        user_id, _ = await self._create_admin_user(two_factor_enabled=0)
+        caller = {"id": user_id, "username": "admin", "role": "owner", "_source": "admin_users"}
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            created = await self.admin.create_api_key(
+                self.admin.CreateApiKeyBody(name="CI", scopes="apps.read"), user=caller, db=db,
+            )
+            old_hash = __import__("hashlib").sha256(created["key"].encode()).hexdigest()
+            rotated = await self.admin.rotate_api_key(created["id"], user=caller, db=db)
+            self.assertNotEqual(rotated["key"], created["key"])
+            async with db.execute("SELECT key_hash,last_used,is_active FROM api_keys WHERE id=?", (created["id"],)) as cur:
+                stored = await cur.fetchone()
+            self.assertNotEqual(stored["key_hash"], old_hash)
+            self.assertEqual(stored["key_hash"], __import__("hashlib").sha256(rotated["key"].encode()).hexdigest())
+            self.assertEqual(stored["is_active"], 1)
 
 
 if __name__ == "__main__":

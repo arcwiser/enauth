@@ -149,7 +149,16 @@ const API = {
   getApiKeys: () => api("GET", "/api/admin/api-keys"),
   createApiKey: (body) => api("POST", "/api/admin/api-keys", body),
   updateApiKey: (id, body) => api("PUT", `/api/admin/api-keys/${encodeURIComponent(id)}`, body),
+  rotateApiKey: (id) => api("POST", `/api/admin/api-keys/${encodeURIComponent(id)}/rotate`),
   deleteApiKey: (id) => api("DELETE", `/api/admin/api-keys/${encodeURIComponent(id)}`),
+  getSecurityEvents: (params = {}) => {
+    const qs = new URLSearchParams(Object.entries(params).filter(([,v]) => v !== "" && v != null)).toString();
+    return api("GET", `/api/admin/security/events${qs ? "?" + qs : ""}`);
+  },
+  previewSessionRevoke: (params = {}) => {
+    const qs = new URLSearchParams(Object.entries(params).filter(([,v]) => v)).toString();
+    return api("GET", `/api/admin/security/sessions/revoke-preview?${qs}`);
+  },
 
   // Reseller Analytics
   getResellerAnalytics: (resellerId) => apiWithToken(getResellerToken(), "GET", `/api/admin/resellers/${encodeURIComponent(resellerId)}/analytics`),

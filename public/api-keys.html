@@ -121,6 +121,7 @@
           <td>${k.expires_at ? formatDate(k.expires_at) : 'Never'}</td>
           <td>${formatDate(k.created_at)}</td>
           <td>
+            <button class="btn btn-outline btn-sm" onclick="rotateApiKey('${k.id}')">Rotate</button>
             <button class="btn btn-ghost" style="padding:4px 8px;font-size:12px" onclick="deleteApiKey('${k.id}')">Delete</button>
           </td>
         </tr>
@@ -171,6 +172,19 @@
       loadApiKeys();
     } catch (err) {
       alert("Failed to delete API key: " + (err.message || "Unknown error"));
+    }
+  }
+
+  async function rotateApiKey(id) {
+    if (!confirm("Rotate this API key now? The previous key will stop working immediately.")) return;
+    try {
+      const result = await API.rotateApiKey(id);
+      document.getElementById("show-key").value = result.key;
+      document.querySelector("#show-modal h3").textContent = "API Key Rotated";
+      openModal("show-modal");
+      loadApiKeys();
+    } catch (err) {
+      toast("Failed to rotate API key: " + (err.message || "Unknown error"), "error");
     }
   }
 
