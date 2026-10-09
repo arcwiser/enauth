@@ -2330,6 +2330,75 @@ async def list_licenses(app_id: Optional[str] = None,
     return rows
 
 
+def csv_safe(value) -> str:
+    """Prevent spreadsheet formula execution when an exported CSV is opened."""
+    text = "" if value is None else str(value)
+    return "'" + text if text.startswith(("=", "+", "-", "@", "\t", "\r")) else text
+
+
+@router.get("/licenses/export.csv")
+async def export_licenses_csv(app_id: Optional[str] = None,
+                              status: Optional[str] = None,
+                              search: Optional[str] = None,
+                              product_id: Optional[str] = None,
+                              expired: Optional[bool] = None,
+                              user=Depends(require_admin),
+                              db: aiosqlite.Connection = Depends(get_db)):
+    owner_id = auth_owner_id(user)
+    sql = """SELECT l.*, a.name AS app_name,
+             (SELECT COUNT(*) FROM hwids WHERE license_id=l.id) AS hwid_count,
+             (SELECT GROUP_CONCAT(p.level || ' (' || p.name || ')', '; ')
+                FROM license_products lp JOIN products p ON p.id=lp.product_id
+               WHERE lp.license_id=l.id) AS products
+             FROM licenses l JOIN applications a ON a.id=l.app_id WHERE 1=1"""
+    args = []
+    if owner_id:
+        sql += " AND a.owner_user_id=?"; args.append(owner_id)
+    if app_id:
+        sql += " AND l.app_id=?"; args.append(app_id)
+    if status:
+        sql += " AND l.status=?"; args.append(status)
+    if search:
+        sql += " AND (l.key LIKE ? OR l.notes LIKE ? OR l.metadata LIKE ?)"
+        args.extend([f"%{search}%"] * 3)
+    if product_id:
+        sql += " AND l.id IN (SELECT license_id FROM license_products WHERE product_id=?)"
+        args.append(product_id)
+    if expired is True:
+        sql += " AND l.expires_at < ?"; args.append(utcnow())
+    elif expired is False:
+        sql += " AND (l.expires_at IS NULL OR l.expires_at >= ?)"; args.append(utcnow())
+    sql += " ORDER BY l.created_at DESC LIMIT 50000"
+    async with db.execute(sql, args) as cur:
+        rows = rows_to_list(await cur.fetchall())
+
+    fields = ["license_key", "application", "app_id", "products", "status", "expires",
+              "hwids_used", "max_hwids", "notes", "metadata", "created_at"]
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=fields)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({
+            "license_key": csv_safe(display_license_key(row["key"], row.get("key_ciphertext"))),
+            "application": csv_safe(row["app_name"]),
+            "app_id": csv_safe(row["app_id"]),
+            "products": csv_safe(row.get("products") or "Any"),
+            "status": csv_safe(row["status"]),
+            "expires": csv_safe(row["expires_at"] or "Lifetime"),
+            "hwids_used": row["hwid_count"],
+            "max_hwids": row["max_hwids"],
+            "notes": csv_safe(row.get("notes")),
+            "metadata": csv_safe(row.get("metadata")),
+            "created_at": csv_safe(row["created_at"]),
+        })
+    filename = f"enauth-licenses-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.csv"
+    return StreamingResponse(
+        io.BytesIO(buffer.getvalue().encode("utf-8-sig")), media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"',
+                 "Cache-Control": "no-store, private"},
+    )
+
+
 @router.post("/licenses")
 async def create_license(body: CreateLicenseBody,
                           user=Depends(require_admin),

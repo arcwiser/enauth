@@ -35,6 +35,7 @@
           <option value="true">Expired Only</option>
         </select>
         <div class="toolbar-spacer"></div>
+        <button class="btn btn-outline" onclick="exportCsv()">⬇ Export CSV</button>
         <button class="btn btn-outline" onclick="bulkAction('ban')">Ban Selected</button>
         <button class="btn btn-outline" onclick="bulkAction('unban')">Unban Selected</button>
         <button class="btn btn-outline" onclick="bulkAction('delete')">Delete Selected</button>
@@ -211,6 +212,31 @@
   let apps = [];
   let products = [];
   const selectedLicenses = new Set();
+
+  async function exportCsv() {
+    const params = new URLSearchParams();
+    const values = {
+      search: document.getElementById("search").value,
+      status: document.getElementById("filter-status").value,
+      app_id: document.getElementById("filter-app").value,
+      product_id: document.getElementById("filter-product").value,
+      expired: document.getElementById("filter-expired").value,
+    };
+    Object.entries(values).forEach(([key, value]) => { if (value !== "") params.set(key, value); });
+    try {
+      const response = await fetch(`/api/admin/licenses/export.csv?${params}`, { credentials: "same-origin" });
+      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `Export failed (${response.status})`);
+      const blob = await response.blob();
+      const disposition = response.headers.get("Content-Disposition") || "";
+      const match = disposition.match(/filename="([^"]+)"/);
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = match ? match[1] : "enauth-licenses.csv";
+      document.body.appendChild(link); link.click(); link.remove();
+      URL.revokeObjectURL(link.href);
+      toast("License CSV exported", "success");
+    } catch (error) { toast(error.message, "error"); }
+  }
 
   async function loadApps() {
     apps = await API.getApps().catch(() => []);

@@ -387,6 +387,30 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored["key_hash"], __import__("hashlib").sha256(rotated["key"].encode()).hexdigest())
             self.assertEqual(stored["is_active"], 1)
 
+    async def test_license_csv_export_reveals_authorized_keys_and_escapes_formulas(self):
+        caller = {"id": "owner-1", "username": "owner", "role": "owner", "_source": "admin_users"}
+        license_key = "EXPORT-ABCDEF-123456"
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("INSERT INTO applications(id,name,secret_key) VALUES(?,?,?)",
+                             ("app-export", "Export App", "x" * 64))
+            await db.execute(
+                """INSERT INTO licenses(id,key,key_hash,key_ciphertext,app_id,notes,metadata)
+                   VALUES(?,?,?,?,?,?,?)""",
+                ("lic-export", "EXPORT…3456", "b" * 64, encrypt_license_key(license_key),
+                 "app-export", "=unsafe formula", "customer-1"),
+            )
+            await db.commit()
+            response = await self.admin.export_licenses_csv(
+                app_id="app-export", status=None, search=None, product_id=None, expired=None,
+                user=caller, db=db,
+            )
+            content = b"".join([chunk async for chunk in response.body_iterator]).decode("utf-8-sig")
+            self.assertIn(license_key, content)
+            self.assertIn("Lifetime", content)
+            self.assertIn("'=unsafe formula", content)
+            self.assertEqual(response.headers["cache-control"], "no-store, private")
+
 
 if __name__ == "__main__":
     unittest.main()
