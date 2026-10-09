@@ -294,6 +294,17 @@
       <div class="reset-warning">
         ⚠️ Resetting your Hardware ID deletes all locked devices from this license key.
       </div>
+      <button class="btn btn-outline" style="width:100%;justify-content:center" onclick="requestHardwareReset()">Request a manual reset</button>
+    </div>
+
+    <div style="margin-top:28px;border-top:1px solid var(--border);padding-top:24px">
+      <div class="user-welcome" style="font-size:15px">💻 My devices</div>
+      <div id="devices-list" style="display:flex;flex-direction:column;gap:10px"></div>
+    </div>
+
+    <div style="margin-top:28px;border-top:1px solid var(--border);padding-top:24px">
+      <div class="user-welcome" style="font-size:15px">🕘 Account timeline</div>
+      <div id="history-list" style="display:flex;flex-direction:column;gap:10px"></div>
     </div>
 
     <!-- Portal Downloads Section -->
@@ -472,6 +483,8 @@
       // Load additional dynamic features
       updateHwidCooldown(lic.hwid_reset_at);
       loadDownloads();
+      loadDevices();
+      loadHistory();
     } catch (e) {
       localStorage.removeItem(`portal_token_${panelId}`);
       sessionToken = null;
@@ -504,6 +517,21 @@
       } catch (ex) {}
     }
   }
+
+  async function requestHardwareReset() {
+    const reason = prompt("Why do you need a manual device reset?");
+    if (reason === null) return;
+    try { await API.portalRequestHwidReset(sessionToken, reason); showSuccess("Reset request sent for review."); }
+    catch (e) { showError(e.message || "Could not submit reset request."); }
+  }
+
+  async function loadDevices() {
+    const box = document.getElementById("devices-list");
+    try { const rows = await API.portalGetDevices(sessionToken); box.innerHTML = rows.length ? rows.map(d => `<div style="border:1px solid ${d.is_suspicious?'var(--accent-red)':'var(--border)'};border-radius:10px;padding:12px;display:flex;justify-content:space-between;gap:12px"><div><strong>${escapeHtml(d.name)}</strong>${d.is_suspicious?'<span class="badge badge-banned" style="margin-left:6px">Security alert</span>':''}<div style="font-size:11px;color:var(--text-dim)">Last seen ${fmtDate(d.last_seen)}</div></div><button class="btn btn-outline btn-sm" onclick="nameDevice('${d.id}')">Rename</button></div>`).join('') : '<div style="color:var(--text-dim);font-size:12px">No registered devices yet.</div>'; }
+    catch(e){box.innerHTML='<div style="color:var(--accent-red);font-size:12px">Unable to load devices.</div>'}
+  }
+  async function nameDevice(id){const name=prompt("New device name");if(!name)return;try{await API.portalNameDevice(sessionToken,id,name);await loadDevices();showSuccess("Device renamed.")}catch(e){showError(e.message)}}
+  async function loadHistory(){const box=document.getElementById("history-list");try{const rows=await API.portalGetHistory(sessionToken);box.innerHTML=rows.length?rows.slice(0,20).map(x=>`<div style="border-left:2px solid var(--primary);padding-left:10px"><strong style="font-size:12px">${escapeHtml(x.description)}</strong><div style="font-size:11px;color:var(--text-dim)">${escapeHtml(x.type)} · ${fmtDate(x.timestamp)}</div></div>`).join(''):'<div style="color:var(--text-dim);font-size:12px">No activity yet.</div>'}catch(e){box.innerHTML='<div style="color:var(--accent-red);font-size:12px">Unable to load history.</div>'}}
 
   function portalSignout() {
     if (cooldownTimerInterval) {

@@ -9,7 +9,7 @@ import aiohttp
 import discord
 from cryptography.fernet import Fernet
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -47,6 +47,12 @@ def get_config(guild_id: int):
     if not row:
         return None
     return row[0].rstrip("/"), row[1], FERNET.decrypt(row[2]).decode()
+
+
+def get_all_configs():
+    with db() as connection:
+        rows = connection.execute("SELECT server_url, app_id, api_key FROM guild_config").fetchall()
+    return [(row[0].rstrip("/"), row[1], FERNET.decrypt(row[2]).decode()) for row in rows]
 
 
 def save_config(guild_id: int, server_url: str, app_id: str, api_key: str, user_id: int):
@@ -163,6 +169,25 @@ class EnAuthBot(commands.Bot):
 
     async def setup_hook(self):
         await self.tree.sync()
+        self.integration_heartbeat.start()
+
+    @tasks.loop(minutes=1)
+    async def integration_heartbeat(self):
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for server, app_id, api_key in get_all_configs():
+                try:
+                    async with session.get(f"{server}/api/integrations/apps/{app_id}",
+                                           headers={"X-Discord-Key": api_key}) as response:
+                        await response.read()
+                        if response.status >= 400:
+                            logger.warning("EnAuth heartbeat rejected for app %s: HTTP %s", app_id, response.status)
+                except Exception as exc:
+                    logger.warning("EnAuth heartbeat failed for app %s: %s", app_id, exc)
+
+    @integration_heartbeat.before_loop
+    async def before_integration_heartbeat(self):
+        await self.wait_until_ready()
 
     async def on_ready(self):
         logger.info("Connected to Discord as %s (%s)", self.user, self.user.id if self.user else "unknown")

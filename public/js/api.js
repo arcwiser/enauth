@@ -258,6 +258,7 @@ const API = {
   creditReseller:(id, b)  => api("POST",   `/api/admin/resellers/${id}/credit`, b),
   getResellerProducts:(id)=> api("GET",    `/api/admin/resellers/${id}/products`),
   grantResellerProduct:(id,b)=> api("POST", `/api/admin/resellers/${id}/products`, b),
+  setResellerProductQuota:(id,productId,quota)=> api("PUT", `/api/admin/resellers/${id}/products/${productId}/quota`, {product_id:productId,monthly_quota:quota}),
   getResellerPricing:(id)=> api("GET",      `/api/admin/resellers/${id}/pricing`),
   grantResellerPricing:(id,b)=> api("POST", `/api/admin/resellers/${id}/pricing`, b),
   deleteReseller:(id)      => api("DELETE", `/api/admin/resellers/${id}`),
@@ -323,6 +324,19 @@ const API = {
   portalLogin:     (b)       => apiWithToken(null, "POST", "/api/admin/portal/login", b),
   portalGetLicense:(token)   => apiWithToken(token, "GET", "/api/admin/portal/license"),
   portalResetHwid: (token)   => apiWithToken(token, "POST", "/api/admin/portal/reset-hwid"),
+  portalGetDevices:(token)   => apiWithToken(token, "GET", "/api/admin/portal/devices"),
+  portalNameDevice:(token,id,name) => apiWithToken(token, "PUT", `/api/admin/portal/devices/${encodeURIComponent(id)}`, {name}),
+  portalGetHistory:(token)   => apiWithToken(token, "GET", "/api/admin/portal/history"),
+  portalGetResetRequests:(token) => apiWithToken(token, "GET", "/api/admin/portal/hwid-reset-requests"),
+  portalRequestHwidReset:(token,reason) => apiWithToken(token, "POST", "/api/admin/portal/hwid-reset-requests", {reason}),
+
+  // SDK release management and operations
+  getOperationsHealth: () => api("GET", "/api/admin/operations/health"),
+  getSdkReleases: () => api("GET", "/api/admin/sdk/releases"),
+  uploadSdkRelease: (formData) => fetch(BASE + "/api/admin/sdk/releases", {method:"POST", credentials:"same-origin", body:formData}).then(async r=>{const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.detail||"SDK upload failed");return d}),
+  downloadSdkRelease: (id) => fetch(BASE + `/api/admin/sdk/releases/${encodeURIComponent(id)}/download`, {credentials:"same-origin"}),
+  getSdkCompatibility: () => api("GET", "/api/admin/sdk/compatibility"),
+  updateSdkCompatibility: (appId,b) => api("PUT", `/api/admin/sdk/compatibility/${encodeURIComponent(appId)}`, b),
 
   // Search and Activity
   globalSearch: (params = {}) => {
@@ -421,6 +435,7 @@ function buildSidebar(activePage) {
     ["Workspace", [["dashboard", "Overview", "grid"], ["apps", "Applications", "box"], ["products", "Product levels", "layers"], ["licenses", "Licenses", "key"]]],
     ["Distribution", [["loaders", "Loader releases", "box"], ["files", "Files", "file"], ["news", "Announcements", "message"], ["panels", "Customer panels", "window"], ["resellers", "Resellers", "users"], ["discord", "Discord bot", "message", true]]],
     ["Security", [["control", "Control center", "shield"], ["sessions", "Active sessions", "pulse"], ["bans", "Blocklist", "shield"], ["logs", "Event logs", "list"], ["audit", "Audit trail", "search"]]],
+    ["Operations", [["sdk", "SDK & documentation", "code"], ["health", "Server health", "pulse"]]],
     ["Administration", [["users", "Team members", "users", true], ["api-keys", "API keys", "key"], ["variables", "Variables", "code", true], ["backups", "Backups", "shield", true], ["settings", "Settings", "settings"]]]
   ];
   const paths = {

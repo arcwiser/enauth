@@ -168,6 +168,22 @@ class DatabaseMigrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(version, self.database.LATEST_SCHEMA_VERSION)
         self.assertTrue({"release_version", "channel", "file_type", "is_archived"} <= columns)
 
+    async def test_platform_management_schema(self):
+        await self.database.init_db()
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("PRAGMA table_info(sessions)") as cur:
+                session_columns = {row[1] for row in await cur.fetchall()}
+            async with db.execute("PRAGMA table_info(reseller_product_access)") as cur:
+                reseller_columns = {row[1] for row in await cur.fetchall()}
+            async with db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+                "('sdk_releases','sdk_compatibility','portal_device_names','hwid_reset_requests')"
+            ) as cur:
+                tables = {row[0] for row in await cur.fetchall()}
+        self.assertIn("sdk_version", session_columns)
+        self.assertTrue({"monthly_quota", "monthly_used", "quota_reset_at"} <= reseller_columns)
+        self.assertEqual(tables, {"sdk_releases", "sdk_compatibility", "portal_device_names", "hwid_reset_requests"})
+
 
 if __name__ == "__main__":
     unittest.main()

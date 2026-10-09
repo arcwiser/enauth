@@ -36,6 +36,7 @@ from utils.crypto  import generate_uid, hash_password, generate_app_secret
 from utils.logger import app_log
 from utils.response_signing import ensure_response_signing_key, response_public_key_hex
 from utils.request_limits import RequestBodyLimitMiddleware
+from utils.runtime_metrics import record as record_request_metric
 
 # ─── Lifespan ────────────────────────────────────────────────────────────────
 
@@ -129,7 +130,13 @@ app.add_middleware(
 
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
-    response = await call_next(request)
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        record_request_metric(500, (time.perf_counter() - started) * 1000)
+        raise
+    record_request_metric(response.status_code, (time.perf_counter() - started) * 1000)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"

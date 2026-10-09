@@ -283,6 +283,7 @@ std::string Client::DecryptResponse(const std::string& json_response,
 Status Client::MessageToStatus(const std::string& msg) {
     if (msg == OBFUSCATE("INVALID_APP"))        return Status::InvalidApp;
     if (msg == OBFUSCATE("OUTDATED_VERSION"))   return Status::OutdatedVersion;
+    if (msg == OBFUSCATE("SDK_UPDATE_REQUIRED")) return Status::SdkUpdateRequired;
     if (msg == OBFUSCATE("INVALID_KEY"))        return Status::InvalidKey;
     if (msg == OBFUSCATE("EXPIRED_KEY"))        return Status::ExpiredKey;
     if (msg == OBFUSCATE("BANNED_KEY"))         return Status::BannedKey;
@@ -391,7 +392,8 @@ InitResult Client::Init() {
     InitResult result;
     try {
         std::string ver = GetVersion();
-        std::string payload = std::string("{") + JsonStr(OBFUSCATE("version"), ver) + "}";
+        std::string payload = std::string("{") + JsonStr(OBFUSCATE("version"), ver) + "," +
+            JsonStr(OBFUSCATE("sdk_version"), SDK_VERSION) + "}";
         SecureZeroMemory(&ver[0], ver.size());
         const std::string endpoint = OBFUSCATE("/api/client/init");
         std::string nonce;
@@ -404,6 +406,9 @@ InitResult Client::Init() {
         result.status           = MessageToStatus(result.message);
         result.server_time      = JsonGet(dec, OBFUSCATE("server_time"));
         result.required_version = JsonGet(dec, OBFUSCATE("required_version"));
+        result.minimum_sdk_version = JsonGet(dec, OBFUSCATE("minimum_sdk_version"));
+        result.recommended_sdk_version = JsonGet(dec, OBFUSCATE("recommended_sdk_version"));
+        result.upgrade_message = JsonGet(dec, OBFUSCATE("upgrade_message"));
 
         if (result.success) m_initialized = true;
     } catch (const std::exception& e) {
@@ -425,7 +430,8 @@ LoginResult Client::Login(const std::string& license_key,
         std::string payload = std::string("{") +
             JsonStr(OBFUSCATE("license_key"), license_key) + "," +
             JsonStr(OBFUSCATE("hwid"), hw) + "," +
-            JsonStr(OBFUSCATE("version"), version);
+            JsonStr(OBFUSCATE("version"), version) + "," +
+            JsonStr(OBFUSCATE("sdk_version"), SDK_VERSION);
         if (!product_id.empty()) payload += "," + JsonStr(OBFUSCATE("product_id"), product_id);
         if (!level.empty())      payload += "," + JsonStr(OBFUSCATE("level"), level);
         payload += "}";
@@ -441,6 +447,9 @@ LoginResult Client::Login(const std::string& license_key,
         result.status     = MessageToStatus(result.message);
         result.token      = JsonGet(dec, OBFUSCATE("token"));
         result.expires_at = JsonGet(dec, OBFUSCATE("expires_at"));
+        result.minimum_sdk_version = JsonGet(dec, OBFUSCATE("minimum_sdk_version"));
+        result.recommended_sdk_version = JsonGet(dec, OBFUSCATE("recommended_sdk_version"));
+        result.upgrade_message = JsonGet(dec, OBFUSCATE("upgrade_message"));
 
         if (result.message.empty()) {
             if (!dec.empty()) {

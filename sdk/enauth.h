@@ -19,6 +19,8 @@
 
 namespace enauth {
 
+inline constexpr const char* SDK_VERSION = "2.1.0";
+
 namespace hwid { std::string Collect(); }
 
 
@@ -26,6 +28,7 @@ enum class Status {
     Success,
     InvalidApp,
     OutdatedVersion,
+    SdkUpdateRequired,
     InvalidKey,
     ExpiredKey,
     BannedKey,
@@ -52,6 +55,9 @@ struct InitResult {
     std::string message;
     std::string server_time;
     std::string required_version;
+    std::string minimum_sdk_version;
+    std::string recommended_sdk_version;
+    std::string upgrade_message;
 };
 
 struct LoginResult {
@@ -60,6 +66,9 @@ struct LoginResult {
     std::string message;
     std::string token;
     std::string expires_at;
+    std::string minimum_sdk_version;
+    std::string recommended_sdk_version;
+    std::string upgrade_message;
     std::map<std::string, std::string> variables;
 };
 

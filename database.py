@@ -76,7 +76,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     token_expires_at DATETIME,
     rotated_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
     token_generation INTEGER NOT NULL DEFAULT 0,
-    protocol        INTEGER NOT NULL DEFAULT 1
+    protocol        INTEGER NOT NULL DEFAULT 1,
+    sdk_version     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS request_nonces (
@@ -274,6 +275,9 @@ CREATE TABLE IF NOT EXISTS reseller_product_access (
     reseller_id   TEXT NOT NULL REFERENCES resellers(id) ON DELETE CASCADE,
     product_id    TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
     created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    monthly_quota INTEGER,
+    monthly_used  INTEGER NOT NULL DEFAULT 0,
+    quota_reset_at DATETIME,
     UNIQUE(reseller_id, product_id)
 );
 

@@ -217,7 +217,7 @@ async def parse_request(req: EncryptedRequest, db, endpoint: str = "") -> tuple[
         raise HTTPException(400, "INVALID_PAYLOAD")
     for field, limit in (("version", 128), ("license_key", 256), ("hwid", 128),
                          ("product_id", 128), ("level", 128), ("token", 512),
-                         ("name", 255), ("ticket", 128)):
+                         ("name", 255), ("ticket", 128), ("sdk_version", 64)):
         if field in payload and (not isinstance(payload[field], str) or len(payload[field]) > limit):
             raise HTTPException(400, "INVALID_PAYLOAD")
 
@@ -306,6 +306,33 @@ def version_allowed(version: str, app, product=None) -> bool:
     return True
 
 
+def version_at_least(value: str, minimum: str) -> bool:
+    def parts(text):
+        match = re.fullmatch(r"v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+].*)?", text or "")
+        return tuple(int(item or 0) for item in match.groups()) if match else None
+    current, required = parts(value), parts(minimum)
+    return current is not None and required is not None and current >= required
+
+
+async def sdk_policy_failure(db, app_id: str, sdk_version: str):
+    async with db.execute("SELECT status FROM sdk_releases WHERE version=?", (sdk_version,)) as cur:
+        release = await cur.fetchone()
+    async with db.execute("SELECT * FROM sdk_compatibility WHERE app_id=?", (app_id,)) as cur:
+        policy = await cur.fetchone()
+    if release and release["status"] == "blocked":
+        values = dict(policy) if policy else {
+            "minimum_version": None, "recommended_version": None,
+            "upgrade_message": "This SDK release has been blocked. Upgrade before reconnecting.",
+        }
+        values["upgrade_message"] = values.get("upgrade_message") or "This SDK release has been blocked. Upgrade before reconnecting."
+        return "SDK_UPDATE_REQUIRED", values
+    if not policy:
+        return None, None
+    if policy["enforce_minimum"] and policy["minimum_version"] and not version_at_least(sdk_version, policy["minimum_version"]):
+        return "SDK_UPDATE_REQUIRED", dict(policy)
+    return None, dict(policy)
+
+
 async def enforce_active_authorization(db, sess, app, ip: str) -> str | None:
     """Re-check mutable license and product authorization on protected calls."""
     async with db.execute(
@@ -346,6 +373,8 @@ async def enforce_active_authorization(db, sess, app, ip: str) -> str | None:
     if not failure and not version_allowed(sess["client_version"], app, entitlement):
         failure = "OUTDATED_VERSION"
     if not failure:
+        failure, _ = await sdk_policy_failure(db, app["id"], sess["sdk_version"] or "")
+    if not failure:
         async with db.execute("SELECT 1 FROM banned_hwids WHERE hwid=? AND app_id=?",
                               (sess["hwid"], app["id"])) as cur:
             if await cur.fetchone():
@@ -381,6 +410,7 @@ async def client_init(request: Request, req: EncryptedRequest,
         raise
 
     version = payload.get("version", "")
+    sdk_version = payload.get("sdk_version", "")
     secret  = app["secret_key"]
 
     if version != app["version"]:
@@ -389,9 +419,18 @@ async def client_init(request: Request, req: EncryptedRequest,
         return enc_resp({"success": False, "message": "OUTDATED_VERSION",
                          "required_version": app["version"]}, secret, req.app_id)
 
+    sdk_failure, sdk_policy = await sdk_policy_failure(db, app["id"], sdk_version)
+    if sdk_failure:
+        return enc_resp({"success": False, "message": sdk_failure,
+                         "minimum_sdk_version": sdk_policy["minimum_version"],
+                         "recommended_sdk_version": sdk_policy["recommended_version"],
+                         "upgrade_message": sdk_policy["upgrade_message"]}, secret, req.app_id)
+
     await log_action(db, "init", app_id=req.app_id, ip=ip, details=f"v{version}")
-    return enc_resp({"success": True, "message": "OK",
-                     "server_time": utcnow()}, secret, req.app_id)
+    return enc_resp({"success": True, "message": "OK", "server_time": utcnow(),
+                     "sdk_version": sdk_version,
+                     "recommended_sdk_version": sdk_policy["recommended_version"] if sdk_policy else None,
+                     "upgrade_message": sdk_policy["upgrade_message"] if sdk_policy else None}, secret, req.app_id)
 
 
 # ─── /news ───────────────────────────────────────────────────────────────────
@@ -440,6 +479,7 @@ async def client_login(request: Request, req: EncryptedRequest,
     product_id  = (payload.get("product_id") or "").strip()
     level       = (payload.get("level") or "").strip().lower()
     client_version = (payload.get("version") or (app["version"] if req.protocol == 1 else "")).strip()
+    sdk_version = (payload.get("sdk_version") or ("legacy" if req.protocol == 1 else "")).strip()
 
     if not license_key or not hwid:
         return enc_resp({"success": False, "message": "MISSING_FIELDS"}, secret, req.app_id)
@@ -523,6 +563,15 @@ async def client_login(request: Request, req: EncryptedRequest,
                          details=f"product={product_id}; client={client_version}; required={required_version}")
         return enc_resp({"success": False, "message": "OUTDATED_VERSION",
                          "required_version": required_version}, secret, req.app_id)
+    sdk_failure, sdk_policy = await sdk_policy_failure(db, app["id"], sdk_version)
+    if sdk_failure:
+        await log_action(db, "sdk_version_blocked", app_id=app["id"], ip=ip, hwid=hwid,
+                         details=f"sdk={sdk_version}; minimum={sdk_policy['minimum_version']}")
+        await db.commit()
+        return enc_resp({"success": False, "message": sdk_failure,
+                         "minimum_sdk_version": sdk_policy["minimum_version"],
+                         "recommended_sdk_version": sdk_policy["recommended_version"],
+                         "upgrade_message": sdk_policy["upgrade_message"]}, secret, req.app_id)
 
     # ── App-specific HWID ban check ──
     async with db.execute(
@@ -603,10 +652,10 @@ async def client_login(request: Request, req: EncryptedRequest,
 
     await db.execute(
         """INSERT INTO sessions
-           (id,token,license_id,hwid,ip,app_id,product_id,expires_at,client_version,token_expires_at,protocol)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+           (id,token,license_id,hwid,ip,app_id,product_id,expires_at,client_version,token_expires_at,protocol,sdk_version)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
         (session_id, token, lic["id"], hwid, ip, app["id"], selected_product_id,
-         expires, client_version, token_expires, req.protocol),
+         expires, client_version, token_expires, req.protocol, sdk_version),
     )
 
     # ── Reset strikes on successful login ──
@@ -631,6 +680,9 @@ async def client_login(request: Request, req: EncryptedRequest,
         "expires_at":  expires,
         "license_key": license_key,
         "variables":   json.dumps(variables),
+        "minimum_sdk_version": sdk_policy["minimum_version"] if sdk_policy else None,
+        "recommended_sdk_version": sdk_policy["recommended_version"] if sdk_policy else None,
+        "upgrade_message": sdk_policy["upgrade_message"] if sdk_policy else None,
     }, secret, req.app_id)
 
 

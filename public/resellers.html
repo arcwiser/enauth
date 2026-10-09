@@ -496,7 +496,7 @@
       tbody.innerHTML = allResellers.map((r, i) => {
         const access = accessResults[i];
         const pricing = pricingResults[i];
-        const levels = access.length ? access.map(a => `<span class="badge" style="background:rgba(0,242,255,0.08);color:var(--primary);margin-right:3px">${a.level}</span>`).join("") : '<span style="color:var(--text-dim)">None</span>';
+        const levels = access.length ? access.map(a => `<button class="badge" title="Click to set monthly quota" style="background:rgba(0,242,255,0.08);color:var(--primary);margin-right:3px;border:0;cursor:pointer" onclick="setQuota('${r.id}','${a.id}',${a.monthly_quota == null ? 'null' : a.monthly_quota})">${a.level} · ${a.monthly_used||0}/${a.monthly_quota == null ? '∞' : a.monthly_quota}</button>`).join("") : '<span style="color:var(--text-dim)">None</span>';
         const pricingText = pricing.length
           ? pricing.map(p => `${p.level}: ${p.days}d/$${Number(p.price).toFixed(2)}`).join(" • ")
           : "None";
@@ -530,6 +530,15 @@
     } catch (e) {
       toast(e.message, "error");
     }
+  }
+
+  async function setQuota(resellerId, productId, current) {
+    const entered = prompt("Monthly generation quota (blank means unlimited)", current == null ? "" : current);
+    if (entered === null) return;
+    const quota = entered.trim() === "" ? null : Number(entered);
+    if (quota !== null && (!Number.isInteger(quota) || quota < 1)) return toast("Enter a positive whole number", "error");
+    try { await API.setResellerProductQuota(resellerId, productId, quota); toast("Product quota updated", "success"); await load(); }
+    catch (e) { toast(e.message, "error"); }
   }
 
   async function createReseller() {

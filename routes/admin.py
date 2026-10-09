@@ -17,6 +17,7 @@ import re
 import secrets
 import hashlib
 import ipaddress
+import shutil
 import pyotp
 
 from database import DB_PATH, get_db
@@ -28,7 +29,8 @@ from utils.crypto import (
     hash_license_key, mask_license_key, encrypt_license_key, display_license_key, encrypt_bytes,
 )
 from utils.logger import app_log, log_action
-from utils.response_signing import KEY_PATH as RESPONSE_SIGNING_KEY_PATH, response_public_key_hex
+from utils.response_signing import KEY_PATH as RESPONSE_SIGNING_KEY_PATH, response_public_key_hex, sign_response
+from utils.runtime_metrics import snapshot as runtime_metrics_snapshot
 from utils.uploads import read_build_upload, validate_release_name, validate_release_version
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -54,6 +56,21 @@ class SessionRevokeFilterBody(BaseModel):
 class EmergencyLockdownBody(BaseModel):
     reason: str = Field(min_length=3, max_length=300)
     confirmation: str = Field(min_length=1, max_length=200)
+
+
+class SdkCompatibilityBody(BaseModel):
+    minimum_version: Optional[str] = Field(default=None, max_length=64)
+    recommended_version: Optional[str] = Field(default=None, max_length=64)
+    enforce_minimum: bool = False
+    upgrade_message: Optional[str] = Field(default=None, max_length=500)
+
+
+class PortalDeviceNameBody(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+
+
+class PortalHwidResetRequestBody(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=500)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -885,6 +902,7 @@ class CreditResellerBody(BaseModel):
 
 class ResellerProductBody(BaseModel):
     product_id: str
+    monthly_quota: Optional[int] = Field(default=None, ge=1, le=1000000)
 
 
 class ResellerPricingBody(BaseModel):
@@ -1108,7 +1126,7 @@ async def reseller_ledger(reseller_id: str, user=Depends(require_admin), db: aio
 @router.get("/resellers/{reseller_id}/products")
 async def reseller_products(reseller_id: str, user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
     owner_id = auth_owner_id(user)
-    sql = """SELECT p.*, rpa.id as access_id
+    sql = """SELECT p.*, rpa.id as access_id,rpa.monthly_quota,rpa.monthly_used,rpa.quota_reset_at
            FROM reseller_product_access rpa
            JOIN products p ON p.id = rpa.product_id
            JOIN applications a ON a.id = p.app_id
@@ -1158,12 +1176,31 @@ async def grant_reseller_product(reseller_id: str, body: ResellerProductBody, us
                 raise HTTPException(404, "Product not found")
     try:
         await db.execute(
-            "INSERT INTO reseller_product_access (id, reseller_id, product_id) VALUES (?, ?, ?)",
-            (generate_uid(), reseller_id, body.product_id),
+            "INSERT INTO reseller_product_access (id, reseller_id, product_id, monthly_quota, quota_reset_at) VALUES (?, ?, ?, ?, datetime('now','start of month','+1 month'))",
+            (generate_uid(), reseller_id, body.product_id, body.monthly_quota),
         )
         await db.commit()
     except aiosqlite.IntegrityError:
         raise HTTPException(409, "Product already granted to reseller")
+    return {"ok": True}
+
+
+@router.put("/resellers/{reseller_id}/products/{product_id}/quota")
+async def set_reseller_product_quota(reseller_id: str, product_id: str, body: ResellerProductBody,
+                                     user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
+    if body.product_id != product_id:
+        raise HTTPException(400, "Product mismatch")
+    owner_id = auth_owner_id(user)
+    sql = """UPDATE reseller_product_access SET monthly_quota=?
+             WHERE reseller_id=? AND product_id=?"""
+    args = [body.monthly_quota, reseller_id, product_id]
+    if owner_id:
+        sql += " AND reseller_id IN (SELECT id FROM resellers WHERE owner_user_id=?)"
+        args.append(owner_id)
+    cur = await db.execute(sql, args)
+    if cur.rowcount != 1:
+        raise HTTPException(404, "Reseller product access not found")
+    await db.commit()
     return {"ok": True}
 
 
@@ -1271,7 +1308,7 @@ async def require_reseller(authorization: Optional[str] = Header(None),
 @router.get("/reseller/products")
 async def list_my_products(reseller=Depends(require_reseller), db: aiosqlite.Connection = Depends(get_db)):
     async with db.execute(
-        """SELECT p.id, p.name, p.level, p.app_id
+        """SELECT p.id, p.name, p.level, p.app_id,rpa.monthly_quota,rpa.monthly_used,rpa.quota_reset_at
            FROM reseller_product_access rpa
            JOIN products p ON p.id = rpa.product_id
            WHERE rpa.reseller_id = ? AND p.is_active = 1
@@ -1366,12 +1403,24 @@ async def reseller_buy_key(body: ResellerBuyBody, reseller=Depends(require_resel
     await db.execute("BEGIN IMMEDIATE")
     try:
         async with db.execute(
-            "SELECT 1 FROM reseller_product_access WHERE reseller_id = ? AND product_id = ?",
+            """SELECT monthly_quota,monthly_used,quota_reset_at FROM reseller_product_access
+               WHERE reseller_id = ? AND product_id = ?""",
             (reseller["id"], body.product_id),
         ) as cur:
             allowed = await cur.fetchone()
         if not allowed:
             raise HTTPException(403, "Reseller is not allowed to buy this product")
+        if allowed["quota_reset_at"] is None or allowed["quota_reset_at"] <= utcnow():
+            await db.execute(
+                """UPDATE reseller_product_access SET monthly_used=0,
+                   quota_reset_at=datetime('now','start of month','+1 month')
+                   WHERE reseller_id=? AND product_id=?""", (reseller["id"], body.product_id),
+            )
+            used = 0
+        else:
+            used = int(allowed["monthly_used"] or 0)
+        if allowed["monthly_quota"] is not None and used >= int(allowed["monthly_quota"]):
+            raise HTTPException(409, "Monthly product quota reached")
 
         async with db.execute(
             "SELECT 1 FROM reseller_pricing_access WHERE reseller_id = ? AND pricing_point_id = ?",
@@ -1412,6 +1461,10 @@ async def reseller_buy_key(body: ResellerBuyBody, reseller=Depends(require_resel
             (generate_uid(), license_id, target["product_id"], expires),
         )
         await db.execute("UPDATE resellers SET balance = balance - ? WHERE id = ?", (target["price"], reseller["id"]))
+        await db.execute(
+            "UPDATE reseller_product_access SET monthly_used=monthly_used+1 WHERE reseller_id=? AND product_id=?",
+            (reseller["id"], body.product_id),
+        )
         await db.execute(
             "INSERT INTO reseller_balance_ledger (id, reseller_id, amount, reason, created_by) VALUES (?, ?, ?, ?, ?)",
             (generate_uid(), reseller["id"], -target["price"], f"Bought key for {target['days']} days", reseller["username"]),
@@ -1786,6 +1839,147 @@ async def security_control_center(user=Depends(require_admin), db: aiosqlite.Con
         "security_settings": settings,
         "security_score": round(100 * sum(bool(v) for v in settings.values()) / len(settings)),
     }
+
+
+@router.get("/operations/health")
+async def operations_health(user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
+    started = time.perf_counter()
+    async with db.execute("SELECT 1") as cur:
+        await cur.fetchone()
+    database_latency = round((time.perf_counter() - started) * 1000, 2)
+    disk = shutil.disk_usage(Path(DB_PATH).resolve().parent)
+    backups = sorted(BACKUP_DIR.glob("enauth-*.db"), key=lambda p: p.stat().st_mtime, reverse=True) if BACKUP_DIR.exists() else []
+    backup_age = int(time.time() - backups[0].stat().st_mtime) if backups else None
+    async with db.execute("SELECT MAX(last_used) FROM discord_integrations WHERE is_active=1") as cur:
+        bot_last_seen = (await cur.fetchone())[0]
+    signing = {"available": RESPONSE_SIGNING_KEY_PATH.is_file(), "public_key": None, "permissions_restricted": None}
+    if signing["available"]:
+        signing["public_key"] = response_public_key_hex()
+        signing["permissions_restricted"] = ((RESPONSE_SIGNING_KEY_PATH.stat().st_mode & 0o077) == 0
+                                              if os.name != "nt" else True)
+    certificate = {"configured": False, "expires_at": None, "days_remaining": None, "healthy": None, "status": "not configured"}
+    certificate_path = os.getenv("TLS_CERTIFICATE_PATH", "").strip()
+    if certificate_path and Path(certificate_path).is_file():
+        try:
+            from cryptography import x509
+            cert = x509.load_pem_x509_certificate(Path(certificate_path).read_bytes())
+            expiry = getattr(cert, "not_valid_after_utc", None) or cert.not_valid_after.replace(tzinfo=timezone.utc)
+            days = int((expiry - datetime.now(timezone.utc)).total_seconds() // 86400)
+            certificate = {"configured": True, "expires_at": expiry.isoformat(),
+                           "days_remaining": days, "healthy": days >= 14,
+                           "status": "healthy" if days >= 14 else "expiring"}
+        except Exception:
+            certificate = {"configured": True, "expires_at": None, "days_remaining": None,
+                           "healthy": False, "status": "invalid certificate"}
+    disk_percent = round(100 * disk.used / max(disk.total, 1), 1)
+    backup_hours = round(backup_age / 3600, 1) if backup_age is not None else None
+    bot_status = "offline"
+    if bot_last_seen:
+        try:
+            last_bot = datetime.strptime(bot_last_seen, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            bot_status = "healthy" if (_utcnow_dt() - last_bot).total_seconds() <= 180 else "stale"
+        except (TypeError, ValueError):
+            bot_status = "unknown"
+    signing["status"] = "healthy" if signing["available"] and signing["permissions_restricted"] else "unhealthy"
+    signing["key_id"] = (signing["public_key"] or "")[:16]
+    return {"generated_at": utcnow(), "runtime": runtime_metrics_snapshot(),
+            "database": {"latency_ms": database_latency, "healthy": database_latency < 250},
+            "disk": {"total_bytes": disk.total, "used_bytes": disk.used, "free_bytes": disk.free,
+                     "free_gb": round(disk.free / 1073741824, 1), "percent_used": disk_percent,
+                     "healthy": disk.free / max(disk.total, 1) > .1},
+            "backups": {"latest_age_seconds": backup_age, "latest_age_hours": backup_hours, "count": len(backups),
+                        "healthy": backup_age is not None and backup_age < 172800},
+            "discord_bot": {"last_seen": bot_last_seen, "healthy": bot_status == "healthy", "status": bot_status},
+            "signing_key": signing, "certificate": certificate}
+
+
+@router.get("/sdk/releases")
+async def list_sdk_releases(user=Depends(require_admin), db=Depends(get_db)):
+    async with db.execute(
+        """SELECT id,version,channel,status,package_name,package_size,sha256,signature,
+                  release_notes,created_at FROM sdk_releases ORDER BY created_at DESC"""
+    ) as cur:
+        return rows_to_list(await cur.fetchall())
+
+
+@router.post("/sdk/releases")
+async def publish_sdk_release(version: str = Form(...), channel: str = Form("stable"),
+                              status: str = Form("supported"), release_notes: str = Form(""),
+                              file: UploadFile = File(...), user=Depends(require_owner), db=Depends(get_db)):
+    version = validate_release_version(version)
+    if channel not in {"stable", "beta", "preview", "legacy"} or status not in {"supported", "deprecated", "blocked"}:
+        raise HTTPException(400, "Invalid SDK channel or status")
+    content = await read_build_upload(file)
+    package_name = validate_release_name(Path(file.filename or f"enauth-sdk-{version}.zip").name)
+    digest = hashlib.sha256(content).hexdigest()
+    release_id, created_at = generate_uid(), utcnow()
+    signature = sign_response(f"sdk-package|{release_id}|{version}|{digest}|{created_at}")
+    try:
+        await db.execute(
+            """INSERT INTO sdk_releases(id,version,channel,status,package_name,package,package_size,
+               sha256,signature,release_notes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (release_id, version, channel, status, package_name,
+             content, len(content), digest, signature, release_notes.strip() or None, created_at),
+        )
+        await log_action(db, "sdk_release_published", details=f"version={version}; channel={channel}; sha256={digest}")
+        await db.commit()
+    except aiosqlite.IntegrityError:
+        raise HTTPException(409, "SDK version already exists")
+    return {"id": release_id, "version": version, "sha256": digest, "signature": signature}
+
+
+@router.get("/sdk/releases/{release_id}/download")
+async def download_sdk_release(release_id: str, user=Depends(require_admin), db=Depends(get_db)):
+    async with db.execute("SELECT * FROM sdk_releases WHERE id=?", (release_id,)) as cur:
+        release = await cur.fetchone()
+    if not release:
+        raise HTTPException(404, "SDK release not found")
+    return Response(content=release["package"], media_type="application/octet-stream", headers={
+        "Content-Disposition": f'attachment; filename="{validate_release_name(release["package_name"])}"',
+        "X-EnAuth-SHA256": release["sha256"], "X-EnAuth-Signature": release["signature"],
+    })
+
+
+@router.get("/sdk/documentation")
+async def sdk_documentation(user=Depends(require_admin)):
+    path = Path(__file__).resolve().parent.parent / "sdk" / "README.md"
+    return FileResponse(path, media_type="text/markdown", filename="EnAuth-SDK-README.md")
+
+
+@router.get("/sdk/compatibility")
+async def sdk_compatibility(user=Depends(require_admin), db=Depends(get_db)):
+    owner_id = auth_owner_id(user)
+    sql = """SELECT a.id AS app_id,a.name,c.minimum_version,c.recommended_version,
+                    COALESCE(c.enforce_minimum,0) enforce_minimum,c.upgrade_message,c.updated_at
+             FROM applications a LEFT JOIN sdk_compatibility c ON c.app_id=a.id"""
+    args = []
+    if owner_id:
+        sql += " WHERE a.owner_user_id=?"; args.append(owner_id)
+    sql += " ORDER BY a.name"
+    async with db.execute(sql, args) as cur:
+        return rows_to_list(await cur.fetchall())
+
+
+@router.put("/sdk/compatibility/{app_id}")
+async def update_sdk_compatibility(app_id: str, body: SdkCompatibilityBody,
+                                   user=Depends(require_admin), db=Depends(get_db)):
+    await _owned_app(app_id, auth_owner_id(user), db)
+    for value in (body.minimum_version, body.recommended_version):
+        if value:
+            validate_release_version(value)
+    await db.execute(
+        """INSERT INTO sdk_compatibility(app_id,minimum_version,recommended_version,enforce_minimum,upgrade_message,updated_at)
+           VALUES(?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(app_id) DO UPDATE SET
+           minimum_version=excluded.minimum_version,recommended_version=excluded.recommended_version,
+           enforce_minimum=excluded.enforce_minimum,upgrade_message=excluded.upgrade_message,
+           updated_at=CURRENT_TIMESTAMP""",
+        (app_id, body.minimum_version, body.recommended_version, int(body.enforce_minimum),
+         (body.upgrade_message or "").strip() or None),
+    )
+    await log_action(db, "sdk_compatibility_updated", app_id=app_id,
+                     details=f"minimum={body.minimum_version}; recommended={body.recommended_version}; enforce={body.enforce_minimum}")
+    await db.commit()
+    return {"ok": True}
 
 
 @router.post("/security/sessions/revoke")
@@ -4206,6 +4400,122 @@ async def portal_reset_hwid(lic=Depends(require_portal_user), db: aiosqlite.Conn
     await db.execute("UPDATE licenses SET hwid_reset_at=? WHERE id=?", (utcnow(), lic["id"]))
     await log_action(db, "portal_hwid_reset", license_key=lic["key"], app_id=lic["app_id"], details="HWID reset via user portal")
     await db.commit()
+    return {"ok": True}
+
+
+@router.get("/portal/devices")
+async def portal_devices(lic=Depends(require_portal_user), db: aiosqlite.Connection = Depends(get_db)):
+    async with db.execute(
+        """SELECT d.id,COALESCE(n.display_name,'Unnamed device') AS name,d.last_seen,d.is_suspicious
+           FROM device_fingerprints d LEFT JOIN portal_device_names n
+             ON n.license_id=d.license_id AND n.fingerprint_id=d.id
+           WHERE d.license_id=? ORDER BY d.last_seen DESC""", (lic["id"],)
+    ) as cur:
+        return rows_to_list(await cur.fetchall())
+
+
+@router.put("/portal/devices/{device_id}")
+async def portal_name_device(device_id: str, body: PortalDeviceNameBody,
+                             lic=Depends(require_portal_user), db: aiosqlite.Connection = Depends(get_db)):
+    async with db.execute("SELECT 1 FROM device_fingerprints WHERE id=? AND license_id=?", (device_id, lic["id"])) as cur:
+        if not await cur.fetchone():
+            raise HTTPException(404, "Device not found")
+    await db.execute(
+        """INSERT INTO portal_device_names(license_id,fingerprint_id,display_name,updated_at)
+           VALUES(?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(license_id,fingerprint_id) DO UPDATE SET
+           display_name=excluded.display_name,updated_at=CURRENT_TIMESTAMP""",
+        (lic["id"], device_id, body.name.strip()),
+    )
+    await db.commit()
+    return {"ok": True}
+
+
+@router.get("/portal/hwid-reset-requests")
+async def portal_reset_requests(lic=Depends(require_portal_user), db: aiosqlite.Connection = Depends(get_db)):
+    async with db.execute(
+        "SELECT id,reason,status,created_at,reviewed_at FROM hwid_reset_requests WHERE license_id=? ORDER BY created_at DESC LIMIT 20",
+        (lic["id"],),
+    ) as cur:
+        return rows_to_list(await cur.fetchall())
+
+
+@router.post("/portal/hwid-reset-requests")
+async def portal_request_reset(body: PortalHwidResetRequestBody, lic=Depends(require_portal_user),
+                               db: aiosqlite.Connection = Depends(get_db)):
+    async with db.execute(
+        "SELECT 1 FROM hwid_reset_requests WHERE license_id=? AND status='pending'", (lic["id"],)
+    ) as cur:
+        if await cur.fetchone():
+            raise HTTPException(409, "A reset request is already pending")
+    request_id = generate_uid()
+    await db.execute("INSERT INTO hwid_reset_requests(id,license_id,reason) VALUES(?,?,?)",
+                     (request_id, lic["id"], (body.reason or "").strip() or None))
+    await log_action(db, "portal_hwid_reset_requested", license_key=lic["key"], app_id=lic["app_id"],
+                     details="Customer requested an HWID reset")
+    await db.commit()
+    return {"id": request_id, "status": "pending"}
+
+
+@router.get("/portal/history")
+async def portal_history(lic=Depends(require_portal_user), db: aiosqlite.Connection = Depends(get_db)):
+    async with db.execute(
+        """SELECT e.downloaded_at AS timestamp,'download' AS type,f.name AS description
+           FROM file_download_events e JOIN app_files f ON f.id=e.file_id
+           WHERE e.license_id=? ORDER BY e.downloaded_at DESC LIMIT 50""", (lic["id"],)
+    ) as cur:
+        downloads = rows_to_list(await cur.fetchall())
+    async with db.execute(
+        """SELECT created_at AS timestamp,'entitlement' AS type,
+                  p.name || ' (' || p.level || ')' AS description
+           FROM license_products lp JOIN products p ON p.id=lp.product_id
+           WHERE lp.license_id=? ORDER BY lp.created_at DESC""", (lic["id"],)
+    ) as cur:
+        entitlements = rows_to_list(await cur.fetchall())
+    return sorted(downloads + entitlements, key=lambda item: item["timestamp"] or "", reverse=True)[:100]
+
+
+@router.get("/hwid-reset-requests")
+async def admin_reset_requests(status: str = "pending", user=Depends(require_admin),
+                               db: aiosqlite.Connection = Depends(get_db)):
+    if status not in {"pending", "approved", "rejected", "all"}:
+        raise HTTPException(400, "Invalid request status")
+    owner_id = auth_owner_id(user)
+    sql = """SELECT r.id,r.reason,r.status,r.created_at,r.reviewed_at,l.key,l.client_username,a.name AS app_name
+             FROM hwid_reset_requests r JOIN licenses l ON l.id=r.license_id
+             JOIN applications a ON a.id=l.app_id WHERE 1=1"""
+    args = []
+    if status != "all": sql += " AND r.status=?"; args.append(status)
+    if owner_id: sql += " AND a.owner_user_id=?"; args.append(owner_id)
+    sql += " ORDER BY r.created_at DESC LIMIT 200"
+    async with db.execute(sql, args) as cur:
+        return rows_to_list(await cur.fetchall())
+
+
+@router.post("/hwid-reset-requests/{request_id}/{decision}")
+async def review_reset_request(request_id: str, decision: str, user=Depends(require_admin),
+                               db: aiosqlite.Connection = Depends(get_db)):
+    if decision not in {"approve", "reject"}:
+        raise HTTPException(400, "Decision must be approve or reject")
+    owner_id = auth_owner_id(user)
+    sql = """SELECT r.license_id,l.app_id FROM hwid_reset_requests r JOIN licenses l ON l.id=r.license_id
+             JOIN applications a ON a.id=l.app_id WHERE r.id=? AND r.status='pending'"""
+    args = [request_id]
+    if owner_id: sql += " AND a.owner_user_id=?"; args.append(owner_id)
+    async with db.execute(sql, args) as cur:
+        row = await cur.fetchone()
+    if not row: raise HTTPException(404, "Pending reset request not found")
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        if decision == "approve":
+            await db.execute("DELETE FROM hwids WHERE license_id=?", (row["license_id"],))
+            await db.execute("DELETE FROM device_fingerprints WHERE license_id=?", (row["license_id"],))
+            await db.execute("UPDATE licenses SET hwid_reset_at=? WHERE id=?", (utcnow(), row["license_id"]))
+        await db.execute("UPDATE hwid_reset_requests SET status=?,reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?",
+                         ("approved" if decision == "approve" else "rejected", user["username"], request_id))
+        await log_action(db, f"hwid_reset_request_{decision}d", app_id=row["app_id"], details=f"request={request_id}")
+        await db.commit()
+    except Exception:
+        await db.rollback(); raise
     return {"ok": True}
 
 
