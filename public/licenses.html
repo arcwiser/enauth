@@ -35,6 +35,8 @@
           <option value="true">Expired Only</option>
         </select>
         <div class="toolbar-spacer"></div>
+        <input type="file" id="import-csv-file" accept=".csv,text/csv" hidden onchange="importCsv(this.files[0]);this.value=''">
+        <button class="btn btn-outline" onclick="document.getElementById('import-csv-file').click()">⬆ Import CSV</button>
         <button class="btn btn-outline" onclick="exportCsv()">⬇ Export CSV</button>
         <button class="btn btn-outline" onclick="bulkAction('ban')">Ban Selected</button>
         <button class="btn btn-outline" onclick="bulkAction('unban')">Unban Selected</button>
@@ -235,6 +237,32 @@
       document.body.appendChild(link); link.click(); link.remove();
       URL.revokeObjectURL(link.href);
       toast("License CSV exported", "success");
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  async function importCsv(file) {
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) return toast("CSV exceeds 5 MB", "error");
+    const request = async (path, confirmed = false) => {
+      const form = new FormData();
+      form.append("file", file, file.name);
+      if (confirmed) form.append("confirm", "true");
+      const response = await fetch(path, { method: "POST", credentials: "same-origin", body: form });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : (data.detail?.message || `Import failed (${response.status})`));
+      return data;
+    };
+    try {
+      const preview = await request("/api/admin/licenses/import/preview");
+      if (preview.error_count) {
+        const examples = preview.errors.slice(0, 8).map(x => `Row ${x.row}: ${x.errors.join(", ")}`).join("\n");
+        alert(`Nothing was imported. Fix ${preview.error_count} invalid row(s):\n\n${examples}`);
+        return;
+      }
+      if (!confirm(`Import ${preview.valid_count} validated license(s)?\n\nThis will create licenses and product entitlements.`)) return;
+      const result = await request("/api/admin/licenses/import", true);
+      toast(`Imported ${result.imported} licenses`, "success");
+      await load();
     } catch (error) { toast(error.message, "error"); }
   }
 

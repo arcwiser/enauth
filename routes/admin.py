@@ -2349,7 +2349,9 @@ async def export_licenses_csv(app_id: Optional[str] = None,
              (SELECT COUNT(*) FROM hwids WHERE license_id=l.id) AS hwid_count,
              (SELECT GROUP_CONCAT(p.level || ' (' || p.name || ')', '; ')
                 FROM license_products lp JOIN products p ON p.id=lp.product_id
-               WHERE lp.license_id=l.id) AS products
+               WHERE lp.license_id=l.id) AS products,
+             (SELECT GROUP_CONCAT(lp.product_id, ';') FROM license_products lp
+               WHERE lp.license_id=l.id) AS product_ids
              FROM licenses l JOIN applications a ON a.id=l.app_id WHERE 1=1"""
     args = []
     if owner_id:
@@ -2372,7 +2374,7 @@ async def export_licenses_csv(app_id: Optional[str] = None,
     async with db.execute(sql, args) as cur:
         rows = rows_to_list(await cur.fetchall())
 
-    fields = ["license_key", "application", "app_id", "products", "status", "expires",
+    fields = ["license_key", "application", "app_id", "products", "product_ids", "status", "expires",
               "hwids_used", "max_hwids", "notes", "metadata", "created_at"]
     buffer = io.StringIO(newline="")
     writer = csv.DictWriter(buffer, fieldnames=fields)
@@ -2383,6 +2385,7 @@ async def export_licenses_csv(app_id: Optional[str] = None,
             "application": csv_safe(row["app_name"]),
             "app_id": csv_safe(row["app_id"]),
             "products": csv_safe(row.get("products") or "Any"),
+            "product_ids": csv_safe(row.get("product_ids") or ""),
             "status": csv_safe(row["status"]),
             "expires": csv_safe(row["expires_at"] or "Lifetime"),
             "hwids_used": row["hwid_count"],
@@ -2397,6 +2400,111 @@ async def export_licenses_csv(app_id: Optional[str] = None,
         headers={"Content-Disposition": f'attachment; filename="{filename}"',
                  "Cache-Control": "no-store, private"},
     )
+
+
+async def parse_license_import(file: UploadFile, owner_id: Optional[str], db) -> tuple[list[dict], list[dict]]:
+    raw = await file.read(5 * 1024 * 1024 + 1)
+    if len(raw) > 5 * 1024 * 1024:
+        raise HTTPException(413, "CSV exceeds 5 MB")
+    try:
+        text = raw.decode("utf-8-sig")
+        source = csv.DictReader(io.StringIO(text))
+    except UnicodeDecodeError:
+        raise HTTPException(400, "CSV must use UTF-8 encoding")
+    required = {"license_key", "app_id"}
+    if not source.fieldnames or not required.issubset(set(source.fieldnames)):
+        raise HTTPException(400, "CSV requires license_key and app_id columns")
+    input_rows = list(source)
+    if not input_rows or len(input_rows) > 5000:
+        raise HTTPException(400, "CSV must contain between 1 and 5000 rows")
+
+    app_sql = "SELECT id FROM applications"
+    app_args = []
+    if owner_id:
+        app_sql += " WHERE owner_user_id=?"; app_args.append(owner_id)
+    async with db.execute(app_sql, app_args) as cur:
+        allowed_apps = {row["id"] for row in await cur.fetchall()}
+    async with db.execute("SELECT id,app_id FROM products") as cur:
+        product_apps = {row["id"]: row["app_id"] for row in await cur.fetchall()}
+    async with db.execute("SELECT key_hash FROM licenses WHERE key_hash IS NOT NULL") as cur:
+        existing_hashes = {row["key_hash"] for row in await cur.fetchall()}
+
+    valid, errors, seen = [], [], set()
+    for number, row in enumerate(input_rows, 2):
+        key = (row.get("license_key") or "").strip()
+        app_id = (row.get("app_id") or "").strip()
+        key_hash = hash_license_key(key) if key else ""
+        row_errors = []
+        if len(key) < 8 or len(key) > 255:
+            row_errors.append("license_key must be 8-255 characters")
+        if app_id not in allowed_apps:
+            row_errors.append("application is missing or outside your account")
+        if key_hash in existing_hashes or key_hash in seen:
+            row_errors.append("duplicate license key")
+        status_value = (row.get("status") or "active").strip().lower()
+        if status_value not in {"active", "banned"}:
+            row_errors.append("status must be active or banned")
+        try:
+            max_hwids = int((row.get("max_hwids") or "1").strip())
+            if not 1 <= max_hwids <= 100: raise ValueError
+        except ValueError:
+            row_errors.append("max_hwids must be between 1 and 100"); max_hwids = 1
+        expiry_raw = (row.get("expires") or row.get("expires_at") or "").strip()
+        expires_at = None
+        if expiry_raw and expiry_raw.lower() not in {"lifetime", "never"}:
+            try:
+                expires_at = datetime.fromisoformat(expiry_raw.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                row_errors.append("expires must be Lifetime or an ISO date")
+        product_ids = [x.strip() for x in (row.get("product_ids") or "").split(";") if x.strip()]
+        if not product_ids:
+            row_errors.append("at least one product_id is required")
+        elif any(product_apps.get(pid) != app_id for pid in product_ids):
+            row_errors.append("one or more product_ids do not belong to the application")
+        if row_errors:
+            errors.append({"row": number, "errors": row_errors})
+            continue
+        seen.add(key_hash)
+        valid.append({"key": key, "key_hash": key_hash, "app_id": app_id, "status": status_value,
+                      "max_hwids": max_hwids, "expires_at": expires_at,
+                      "notes": (row.get("notes") or "").strip() or None,
+                      "metadata": (row.get("metadata") or "").strip() or None,
+                      "product_ids": list(dict.fromkeys(product_ids))})
+    return valid, errors
+
+
+@router.post("/licenses/import/preview")
+async def preview_license_import(file: UploadFile = File(...), user=Depends(require_admin),
+                                 db: aiosqlite.Connection = Depends(get_db)):
+    valid, errors = await parse_license_import(file, auth_owner_id(user), db)
+    return {"valid_count": len(valid), "error_count": len(errors), "errors": errors[:100]}
+
+
+@router.post("/licenses/import")
+async def import_licenses_csv(confirm: bool = Form(False), file: UploadFile = File(...),
+                              user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
+    if not confirm:
+        raise HTTPException(400, "Import confirmation is required")
+    valid, errors = await parse_license_import(file, auth_owner_id(user), db)
+    if errors:
+        raise HTTPException(400, {"message": "Fix CSV errors before importing", "errors": errors[:100]})
+    for row in valid:
+        license_id = generate_uid()
+        await db.execute(
+            """INSERT INTO licenses
+               (id,key,key_hash,key_ciphertext,app_id,status,max_hwids,expires_at,notes,metadata)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (license_id, mask_license_key(row["key"]), row["key_hash"], encrypt_license_key(row["key"]),
+             row["app_id"], row["status"], row["max_hwids"], row["expires_at"], row["notes"], row["metadata"]),
+        )
+        for product_id in row["product_ids"]:
+            await db.execute(
+                "INSERT INTO license_products(id,license_id,product_id,expires_at) VALUES(?,?,?,?)",
+                (generate_uid(), license_id, product_id, row["expires_at"]),
+            )
+    await log_action(db, "licenses_csv_imported", details=f"count={len(valid)}")
+    await db.commit()
+    return {"imported": len(valid)}
 
 
 @router.post("/licenses")

@@ -411,6 +411,37 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("'=unsafe formula", content)
             self.assertEqual(response.headers["cache-control"], "no-store, private")
 
+    async def test_license_csv_import_previews_then_creates_entitlements(self):
+        caller = {"id": "owner-1", "username": "owner", "role": "owner", "_source": "admin_users"}
+        csv_data = (
+            "license_key,app_id,product_ids,status,expires,max_hwids,notes,metadata\n"
+            "IMPORTED-KEY-123456,app-import,product-import,active,Lifetime,2,migrated,customer-7\n"
+        ).encode()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("INSERT INTO applications(id,name,secret_key) VALUES(?,?,?)",
+                             ("app-import", "Import App", "i" * 64))
+            await db.execute("INSERT INTO products(id,app_id,name,level) VALUES(?,?,?,?)",
+                             ("product-import", "app-import", "Product", "premium"))
+            await db.commit()
+            preview = await self.admin.preview_license_import(
+                file=UploadFile(filename="licenses.csv", file=io.BytesIO(csv_data)), user=caller, db=db,
+            )
+            self.assertEqual(preview, {"valid_count": 1, "error_count": 0, "errors": []})
+            result = await self.admin.import_licenses_csv(
+                confirm=True, file=UploadFile(filename="licenses.csv", file=io.BytesIO(csv_data)),
+                user=caller, db=db,
+            )
+            self.assertEqual(result["imported"], 1)
+            async with db.execute(
+                """SELECT l.max_hwids,l.expires_at,lp.product_id FROM licenses l
+                   JOIN license_products lp ON lp.license_id=l.id WHERE l.app_id='app-import'"""
+            ) as cur:
+                imported = await cur.fetchone()
+            self.assertEqual(imported["max_hwids"], 2)
+            self.assertIsNone(imported["expires_at"])
+            self.assertEqual(imported["product_id"], "product-import")
+
 
 if __name__ == "__main__":
     unittest.main()
