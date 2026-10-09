@@ -73,6 +73,10 @@
     </div>
     <div class="modal-body">
       <div class="form-group">
+        <label class="form-label">Saved template</label>
+        <div style="display:flex;gap:8px"><select class="select" id="c-template" onchange="applyTemplate()"><option value="">Custom settings</option></select><button class="btn btn-outline" type="button" onclick="saveTemplate()">Save Current</button><button class="btn btn-ghost" type="button" onclick="deleteTemplate()">Delete</button></div>
+      </div>
+      <div class="form-group">
         <label class="form-label">Extend Duration</label>
         <div style="display:flex; gap:10px;">
           <input class="input" id="e-value" type="number" value="30" min="1" step="any" style="flex:2">
@@ -213,6 +217,7 @@
 
   let apps = [];
   let products = [];
+  let licenseTemplates = [];
   const selectedLicenses = new Set();
 
   async function exportCsv() {
@@ -286,7 +291,32 @@
     });
 
     refreshLevelOptions();
+    await loadTemplates();
   }
+
+  async function loadTemplates() {
+    licenseTemplates = await API.getLicenseTemplates().catch(() => []);
+    document.getElementById("c-template").innerHTML = '<option value="">Custom settings</option>' + licenseTemplates.map(t => `<option value="${t.id}">${escapeHtml(t.name)} · ${escapeHtml(t.app_name)}</option>`).join('');
+  }
+
+  function applyTemplate() {
+    const t = licenseTemplates.find(x => x.id === document.getElementById("c-template").value); if (!t) return;
+    document.getElementById("c-app").value=t.app_id; refreshLevelOptions();
+    document.querySelectorAll('.level-check').forEach(x => x.checked=t.product_ids.includes(x.value));
+    document.getElementById("c-hwids").value=t.max_hwids; document.getElementById("c-prefix").value=t.key_prefix||'';
+    document.getElementById("c-notes").value=t.notes||''; document.getElementById("c-metadata").value=t.metadata||'';
+    document.getElementById("c-lifetime").checked=!t.duration_hours;
+    document.getElementById("c-expiry-unit").value='hours'; document.getElementById("c-expiry-value").value=t.duration_hours||24; toggleExpiry();
+  }
+
+  async function saveTemplate() {
+    const name=prompt('Template name:'); if(!name)return;
+    const ids=[...document.querySelectorAll('.level-check:checked')].map(x=>x.value); if(!ids.length)return toast('Select at least one level','error');
+    const lifetime=document.getElementById('c-lifetime').checked, unit=document.getElementById('c-expiry-unit').value, value=+document.getElementById('c-expiry-value').value;
+    try { await API.createLicenseTemplate({app_id:document.getElementById('c-app').value,name,product_ids:ids,duration_hours:lifetime?null:(unit==='days'?value*24:value),max_hwids:+document.getElementById('c-hwids').value,key_prefix:document.getElementById('c-prefix').value||null,notes:document.getElementById('c-notes').value||null,metadata:document.getElementById('c-metadata').value||null}); await loadTemplates(); toast('Template saved','success') } catch(e){toast(e.message,'error')}
+  }
+
+  async function deleteTemplate() { const id=document.getElementById('c-template').value;if(!id)return;if(!confirm('Delete this template?'))return;try{await API.deleteLicenseTemplate(id);await loadTemplates();toast('Template deleted','success')}catch(e){toast(e.message,'error')} }
 
   function refreshLevelOptions() {
     const appId = document.getElementById("c-app").value;

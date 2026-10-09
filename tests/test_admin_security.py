@@ -442,6 +442,24 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(imported["expires_at"])
             self.assertEqual(imported["product_id"], "product-import")
 
+    async def test_license_templates_save_apply_data_and_delete(self):
+        caller = {"id": "owner-1", "username": "owner", "role": "owner", "_source": "admin_users"}
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("INSERT INTO applications(id,name,secret_key) VALUES(?,?,?)", ("app-t", "App", "t" * 64))
+            await db.execute("INSERT INTO products(id,app_id,name,level) VALUES(?,?,?,?)", ("prod-t", "app-t", "Pro", "pro"))
+            await db.commit()
+            created = await self.admin.save_license_template(
+                self.admin.LicenseTemplateBody(app_id="app-t", name="Monthly Pro", product_ids=["prod-t"],
+                                               duration_hours=720, max_hwids=2, key_prefix="vip"),
+                user=caller, db=db,
+            )
+            rows = await self.admin.list_license_templates(user=caller, db=db)
+            self.assertEqual(rows[0]["product_ids"], ["prod-t"])
+            self.assertEqual(rows[0]["key_prefix"], "VIP")
+            self.assertEqual(rows[0]["duration_hours"], 720)
+            self.assertEqual((await self.admin.delete_license_template(created["id"], user=caller, db=db))["ok"], True)
+
 
 if __name__ == "__main__":
     unittest.main()

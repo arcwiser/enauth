@@ -2259,6 +2259,76 @@ class BulkIdsBody(BaseModel):
     ids: list[str]
 
 
+class LicenseTemplateBody(BaseModel):
+    app_id: str
+    name: str = Field(min_length=1, max_length=80)
+    product_ids: list[str]
+    duration_hours: Optional[float] = Field(default=None, gt=0, le=876000)
+    max_hwids: int = Field(default=1, ge=1, le=100)
+    key_prefix: Optional[str] = Field(default=None, max_length=10)
+    notes: Optional[str] = Field(default=None, max_length=500)
+    metadata: Optional[str] = Field(default=None, max_length=2000)
+
+
+@router.get("/license-templates")
+async def list_license_templates(user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
+    owner_id = auth_owner_id(user)
+    sql = """SELECT t.*,a.name AS app_name FROM license_templates t
+             JOIN applications a ON a.id=t.app_id"""
+    args = []
+    if owner_id:
+        sql += " WHERE a.owner_user_id=?"; args.append(owner_id)
+    sql += " ORDER BY t.name"
+    async with db.execute(sql, args) as cur:
+        rows = rows_to_list(await cur.fetchall())
+    for row in rows:
+        row["product_ids"] = json.loads(row["product_ids"])
+    return rows
+
+
+@router.post("/license-templates")
+async def save_license_template(body: LicenseTemplateBody, user=Depends(require_admin),
+                                db: aiosqlite.Connection = Depends(get_db)):
+    owner_id = auth_owner_id(user)
+    app_sql, args = "SELECT id FROM applications WHERE id=?", [body.app_id]
+    if owner_id:
+        app_sql += " AND owner_user_id=?"; args.append(owner_id)
+    async with db.execute(app_sql, args) as cur:
+        if not await cur.fetchone(): raise HTTPException(404, "Application not found")
+    unique_products = list(dict.fromkeys(body.product_ids))
+    if not unique_products: raise HTTPException(400, "Select at least one product")
+    marks = ",".join("?" for _ in unique_products)
+    async with db.execute(f"SELECT COUNT(*) FROM products WHERE app_id=? AND id IN ({marks})",
+                          [body.app_id, *unique_products]) as cur:
+        if (await cur.fetchone())[0] != len(unique_products): raise HTTPException(400, "Invalid product selection")
+    template_id = generate_uid()
+    try:
+        await db.execute(
+            """INSERT INTO license_templates
+               (id,app_id,name,product_ids,duration_hours,max_hwids,key_prefix,notes,metadata)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (template_id, body.app_id, body.name.strip(), json.dumps(unique_products), body.duration_hours,
+             body.max_hwids, (body.key_prefix or "").strip().upper() or None, body.notes, body.metadata),
+        )
+        await db.commit()
+    except aiosqlite.IntegrityError:
+        raise HTTPException(409, "A template with this name already exists for the application")
+    return {"id": template_id, "name": body.name.strip()}
+
+
+@router.delete("/license-templates/{template_id}")
+async def delete_license_template(template_id: str, user=Depends(require_admin),
+                                  db: aiosqlite.Connection = Depends(get_db)):
+    owner_id = auth_owner_id(user)
+    sql = "DELETE FROM license_templates WHERE id=?"
+    args = [template_id]
+    if owner_id:
+        sql += " AND app_id IN (SELECT id FROM applications WHERE owner_user_id=?)"; args.append(owner_id)
+    cursor = await db.execute(sql, args); await db.commit()
+    if cursor.rowcount != 1: raise HTTPException(404, "Template not found")
+    return {"ok": True}
+
+
 @router.get("/licenses")
 async def list_licenses(app_id: Optional[str] = None,
                         status: Optional[str] = None,
