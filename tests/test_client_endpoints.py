@@ -466,6 +466,41 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
             replay = self._verify_v2_response(replay_resp, download_path, replay_req.nonce)
             self.assertEqual(replay["message"], "INVALID_DOWNLOAD_TICKET")
 
+    async def test_attributable_download_misuse_warns_then_bans(self):
+        seeded = await self._seed_app()
+        hwid = "e" * 64
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute(
+                "UPDATE applications SET download_violation_action='warn_ban', download_violation_limit=2 WHERE id=?",
+                (seeded["app_id"],),
+            )
+            await db.commit()
+            login_path = "/api/client/login"
+            login_req = self._v2_request(seeded["app_id"], {
+                "version": "1.0.0", "license_key": seeded["license_key"],
+                "hwid": hwid, "sdk_version": "2.2.0",
+            })
+            login_resp = await self.client.client_login.__wrapped__(
+                _FakeRequest(path=login_path), login_req, db
+            )
+            login = self._verify_v2_response(login_resp, login_path, login_req.nonce)
+
+            for expected_action, remaining in (("warning", 1), ("license_banned", 0)):
+                req = self._v2_request(seeded["app_id"], {
+                    "token": login["token"], "hwid": hwid, "name": "payload.bin",
+                    "ticket": "invalid-ticket-value",
+                })
+                response = await self.client.client_download.__wrapped__(
+                    _FakeRequest(path="/api/client/download"), req, db
+                )
+                payload = self._verify_v2_response(response, "/api/client/download", req.nonce)
+                self.assertEqual(payload["security_action"], expected_action)
+                self.assertEqual(payload["warnings_remaining"], remaining)
+
+            async with db.execute("SELECT status FROM licenses WHERE id=?", (seeded["license_id"],)) as cur:
+                self.assertEqual((await cur.fetchone())["status"], "banned")
+
     async def test_product_version_policy_blocks_compromised_client(self):
         seeded = await self._seed_app()
         path = "/api/client/login"

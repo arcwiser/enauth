@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS applications (
     is_paused   INTEGER NOT NULL DEFAULT 0,
     paused_at   DATETIME,
     pause_reason TEXT,
+    download_violation_action TEXT NOT NULL DEFAULT 'deny',
+    download_violation_limit INTEGER NOT NULL DEFAULT 3,
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -127,6 +129,17 @@ CREATE INDEX IF NOT EXISTS idx_sessions_license    ON sessions(license_id);
 CREATE INDEX IF NOT EXISTS idx_logs_timestamp      ON logs(timestamp);
 CREATE INDEX IF NOT EXISTS idx_logs_license        ON logs(license_key);
 CREATE INDEX IF NOT EXISTS idx_admin_sess_token    ON admin_sessions(token);
+
+CREATE TABLE IF NOT EXISTS download_violations (
+    app_id TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    license_id TEXT NOT NULL REFERENCES licenses(id) ON DELETE CASCADE,
+    hwid TEXT NOT NULL,
+    warning_count INTEGER NOT NULL DEFAULT 0,
+    last_reason TEXT,
+    last_ip TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(app_id, license_id, hwid)
+);
 
 CREATE TABLE IF NOT EXISTS banned_hwids (
     hwid        TEXT NOT NULL,

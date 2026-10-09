@@ -195,6 +195,19 @@
           Clients must send this exact version or be rejected.
         </span>
       </div>
+      <div class="form-group">
+        <label class="form-label">Protected-download misuse</label>
+        <select class="input" id="edit-violation-action">
+          <option value="deny">Deny only</option>
+          <option value="warn_ban">Warn, then ban license</option>
+          <option value="ban">Ban license immediately</option>
+        </select>
+        <span style="font-size:11px;color:var(--text3);margin-top:4px">Only attributable misuse from a valid session can trigger punishment. Unknown sessions are safely denied.</span>
+      </div>
+      <div class="form-group" id="edit-warning-wrap">
+        <label class="form-label">Warnings before ban</label>
+        <input class="input" id="edit-warning-limit" type="number" min="1" max="20" value="3">
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeModal('create-modal')">Cancel</button>
@@ -413,6 +426,8 @@
     document.getElementById("edit-id").value   = app.id;
     document.getElementById("edit-name").value = app.name;
     document.getElementById("edit-ver").value  = app.version;
+    document.getElementById("edit-violation-action").value = app.download_violation_action || "deny";
+    document.getElementById("edit-warning-limit").value = app.download_violation_limit || 3;
     openModal("edit-modal");
   }
 
@@ -422,7 +437,11 @@
     const ver  = document.getElementById("edit-ver").value.trim();
     if (!name || !ver) { toast("Name and version required", "error"); return; }
     try {
-      await API.updateApp(id, { name, version: ver });
+      await API.updateApp(id, {
+        name, version: ver,
+        download_violation_action: document.getElementById("edit-violation-action").value,
+        download_violation_limit: Number(document.getElementById("edit-warning-limit").value || 3)
+      });
       closeModal("edit-modal");
       toast("App updated", "success");
       load();

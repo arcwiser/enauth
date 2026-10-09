@@ -388,6 +388,54 @@ async def enforce_active_authorization(db, sess, app, ip: str) -> str | None:
     return failure
 
 
+async def record_download_violation(db, sess, app, ip: str, reason: str) -> dict:
+    """Apply an owner policy only after a valid session has identified the license/device."""
+    action = app["download_violation_action"] or "deny"
+    limit = max(1, min(int(app["download_violation_limit"] or 3), 20))
+    result = {"security_action": "denied", "warning_count": 0, "warnings_remaining": None}
+    if action == "deny":
+        await log_action(db, "download_violation_denied", app_id=app["id"], ip=ip,
+                         hwid=sess["hwid"], details=reason)
+        await db.commit()
+        return result
+
+    await db.execute(
+        """INSERT INTO download_violations
+           (app_id,license_id,hwid,warning_count,last_reason,last_ip,updated_at)
+           VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP)
+           ON CONFLICT(app_id,license_id,hwid) DO UPDATE SET
+             warning_count=download_violations.warning_count+1,
+             last_reason=excluded.last_reason,last_ip=excluded.last_ip,
+             updated_at=CURRENT_TIMESTAMP""",
+        (app["id"], sess["license_id"], sess["hwid"], 1, reason, ip),
+    )
+    async with db.execute(
+        "SELECT warning_count FROM download_violations WHERE app_id=? AND license_id=? AND hwid=?",
+        (app["id"], sess["license_id"], sess["hwid"]),
+    ) as cur:
+        warning_count = int((await cur.fetchone())["warning_count"])
+
+    should_ban = action == "ban" or warning_count >= limit
+    if should_ban:
+        await db.execute("UPDATE licenses SET status='banned' WHERE id=? AND app_id=?",
+                         (sess["license_id"], app["id"]))
+        await db.execute("DELETE FROM sessions WHERE license_id=? AND app_id=?",
+                         (sess["license_id"], app["id"]))
+        await db.execute("DELETE FROM download_tickets WHERE license_id=? AND app_id=? AND consumed_at IS NULL",
+                         (sess["license_id"], app["id"]))
+        result.update({"security_action": "license_banned", "warning_count": warning_count,
+                       "warnings_remaining": 0})
+        log_name = "download_violation_banned"
+    else:
+        result.update({"security_action": "warning", "warning_count": warning_count,
+                       "warnings_remaining": limit - warning_count})
+        log_name = "download_violation_warning"
+    await log_action(db, log_name, app_id=app["id"], ip=ip, hwid=sess["hwid"],
+                     details=f"{reason}; count={warning_count}; limit={limit}")
+    await db.commit()
+    return result
+
+
 def utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -864,7 +912,8 @@ async def client_download(request: Request, req: EncryptedRequest,
 
     if req.protocol == 2:
         if not ticket:
-            return enc_resp({"success": False, "message": "DOWNLOAD_TICKET_REQUIRED"}, secret, req.app_id)
+            policy = await record_download_violation(db, sess, app, ip, "DOWNLOAD_TICKET_REQUIRED")
+            return enc_resp({"success": False, "message": "DOWNLOAD_TICKET_REQUIRED", **policy}, secret, req.app_id)
         ticket_hash = hashlib.sha256(ticket.encode("utf-8")).hexdigest()
         cursor = await db.execute(
             """UPDATE download_tickets SET consumed_at=CURRENT_TIMESTAMP
@@ -876,7 +925,8 @@ async def client_download(request: Request, req: EncryptedRequest,
         )
         if cursor.rowcount != 1:
             await db.rollback()
-            return enc_resp({"success": False, "message": "INVALID_DOWNLOAD_TICKET"}, secret, req.app_id)
+            policy = await record_download_violation(db, sess, app, ip, "INVALID_OR_REPLAYED_TICKET")
+            return enc_resp({"success": False, "message": "INVALID_DOWNLOAD_TICKET", **policy}, secret, req.app_id)
         async with db.execute(
             "SELECT * FROM download_tickets WHERE ticket_hash=?", (ticket_hash,)
         ) as cur:
@@ -885,7 +935,8 @@ async def client_download(request: Request, req: EncryptedRequest,
             bound_file = await cur.fetchone()
         if not bound_file or bound_file["name"] != name:
             await db.rollback()
-            return enc_resp({"success": False, "message": "INVALID_DOWNLOAD_TICKET"}, secret, req.app_id)
+            policy = await record_download_violation(db, sess, app, ip, "TICKET_FILE_MISMATCH")
+            return enc_resp({"success": False, "message": "INVALID_DOWNLOAD_TICKET", **policy}, secret, req.app_id)
         row, failure = await resolve_download_file(db, app["id"], name, sess, ticket_row["file_id"])
         if failure:
             await db.rollback()

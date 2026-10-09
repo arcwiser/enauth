@@ -3190,6 +3190,8 @@ class CreateAppBody(BaseModel):
 class UpdateAppBody(BaseModel):
     name:    Optional[str] = None
     version: Optional[str] = None
+    download_violation_action: Optional[str] = None
+    download_violation_limit: Optional[int] = None
 
 
 async def _owned_app(app_id: str, owner_id: Optional[str], db):
@@ -3251,6 +3253,14 @@ async def update_app(app_id: str, body: UpdateAppBody, user=Depends(require_admi
         updates.append("name = ?"); args.append(body.name)
     if body.version is not None:
         updates.append("version = ?"); args.append(body.version)
+    if body.download_violation_action is not None:
+        if body.download_violation_action not in {"deny", "warn_ban", "ban"}:
+            raise HTTPException(400, "Invalid download violation action")
+        updates.append("download_violation_action = ?"); args.append(body.download_violation_action)
+    if body.download_violation_limit is not None:
+        if not 1 <= body.download_violation_limit <= 20:
+            raise HTTPException(400, "Warning limit must be between 1 and 20")
+        updates.append("download_violation_limit = ?"); args.append(body.download_violation_limit)
     if not updates:
         raise HTTPException(400, "Nothing to update")
     args.append(app_id)
