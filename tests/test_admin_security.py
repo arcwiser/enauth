@@ -11,7 +11,7 @@ import logging
 import aiosqlite
 import pyotp
 from fastapi import HTTPException
-from fastapi import Response, UploadFile
+from fastapi import Request, Response, UploadFile
 
 from utils.crypto import hash_password, encrypt_license_key, decrypt_license_key
 
@@ -134,6 +134,108 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
             ) as cur:
                 sessions = (await cur.fetchone())[0]
             self.assertEqual(sessions, 1)
+
+    async def test_admin_session_expiry_logout_cookie_and_login_limit_policy(self):
+        user_id, _ = await self._create_admin_user(two_factor_enabled=0)
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute(
+                "INSERT INTO admin_sessions(id,user_id,token,expires_at) VALUES(?,?,?,?)",
+                ("expired-session", user_id, "expired-token", "2000-01-01 00:00:00"),
+            )
+            await db.execute(
+                "INSERT INTO admin_sessions(id,user_id,token,expires_at) VALUES(?,?,?,datetime('now','+1 hour'))",
+                ("active-session", user_id, "active-token"),
+            )
+            await db.commit()
+
+            def cookie_request(token: str):
+                return Request({
+                    "type": "http", "method": "GET", "scheme": "https",
+                    "path": "/api/admin/auth/me", "raw_path": b"/api/admin/auth/me",
+                    "query_string": b"", "headers": [(b"cookie", f"enauth_admin_session={token}".encode())],
+                    "client": ("127.0.0.1", 12345), "server": ("testserver", 443),
+                })
+
+            with self.assertRaises(HTTPException) as expired:
+                await self.admin.require_admin(cookie_request("expired-token"), authorization=None, db=db)
+            self.assertEqual(expired.exception.status_code, 401)
+            authenticated = await self.admin.require_admin(
+                cookie_request("active-token"), authorization=None, db=db,
+            )
+            self.assertEqual(authenticated["id"], user_id)
+
+            login_response = Response()
+            result = await self.admin.admin_login.__wrapped__(
+                response=login_response, request=None,
+                body=self.admin.LoginBody(username="admin", password="Password123!"), db=db,
+            )
+            self.assertEqual(result["username"], "admin")
+            cookie = login_response.headers["set-cookie"].lower()
+            self.assertIn("httponly", cookie)
+            self.assertIn("secure", cookie)
+            self.assertIn("samesite=strict", cookie)
+            self.assertIn("path=/", cookie)
+
+            logout_response = Response()
+            await self.admin.admin_logout(logout_response, user=authenticated, db=db)
+            async with db.execute("SELECT COUNT(*) FROM admin_sessions WHERE user_id=?", (user_id,)) as cur:
+                self.assertEqual((await cur.fetchone())[0], 0)
+            removal = logout_response.headers["set-cookie"].lower()
+            self.assertIn("enauth_admin_session=", removal)
+            self.assertIn("max-age=0", removal)
+
+        limits = self.admin.limiter._route_limits["routes.admin.admin_login"]
+        self.assertEqual(str(limits[0].limit), "8 per 1 minute")
+        self.assertIs(limits[0].key_func, importlib.import_module("routes.client").get_ip)
+
+    async def test_mfa_cannot_be_bypassed_or_replayed(self):
+        user_id, secret = await self._create_admin_user(two_factor_enabled=1)
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            login_response = Response()
+            challenge = await self.admin.admin_login.__wrapped__(
+                response=login_response, request=None,
+                body=self.admin.LoginBody(username="admin", password="Password123!"), db=db,
+            )
+            self.assertTrue(challenge["two_factor_required"])
+            self.assertNotIn("set-cookie", login_response.headers)
+            async with db.execute("SELECT COUNT(*) FROM admin_sessions WHERE user_id=?", (user_id,)) as cur:
+                self.assertEqual((await cur.fetchone())[0], 0)
+
+            with self.assertRaises(HTTPException) as wrong_code:
+                await self.admin.verify_two_factor.__wrapped__(
+                    response=Response(), request=None,
+                    body=self.admin.TwoFactorVerifyBody(
+                        temp_token=challenge["temp_token"], code="000000",
+                    ), db=db,
+                )
+            self.assertEqual(wrong_code.exception.status_code, 401)
+            async with db.execute("SELECT COUNT(*) FROM admin_sessions WHERE user_id=?", (user_id,)) as cur:
+                self.assertEqual((await cur.fetchone())[0], 0)
+
+            async with db.execute(
+                "SELECT two_factor_secret FROM admin_users WHERE id=?", (user_id,)
+            ) as cur:
+                stored_secret = (await cur.fetchone())["two_factor_secret"]
+            self.assertEqual(stored_secret, secret)
+            valid_code = pyotp.TOTP(stored_secret).now()
+            await self.admin.verify_two_factor.__wrapped__(
+                response=Response(), request=None,
+                body=self.admin.TwoFactorVerifyBody(
+                    temp_token=challenge["temp_token"], code=valid_code,
+                ), db=db,
+            )
+            with self.assertRaises(HTTPException) as replay:
+                await self.admin.verify_two_factor.__wrapped__(
+                    response=Response(), request=None,
+                    body=self.admin.TwoFactorVerifyBody(
+                        temp_token=challenge["temp_token"], code=valid_code,
+                    ), db=db,
+                )
+            self.assertEqual(replay.exception.status_code, 401)
+            async with db.execute("SELECT COUNT(*) FROM admin_sessions WHERE user_id=?", (user_id,)) as cur:
+                self.assertEqual((await cur.fetchone())[0], 1)
 
     async def test_cleanup_removes_expired_temp_2fa_sessions(self):
         user_id, _ = await self._create_admin_user(two_factor_enabled=0)
