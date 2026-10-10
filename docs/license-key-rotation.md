@@ -22,6 +22,11 @@ stored ciphertext. Keep the old pepper until every license that must remain
 readable has migrated. Back up the database and all keyring values before any
 rotation.
 
+Startup validates the complete keyring before accepting traffic. Reusing a
+current lookup secret for encryption, assigning one secret to multiple rotation
+IDs, or otherwise sharing secrets across both keyrings is rejected. The only
+exception is the matching `legacy-v1` entry required during this migration.
+
 ## Rotating again
 
 Move the old current value into the matching `*_PREVIOUS_KEYS` JSON object,

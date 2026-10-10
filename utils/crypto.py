@@ -202,6 +202,36 @@ def _license_encryption_keyring() -> tuple[str, dict[str, str]]:
     return "legacy-v1", {"legacy-v1": _legacy_license_secret()}
 
 
+def validate_license_key_configuration() -> None:
+    """Fail fast on ambiguous or accidentally shared license-key secrets."""
+    _, lookup_keys = _license_lookup_keyring()
+    _, encryption_keys = _license_encryption_keyring()
+
+    def reject_duplicates(label: str, keys: dict[str, str]) -> None:
+        seen: dict[str, str] = {}
+        for key_id, secret in keys.items():
+            previous_id = seen.get(secret)
+            if previous_id is not None:
+                raise RuntimeError(
+                    f"{label} key IDs {previous_id!r} and {key_id!r} use the same secret"
+                )
+            seen[secret] = key_id
+
+    reject_duplicates("License lookup", lookup_keys)
+    reject_duplicates("License encryption", encryption_keys)
+
+    for lookup_id, lookup_secret in lookup_keys.items():
+        for encryption_id, encryption_secret in encryption_keys.items():
+            if lookup_secret != encryption_secret:
+                continue
+            if (lookup_id, encryption_id) == ("legacy-v1", "legacy-v1"):
+                continue
+            raise RuntimeError(
+                f"License secret reuse detected between lookup {lookup_id!r} "
+                f"and encryption {encryption_id!r}"
+            )
+
+
 def current_license_lookup_key_id() -> str:
     return _license_lookup_keyring()[0]
 

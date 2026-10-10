@@ -35,7 +35,8 @@ from routes.client import router as client_router, limiter
 from routes.admin  import router as admin_router, cleanup_runtime_state, create_verified_backup
 from routes.integrations import router as integrations_router
 from routes.status import router as status_router
-from utils.crypto  import generate_uid, hash_password, generate_app_secret
+from utils.crypto  import (generate_uid, hash_password, generate_app_secret,
+                           validate_license_key_configuration)
 from utils.logger import app_log
 from utils.response_signing import ensure_response_signing_key, response_public_key_hex
 from utils.request_limits import RequestBodyLimitMiddleware
@@ -81,6 +82,11 @@ def validate_startup_configuration(debug_mode: bool):
         app_log.warning(
             "LICENSE_KEY_PEPPER compatibility mode is active; configure separate license lookup and encryption keys."
         )
+    try:
+        validate_license_key_configuration()
+    except RuntimeError as exc:
+        print(f"CRITICAL ERROR: {exc}")
+        sys.exit(1)
     if os.getenv("ALLOW_LEGACY_PROTOCOL", "false").lower() == "true":
         app_log.warning(
             "Legacy client protocol 1 is enabled. Use this only during a controlled SDK migration window."

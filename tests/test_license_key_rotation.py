@@ -10,6 +10,7 @@ from utils.crypto import (
     decrypt_license_key,
     encrypt_license_key,
     license_lookup_hashes,
+    validate_license_key_configuration,
 )
 
 
@@ -77,6 +78,41 @@ class LicenseKeyRotationTests(unittest.TestCase):
         self.assertEqual(license_lookup_hashes("ABC-123")[0][1], first_hash)
         with self.assertRaises(Exception):
             decrypt_license_key(encrypted)
+
+    def test_configuration_rejects_current_cross_purpose_secret_reuse(self):
+        os.environ["LICENSE_LOOKUP_KEY_ID"] = "lookup-v2"
+        os.environ["LICENSE_LOOKUP_KEY"] = "S" * 32
+        os.environ["LICENSE_ENCRYPTION_KEY_ID"] = "enc-v2"
+        os.environ["LICENSE_ENCRYPTION_KEY"] = "E" * 32
+        os.environ["LICENSE_ENCRYPTION_PREVIOUS_KEYS"] = json.dumps({"enc-old": "S" * 32})
+        with self.assertRaisesRegex(RuntimeError, "secret reuse"):
+            validate_license_key_configuration()
+
+    def test_configuration_rejects_duplicate_rotation_secrets(self):
+        os.environ["LICENSE_LOOKUP_KEY_ID"] = "lookup-v3"
+        os.environ["LICENSE_LOOKUP_KEY"] = "L" * 32
+        os.environ["LICENSE_LOOKUP_PREVIOUS_KEYS"] = json.dumps({
+            "lookup-v1": "O" * 32,
+            "lookup-v2": "O" * 32,
+        })
+        os.environ["LICENSE_ENCRYPTION_KEY_ID"] = "enc-v3"
+        os.environ["LICENSE_ENCRYPTION_KEY"] = "E" * 32
+        with self.assertRaisesRegex(RuntimeError, "same secret"):
+            validate_license_key_configuration()
+
+    def test_configuration_allows_matching_legacy_migration_entry(self):
+        os.environ["LICENSE_KEY_PEPPER"] = "P" * 32
+        os.environ["LICENSE_LOOKUP_KEY_ID"] = "lookup-v2"
+        os.environ["LICENSE_LOOKUP_KEY"] = "L" * 32
+        os.environ["LICENSE_LOOKUP_PREVIOUS_KEYS"] = json.dumps({"legacy-v1": "P" * 32})
+        os.environ["LICENSE_ENCRYPTION_KEY_ID"] = "enc-v2"
+        os.environ["LICENSE_ENCRYPTION_KEY"] = "E" * 32
+        os.environ["LICENSE_ENCRYPTION_PREVIOUS_KEYS"] = "{}"
+        validate_license_key_configuration()
+
+    def test_configuration_preserves_legacy_compatibility_mode(self):
+        os.environ["LICENSE_KEY_PEPPER"] = "P" * 32
+        validate_license_key_configuration()
 
 
 if __name__ == "__main__":
