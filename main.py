@@ -38,6 +38,7 @@ from utils.logger import app_log
 from utils.response_signing import ensure_response_signing_key, response_public_key_hex
 from utils.request_limits import RequestBodyLimitMiddleware
 from utils.runtime_metrics import record as record_request_metric
+from utils.request_security import csrf_origin_allowed
 
 # ─── Lifespan ────────────────────────────────────────────────────────────────
 
@@ -82,6 +83,10 @@ def validate_startup_configuration(debug_mode: bool):
             sys.exit(1)
         else:
             app_log.warning("CORS_ORIGINS is set to '*'. That is convenient for local use, but tighter origins are safer in production.")
+    if (os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true" and
+            not os.getenv("TRUSTED_PROXY_CIDRS", "").strip()):
+        print("CRITICAL ERROR: TRUSTED_PROXY_CIDRS is required when TRUST_PROXY_HEADERS=true.")
+        sys.exit(1)
 
 
 async def _maintenance_loop():
@@ -135,6 +140,12 @@ async def security_middleware(request: Request, call_next):
     incoming_request_id = request.headers.get("X-Request-ID", "")
     request_id = incoming_request_id if re.fullmatch(r"[A-Za-z0-9._-]{8,64}", incoming_request_id) else secrets.token_hex(12)
     request.state.request_id = request_id
+    if (request.method not in {"GET", "HEAD", "OPTIONS"} and
+            request.url.path.startswith("/api/admin") and
+            request.cookies.get("enauth_admin_session")):
+        trusted_origins = os.getenv("CSRF_TRUSTED_ORIGINS", "") or os.getenv("CORS_ORIGINS", "")
+        if not csrf_origin_allowed(request.headers.get("Origin"), trusted_origins):
+            return JSONResponse({"detail": "CSRF_ORIGIN_REJECTED"}, status_code=403)
     try:
         response = await call_next(request)
     except Exception:

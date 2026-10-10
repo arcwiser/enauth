@@ -17,6 +17,7 @@ from utils.crypto import (generate_license_key, generate_uid, hash_license_key,
                           mask_license_key, encrypt_license_key, display_license_key)
 from utils.logger import log_action
 from utils.uploads import read_build_upload, validate_release_name, validate_release_version
+from utils.request_security import resolve_client_ip
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
@@ -76,9 +77,8 @@ def require_scope(required: str):
             request.method == "GET" and request.url.path.rstrip("/") == "/api/integrations/apps"
         ):
             raise HTTPException(403, "App-bound API keys cannot access global resources")
-        forwarded = request.headers.get("X-Forwarded-For") if os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true" else None
-        source_ip = (forwarded.split(",", 1)[0].strip() if forwarded else
-                     (request.client.host if request.client else "unknown"))
+        source_ip = resolve_client_ip(request.client.host if request.client else "unknown",
+                                      request.headers.get("X-Forwarded-For"))
         if key.get("allowed_ips"):
             try:
                 configured_networks = json.loads(key["allowed_ips"])

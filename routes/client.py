@@ -24,6 +24,7 @@ from utils.crypto import (
 )
 from utils.response_signing import sign_response
 from utils.logger import log_action
+from utils.request_security import resolve_client_ip
 
 limiter = Limiter(key_func=get_remote_address)
 router = APIRouter(prefix="/api/client", tags=["client"])
@@ -92,11 +93,8 @@ class EncryptedRequest(BaseModel):
 
 
 def get_ip(request: Request) -> str:
-    if os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true":
-        forwarded = request.headers.get("X-Forwarded-For")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    return resolve_client_ip(request.client.host if request.client else "unknown",
+                             request.headers.get("X-Forwarded-For"))
 
 
 def generate_device_fingerprint(request: Request, hwid: str) -> str:
