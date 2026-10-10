@@ -4,6 +4,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <cstring>
 #include <vector>
 
 std::string AES256CBCEncrypt(const std::string& plaintext, const std::string& app_secret);
@@ -108,6 +109,42 @@ int main() {
                 "Oversized download names must be rejected before networking");
         Require(loopback.ValidateSession().status == enauth::Status::SessionExpired,
                 "Session operations must fail closed before login");
+        Require(!enauth::Client::TestValidatePortableExecutable({'M', 'Z'}),
+                "An MZ prefix alone must not qualify as a loader update");
+        std::vector<unsigned char> executable(512, 0);
+        IMAGE_DOS_HEADER dos{};
+        dos.e_magic = IMAGE_DOS_SIGNATURE;
+        dos.e_lfanew = 0x80;
+        std::memcpy(executable.data(), &dos, sizeof(dos));
+        const DWORD peSignature = IMAGE_NT_SIGNATURE;
+        std::memcpy(executable.data() + 0x80, &peSignature, sizeof(peSignature));
+        IMAGE_FILE_HEADER fileHeader{};
+#if defined(_M_X64)
+        fileHeader.Machine = IMAGE_FILE_MACHINE_AMD64;
+        const WORD optionalMagic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+#elif defined(_M_IX86)
+        fileHeader.Machine = IMAGE_FILE_MACHINE_I386;
+        const WORD optionalMagic = IMAGE_NT_OPTIONAL_HDR32_MAGIC;
+#elif defined(_M_ARM64)
+        fileHeader.Machine = IMAGE_FILE_MACHINE_ARM64;
+        const WORD optionalMagic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+#endif
+        fileHeader.NumberOfSections = 1;
+        fileHeader.SizeOfOptionalHeader = sizeof(WORD);
+        fileHeader.Characteristics = IMAGE_FILE_EXECUTABLE_IMAGE;
+        std::memcpy(executable.data() + 0x80 + sizeof(DWORD), &fileHeader, sizeof(fileHeader));
+        std::memcpy(executable.data() + 0x80 + sizeof(DWORD) + sizeof(fileHeader),
+                    &optionalMagic, sizeof(optionalMagic));
+        Require(enauth::Client::TestValidatePortableExecutable(executable),
+                "A structurally valid same-architecture PE must qualify as an update");
+        fileHeader.Characteristics |= IMAGE_FILE_DLL;
+        std::memcpy(executable.data() + 0x80 + sizeof(DWORD), &fileHeader, sizeof(fileHeader));
+        Require(!enauth::Client::TestValidatePortableExecutable(executable),
+                "DLL payloads must not qualify as loader updates");
+        Require(enauth::Client::TestAutoUpdatePathAllowed(L"C:\\Program Files\\Loader\\loader.exe"),
+                "Normal quoted Windows paths must be allowed");
+        Require(!enauth::Client::TestAutoUpdatePathAllowed(L"C:\\Loader&calc.exe"),
+                "Command metacharacters must be rejected from updater paths");
         const std::string decoded = client.TestDecryptResponseAt(
             Envelope(), kEndpoint, kNonce, 2000000030);
         Require(decoded == "{\"success\":true,\"message\":\"OK\"}",

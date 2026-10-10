@@ -19,7 +19,7 @@
 
 namespace enauth {
 
-inline constexpr const char* SDK_VERSION = "2.5.1";
+inline constexpr const char* SDK_VERSION = "2.6.0";
 inline constexpr int RESOLVE_TIMEOUT_MS = 10000;
 inline constexpr int CONNECT_TIMEOUT_MS = 10000;
 inline constexpr int SEND_TIMEOUT_MS = 10000;
@@ -188,6 +188,8 @@ public:
                                       const std::string& endpoint,
                                       const std::string& request_nonce,
                                       long long now);
+    static bool TestValidatePortableExecutable(const std::vector<unsigned char>& data);
+    static bool TestAutoUpdatePathAllowed(const std::wstring& path);
 #endif
 
 private:

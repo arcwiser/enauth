@@ -97,10 +97,12 @@ if (!fileData.empty()) {
 }
 ```
 
-SDK 2.2 downloads are returned in an authenticated AES-256-GCM envelope derived
+SDK 2.6 downloads are returned only in an authenticated AES-256-GCM envelope derived
 from the one-use ticket, current rotating session token, device HWID, and exact
 file ID. `DownloadFile` verifies the signed server response and SHA-256 digest,
-then returns the plaintext bytes in memory; it does not save them to disk.
+requires the name, file ID, release version, file type, and digest to match the
+one-use ticket, then returns the plaintext bytes in memory. The older plaintext
+ticket-envelope fallback is rejected; the SDK does not save downloads to disk.
 
 ### 6. Get News
 
@@ -184,7 +186,10 @@ if (client.AutoUpdateLoader("loader.exe", "1.2.0")) {
 
 The loader release is delivered through a one-use download ticket, the signed
 response is verified, and its SHA-256 digest is checked before replacement.
-The running process is never overwritten in place.
+The updater also validates the PE structure, executable type, and target CPU,
+rejects command-sensitive installation paths, and uses exclusive randomized
+staging files with write-through flushes. The running process is never overwritten
+in place.
 
 ### Protection boundary
 

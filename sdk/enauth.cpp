@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cwctype>
 #include <cctype>
+#include <cstring>
 
 #pragma comment(lib, "ntdll.lib")
 
@@ -90,6 +91,57 @@ static bool JsonBool(const std::string& json, const std::string& key) {
 static long long UnixTime() {
     return std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+static bool IsLowerHexDigest(const std::string& value) {
+    return value.size() == 64 && std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+        return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+    });
+}
+
+static bool IsValidPortableExecutable(const std::vector<unsigned char>& data) {
+    if (data.size() < sizeof(IMAGE_DOS_HEADER)) return false;
+    IMAGE_DOS_HEADER dos{};
+    std::memcpy(&dos, data.data(), sizeof(dos));
+    if (dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew < static_cast<LONG>(sizeof(dos))) return false;
+
+    const size_t ntOffset = static_cast<size_t>(dos.e_lfanew);
+    const size_t minimumHeader = sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) + sizeof(WORD);
+    if (ntOffset > data.size() || data.size() - ntOffset < minimumHeader) return false;
+
+    DWORD signature = 0;
+    std::memcpy(&signature, data.data() + ntOffset, sizeof(signature));
+    if (signature != IMAGE_NT_SIGNATURE) return false;
+
+    IMAGE_FILE_HEADER fileHeader{};
+    std::memcpy(&fileHeader, data.data() + ntOffset + sizeof(signature), sizeof(fileHeader));
+    if (fileHeader.NumberOfSections == 0 || fileHeader.NumberOfSections > 96 ||
+        !(fileHeader.Characteristics & IMAGE_FILE_EXECUTABLE_IMAGE) ||
+        (fileHeader.Characteristics & IMAGE_FILE_DLL)) return false;
+
+#if defined(_M_X64)
+    constexpr WORD expectedMachine = IMAGE_FILE_MACHINE_AMD64;
+    constexpr WORD expectedMagic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+#elif defined(_M_IX86)
+    constexpr WORD expectedMachine = IMAGE_FILE_MACHINE_I386;
+    constexpr WORD expectedMagic = IMAGE_NT_OPTIONAL_HDR32_MAGIC;
+#elif defined(_M_ARM64)
+    constexpr WORD expectedMachine = IMAGE_FILE_MACHINE_ARM64;
+    constexpr WORD expectedMagic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+#else
+    return false;
+#endif
+    if (fileHeader.Machine != expectedMachine || fileHeader.SizeOfOptionalHeader < sizeof(WORD)) return false;
+    const size_t optionalOffset = ntOffset + sizeof(signature) + sizeof(fileHeader);
+    if (optionalOffset > data.size() || fileHeader.SizeOfOptionalHeader > data.size() - optionalOffset) return false;
+    WORD optionalMagic = 0;
+    std::memcpy(&optionalMagic, data.data() + optionalOffset, sizeof(optionalMagic));
+    return optionalMagic == expectedMagic;
+}
+
+static bool IsAutoUpdatePathAllowed(const std::wstring& path) {
+    if (path.empty() || path.find_first_of(L"%&|<>^!\r\n") != std::wstring::npos) return false;
+    return path.find(L'"') == std::wstring::npos;
 }
 
 static unsigned char GenerateRuntimeKey() {
@@ -770,7 +822,12 @@ std::vector<unsigned char> Client::DownloadFile(const std::string& name) {
         }
         std::string ticket = JsonGet(ticketResponse, OBFUSCATE("ticket"));
         std::string ticketToken = JsonGet(ticketResponse, OBFUSCATE("token"));
-        if (ticket.empty() || ticketToken.empty()) {
+        const std::string ticketFileId = JsonGet(ticketResponse, OBFUSCATE("file_id"));
+        const std::string ticketHash = JsonGet(ticketResponse, OBFUSCATE("sha256"));
+        const std::string ticketVersion = JsonGet(ticketResponse, OBFUSCATE("version"));
+        const std::string ticketFileType = JsonGet(ticketResponse, OBFUSCATE("file_type"));
+        if (ticket.empty() || ticketToken.empty() || ticketFileId.empty() ||
+            !IsLowerHexDigest(ticketHash) || ticketVersion.empty() || ticketFileType.empty()) {
             SecureZeroMemory(token.data(), token.size());
             SecureZeroMemory(deviceHwid.data(), deviceHwid.size());
             return {};
@@ -797,26 +854,22 @@ std::vector<unsigned char> Client::DownloadFile(const std::string& name) {
             std::string b64_data = JsonGet(dec, OBFUSCATE("data"));
             const std::string encryption = JsonGet(dec, OBFUSCATE("encryption"));
             const std::string fileId = JsonGet(dec, OBFUSCATE("file_id"));
-            if (!b64_data.empty() && !fileId.empty() &&
-                (encryption == OBFUSCATE("AES-256-GCM-TICKET-v2") ||
-                 encryption == OBFUSCATE("TLS-SIGNED-SESSION-v2"))) {
+            const std::string responseName = JsonGet(dec, OBFUSCATE("name"));
+            const std::string responseVersion = JsonGet(dec, OBFUSCATE("version"));
+            const std::string responseFileType = JsonGet(dec, OBFUSCATE("file_type"));
+            if (!b64_data.empty() && !fileId.empty() && responseName == name &&
+                responseVersion == ticketVersion && responseFileType == ticketFileType &&
+                encryption == OBFUSCATE("AES-256-GCM-TICKET-v2")) {
                 std::string plaintext;
-                if (encryption == OBFUSCATE("AES-256-GCM-TICKET-v2")) {
-                    const std::string context = OBFUSCATE("download-v2|") + token + "|" + deviceHwid + "|" + fileId;
-                    std::string downloadSecret = HmacSHA256Hex(ticket, context);
-                    plaintext = AES256CBCDecrypt(b64_data, downloadSecret);
-                    SecureZeroMemory(downloadSecret.data(), downloadSecret.size());
-                } else {
-                    std::vector<unsigned char> legacyDecoded = Base64Decode(b64_data);
-                    plaintext.assign(legacyDecoded.begin(), legacyDecoded.end());
-                    if (!legacyDecoded.empty()) SecureZeroMemory(legacyDecoded.data(), legacyDecoded.size());
-                }
+                const std::string context = OBFUSCATE("download-v2|") + token + "|" + deviceHwid + "|" + fileId;
+                std::string downloadSecret = HmacSHA256Hex(ticket, context);
+                plaintext = AES256CBCDecrypt(b64_data, downloadSecret);
+                SecureZeroMemory(downloadSecret.data(), downloadSecret.size());
                 std::vector<unsigned char> decoded(plaintext.begin(), plaintext.end());
                 const std::string expectedHash = JsonGet(dec, OBFUSCATE("sha256"));
                 const bool validHash = decoded.size() <= 100u * 1024u * 1024u &&
-                    expectedHash.size() == 64 && SHA256Hex(plaintext) == expectedHash &&
-                    expectedHash == JsonGet(ticketResponse, "sha256") &&
-                    fileId == JsonGet(ticketResponse, "file_id");
+                    IsLowerHexDigest(expectedHash) && SHA256Hex(plaintext) == expectedHash &&
+                    expectedHash == ticketHash && fileId == ticketFileId;
                 if (!plaintext.empty()) SecureZeroMemory(plaintext.data(), plaintext.size());
                 if (!validHash) {
                     if (!decoded.empty()) SecureZeroMemory(decoded.data(), decoded.size());
@@ -834,7 +887,9 @@ std::vector<unsigned char> Client::DownloadFile(const std::string& name) {
         if (!token.empty()) SecureZeroMemory(token.data(), token.size());
         if (!deviceHwid.empty()) SecureZeroMemory(deviceHwid.data(), deviceHwid.size());
         if (!ticket.empty()) SecureZeroMemory(ticket.data(), ticket.size());
-    } catch (...) {}
+    } catch (...) {
+        ClearSessionState();
+    }
     return {};
 }
 
@@ -862,7 +917,7 @@ bool Client::AutoUpdateLoader(const std::string& name, const std::string& curren
             latestVersion.empty() || latestVersion == currentVersion) return false;
 
         std::vector<unsigned char> update = DownloadFile(name);
-        if (update.size() < 2 || update[0] != 'M' || update[1] != 'Z') {
+        if (!IsValidPortableExecutable(update)) {
             if (!update.empty()) SecureZeroMemory(update.data(), update.size());
             return false;
         }
@@ -873,10 +928,17 @@ bool Client::AutoUpdateLoader(const std::string& name, const std::string& curren
             return false;
         }
         std::wstring target(pathBuffer.data(), pathLength);
-        std::wstring staged = target + L".update";
-        std::wstring script = target + L".update.cmd";
-        HANDLE stagedFile = CreateFileW(staged.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                                        FILE_ATTRIBUTE_HIDDEN, nullptr);
+        if (!IsAutoUpdatePathAllowed(target)) {
+            SecureZeroMemory(update.data(), update.size());
+            return false;
+        }
+        const std::string suffixAscii = SecureRandomHex(16);
+        const std::wstring suffix(suffixAscii.begin(), suffixAscii.end());
+        std::wstring staged = target + L".update." + suffix;
+        std::wstring script = target + L".update." + suffix + L".cmd";
+        HANDLE stagedFile = CreateFileW(staged.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                                        FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_TEMPORARY |
+                                        FILE_FLAG_WRITE_THROUGH, nullptr);
         if (stagedFile == INVALID_HANDLE_VALUE) {
             SecureZeroMemory(update.data(), update.size());
             return false;
@@ -884,27 +946,23 @@ bool Client::AutoUpdateLoader(const std::string& name, const std::string& curren
         DWORD written = 0;
         const bool wroteUpdate = WriteFile(stagedFile, update.data(), static_cast<DWORD>(update.size()),
                                            &written, nullptr) && written == update.size();
-        FlushFileBuffers(stagedFile);
+        const bool flushedUpdate = FlushFileBuffers(stagedFile) != FALSE;
         CloseHandle(stagedFile);
         SecureZeroMemory(update.data(), update.size());
-        if (!wroteUpdate) {
+        if (!wroteUpdate || !flushedUpdate) {
             DeleteFileW(staged.c_str());
             return false;
         }
-        auto batchEscape = [](std::string value) {
-            size_t pos = 0;
-            while ((pos = value.find('%', pos)) != std::string::npos) { value.replace(pos, 1, "%%"); pos += 2; }
-            return value;
-        };
-        const std::string targetUtf8 = batchEscape(WideToUtf8(target.c_str()));
-        const std::string stagedUtf8 = batchEscape(WideToUtf8(staged.c_str()));
+        const std::string targetUtf8 = WideToUtf8(target.c_str());
+        const std::string stagedUtf8 = WideToUtf8(staged.c_str());
         std::string commands = "@echo off\r\n:wait\r\ntasklist /FI \"PID eq " +
             std::to_string(GetCurrentProcessId()) + "\" | find \"" +
             std::to_string(GetCurrentProcessId()) + "\" >nul\r\nif not errorlevel 1 (timeout /t 1 /nobreak >nul & goto wait)\r\n" +
-            "move /Y \"" + stagedUtf8 + "\" \"" + targetUtf8 + "\" >nul\r\n" +
+            "move /Y \"" + stagedUtf8 + "\" \"" + targetUtf8 + "\" >nul || (del \"%~f0\" & exit /b 1)\r\n" +
             "start \"\" \"" + targetUtf8 + "\"\r\ndel \"%~f0\"\r\n";
-        HANDLE scriptFile = CreateFileW(script.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                                        FILE_ATTRIBUTE_HIDDEN, nullptr);
+        HANDLE scriptFile = CreateFileW(script.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                                        FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_TEMPORARY |
+                                        FILE_FLAG_WRITE_THROUGH, nullptr);
         if (scriptFile == INVALID_HANDLE_VALUE) {
             DeleteFileW(staged.c_str());
             return false;
@@ -912,8 +970,9 @@ bool Client::AutoUpdateLoader(const std::string& name, const std::string& curren
         written = 0;
         const bool wroteScript = WriteFile(scriptFile, commands.data(), static_cast<DWORD>(commands.size()),
                                            &written, nullptr) && written == commands.size();
+        const bool flushedScript = FlushFileBuffers(scriptFile) != FALSE;
         CloseHandle(scriptFile);
-        if (!wroteScript) {
+        if (!wroteScript || !flushedScript) {
             DeleteFileW(staged.c_str());
             DeleteFileW(script.c_str());
             return false;
@@ -936,6 +995,16 @@ bool Client::AutoUpdateLoader(const std::string& name, const std::string& curren
         return false;
     }
 }
+
+#ifdef ENAUTH_TESTING
+bool Client::TestValidatePortableExecutable(const std::vector<unsigned char>& data) {
+    return IsValidPortableExecutable(data);
+}
+
+bool Client::TestAutoUpdatePathAllowed(const std::wstring& path) {
+    return IsAutoUpdatePathAllowed(path);
+}
+#endif
 
 void Client::StartHeartbeatThread(int interval_sec, std::function<void()> on_expire) {
     m_hb_callback = on_expire;
