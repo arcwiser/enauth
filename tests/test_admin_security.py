@@ -474,6 +474,24 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(rows[0]["duration_hours"], 720)
             self.assertEqual((await self.admin.delete_license_template(created["id"], user=caller, db=db))["ok"], True)
 
+    async def test_download_incident_workspace_lists_and_clears_warnings(self):
+        caller = {"id": "owner-1", "username": "owner", "role": "owner", "_source": "admin_users"}
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("INSERT INTO applications(id,name,secret_key) VALUES(?,?,?)", ("app-v", "Secure App", "v" * 64))
+            await db.execute("INSERT INTO licenses(id,key,key_hash,app_id) VALUES(?,?,?,?)", ("lic-v", "WARN…1234", "d" * 64, "app-v"))
+            await db.execute(
+                """INSERT INTO download_violations(app_id,license_id,hwid,warning_count,last_reason,last_ip)
+                   VALUES(?,?,?,?,?,?)""", ("app-v", "lic-v", "h" * 64, 2, "REPLAY", "127.0.0.1"),
+            )
+            await db.commit()
+            rows = await self.admin.list_download_violations(app_id="app-v", limit=100, user=caller, db=db)
+            self.assertEqual(rows[0]["warning_count"], 2)
+            self.assertEqual(rows[0]["last_reason"], "REPLAY")
+            result = await self.admin.clear_download_violation("app-v", "lic-v", "h" * 64, user=caller, db=db)
+            self.assertTrue(result["ok"])
+            self.assertEqual(await self.admin.list_download_violations(app_id="app-v", limit=100, user=caller, db=db), [])
+
 
 if __name__ == "__main__":
     unittest.main()

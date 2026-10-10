@@ -119,6 +119,8 @@ const API = {
   // Dashboard
   dashboard: ()        => api("GET",  "/api/admin/dashboard"),
   getControlCenter: () => api("GET", "/api/admin/security/control-center"),
+  getDownloadViolations: (appId = "") => api("GET", `/api/admin/security/download-violations${appId ? `?app_id=${encodeURIComponent(appId)}` : ""}`),
+  clearDownloadViolation: (appId, licenseId, hwid) => api("DELETE", `/api/admin/security/download-violations/${encodeURIComponent(appId)}/${encodeURIComponent(licenseId)}/${encodeURIComponent(hwid)}`),
   revokeScopedSessions: (body) => api("POST", "/api/admin/security/sessions/revoke", body),
   emergencyLockdown: (appId, body) => api("POST", `/api/admin/security/apps/${encodeURIComponent(appId)}/lockdown`, body),
 

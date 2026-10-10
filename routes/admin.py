@@ -2086,6 +2086,46 @@ async def list_security_events(app_id: Optional[str] = None, severity: Optional[
     return {"items": items, "total": total, "limit": clamp_limit(limit, 50), "offset": clamp_offset(offset)}
 
 
+@router.get("/security/download-violations")
+async def list_download_violations(app_id: Optional[str] = None, limit: int = 100,
+                                   user=Depends(require_admin), db=Depends(get_db)):
+    owner_id = auth_owner_id(user)
+    conditions, args = ["1=1"], []
+    if owner_id:
+        conditions.append("a.owner_user_id=?"); args.append(owner_id)
+    if app_id:
+        await _owned_app(app_id, owner_id, db)
+        conditions.append("v.app_id=?"); args.append(app_id)
+    async with db.execute(
+        f"""SELECT v.app_id,a.name AS app_name,v.license_id,l.key AS license_key,
+                   v.hwid,v.warning_count,v.last_reason,v.last_ip,v.updated_at,
+                   a.download_violation_action,a.download_violation_limit,l.status AS license_status
+              FROM download_violations v
+              JOIN applications a ON a.id=v.app_id
+              JOIN licenses l ON l.id=v.license_id
+             WHERE {' AND '.join(conditions)}
+             ORDER BY v.updated_at DESC LIMIT ?""",
+        [*args, clamp_limit(limit, 100)],
+    ) as cur:
+        return rows_to_list(await cur.fetchall())
+
+
+@router.delete("/security/download-violations/{app_id}/{license_id}/{hwid}")
+async def clear_download_violation(app_id: str, license_id: str, hwid: str,
+                                   user=Depends(require_admin), db=Depends(get_db)):
+    await _owned_app(app_id, auth_owner_id(user), db)
+    cursor = await db.execute(
+        "DELETE FROM download_violations WHERE app_id=? AND license_id=? AND hwid=?",
+        (app_id, license_id, hwid),
+    )
+    if cursor.rowcount != 1:
+        raise HTTPException(404, "Violation record not found")
+    await log_action(db, "download_violation_cleared", app_id=app_id, hwid=hwid,
+                     details=f"license_id={license_id}; cleared_by={user.get('username', user.get('id', 'admin'))}")
+    await db.commit()
+    return {"ok": True}
+
+
 @router.post("/security/apps/{app_id}/lockdown")
 async def emergency_app_lockdown(app_id: str, body: EmergencyLockdownBody,
                                  user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
