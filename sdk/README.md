@@ -285,6 +285,10 @@ and ambiguous base URLs, fails on partial HTTP reads, enforces response and inpu
 size limits, requires successful initialization before login, and clears cached
 session state whenever validation can no longer be proven.
 
+SDK 2.5.1 checks every Windows CNG operation, automatically destroys provider,
+hash, and key handles, wipes intermediate key material on every exit path, and
+ships known-answer plus authenticated-ciphertext tamper tests.
+
 ### Protocol 2 migration for existing installations
 
 New installations reject protocol 1 by default. For an existing installation

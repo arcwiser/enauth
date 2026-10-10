@@ -19,7 +19,7 @@
 
 namespace enauth {
 
-inline constexpr const char* SDK_VERSION = "2.5.0";
+inline constexpr const char* SDK_VERSION = "2.5.1";
 inline constexpr int RESOLVE_TIMEOUT_MS = 10000;
 inline constexpr int CONNECT_TIMEOUT_MS = 10000;
 inline constexpr int SEND_TIMEOUT_MS = 10000;

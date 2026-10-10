@@ -4,6 +4,14 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
+
+std::string AES256CBCEncrypt(const std::string& plaintext, const std::string& app_secret);
+std::string AES256CBCDecrypt(const std::string& b64, const std::string& app_secret);
+std::string HmacSHA256Hex(const std::string& key, const std::string& msg);
+std::string SHA256Hex(const std::string& data);
+std::vector<unsigned char> Base64Decode(const std::string& b64);
+std::string Base64Encode(const std::vector<unsigned char>& data);
 
 namespace {
 
@@ -55,6 +63,24 @@ int main() {
                   "Download envelopes must remain bounded");
 
     try {
+        Require(SHA256Hex("abc") ==
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                "SHA-256 must match its known-answer test");
+        Require(HmacSHA256Hex("key", "The quick brown fox jumps over the lazy dog") ==
+                "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8",
+                "HMAC-SHA256 must match its known-answer test");
+        const std::string encrypted = AES256CBCEncrypt("authenticated plaintext", "test-secret-at-least-32-characters");
+        Require(AES256CBCDecrypt(encrypted, "test-secret-at-least-32-characters") ==
+                "authenticated plaintext", "AES-GCM round trip must succeed");
+        auto tampered = Base64Decode(encrypted);
+        tampered[tampered.size() / 2] ^= 0x01;
+        const std::string tamperedEncoded = Base64Encode(tampered);
+        RequireThrows([&] {
+            AES256CBCDecrypt(tamperedEncoded, "test-secret-at-least-32-characters");
+        }, "AES-GCM tampering must fail closed");
+        RequireThrows([] { Base64Decode("not base64!!!"); },
+                      "Malformed Base64 must be rejected");
+
         RequireThrows([] {
             enauth::Client client("http://auth.example.com", "app-test", "1.0.0", kPublicKey);
         }, "Remote plaintext HTTP must be rejected");
