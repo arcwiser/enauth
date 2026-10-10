@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 
 import aiosqlite
+from fastapi import HTTPException
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -338,6 +339,132 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(Exception):
                 await self.client.parse_request(req, db)
             async with db.execute("SELECT COUNT(*) FROM request_nonces") as cur:
+                self.assertEqual((await cur.fetchone())[0], 0)
+
+    async def test_concurrent_activation_cannot_overallocate_hwid_seats(self):
+        seeded = await self._seed_app()
+        async with aiosqlite.connect(self.db_path) as setup_db:
+            await setup_db.execute(
+                "UPDATE licenses SET max_hwids=1 WHERE id=?", (seeded["license_id"],)
+            )
+            await setup_db.commit()
+
+        ready = asyncio.Event()
+        arrived = 0
+        arrival_lock = asyncio.Lock()
+
+        async def activate(hwid: str):
+            nonlocal arrived
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                async with arrival_lock:
+                    arrived += 1
+                    if arrived == 2:
+                        ready.set()
+                await ready.wait()
+                req = self._v2_request(seeded["app_id"], {
+                    "version": "1.0.0", "license_key": seeded["license_key"],
+                    "hwid": hwid, "sdk_version": "2.3.0",
+                })
+                response = await self.client.client_login.__wrapped__(
+                    _FakeRequest(path="/api/client/login"), req, db,
+                )
+                return self._verify_v2_response(response, "/api/client/login", req.nonce)
+
+        results = await asyncio.gather(activate("a" * 64), activate("b" * 64))
+        self.assertEqual(sum(bool(item["success"]) for item in results), 1)
+        self.assertEqual(
+            [item["message"] for item in results if not item["success"]], ["MAX_HWIDS"]
+        )
+        async with aiosqlite.connect(self.db_path) as verify_db:
+            async with verify_db.execute(
+                "SELECT COUNT(*) FROM hwids WHERE license_id=?", (seeded["license_id"],)
+            ) as cur:
+                self.assertEqual((await cur.fetchone())[0], 1)
+            async with verify_db.execute(
+                "SELECT COUNT(*) FROM sessions WHERE license_id=?", (seeded["license_id"],)
+            ) as cur:
+                self.assertEqual((await cur.fetchone())[0], 1)
+
+    async def test_expired_license_never_allocates_seat_or_session(self):
+        seeded = await self._seed_app()
+        async with aiosqlite.connect(self.db_path) as setup_db:
+            await setup_db.execute(
+                "UPDATE licenses SET max_hwids=1,expires_at='2000-01-01 00:00:00' WHERE id=?",
+                (seeded["license_id"],),
+            )
+            await setup_db.commit()
+
+        async def attempt(hwid: str):
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                req = self._v2_request(seeded["app_id"], {
+                    "version": "1.0.0", "license_key": seeded["license_key"],
+                    "hwid": hwid, "sdk_version": "2.3.0",
+                })
+                response = await self.client.client_login.__wrapped__(
+                    _FakeRequest(path="/api/client/login"), req, db,
+                )
+                return self._verify_v2_response(response, "/api/client/login", req.nonce)
+
+        results = await asyncio.gather(attempt("c" * 64), attempt("d" * 64))
+        self.assertEqual([item["message"] for item in results], ["EXPIRED_KEY", "EXPIRED_KEY"])
+        async with aiosqlite.connect(self.db_path) as verify_db:
+            for table in ("hwids", "sessions"):
+                async with verify_db.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE license_id=?", (seeded["license_id"],)
+                ) as cur:
+                    self.assertEqual((await cur.fetchone())[0], 0)
+
+    async def test_duplicate_nonce_is_atomic_across_connections(self):
+        nonce = uuid.uuid4().hex
+        now = time.time()
+        ready = asyncio.Event()
+        arrived = 0
+        arrival_lock = asyncio.Lock()
+
+        async def consume():
+            nonlocal arrived
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                async with arrival_lock:
+                    arrived += 1
+                    if arrived == 2:
+                        ready.set()
+                await ready.wait()
+                return await self.client._check_and_store_nonce(db, nonce, now)
+
+        outcomes = await asyncio.gather(consume(), consume())
+        self.assertEqual(sorted(outcomes), [False, True])
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("SELECT COUNT(*) FROM request_nonces") as cur:
+                self.assertEqual((await cur.fetchone())[0], 1)
+
+    async def test_replay_survives_module_reload_and_expired_timestamp_is_not_stored(self):
+        seeded = await self._seed_app()
+        request = self._v2_request(seeded["app_id"], {"version": "1.0.0"})
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await self.client.parse_request(request, db, "/api/client/init")
+            await db.rollback()
+
+        sys.modules.pop("routes.client", None)
+        restarted_client = importlib.import_module("routes.client")
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            with self.assertRaises(HTTPException) as replay:
+                await restarted_client.parse_request(request, db, "/api/client/init")
+            self.assertEqual(replay.exception.detail, "REPLAY_ATTACK")
+
+            stale = self._v2_request(seeded["app_id"], {"version": "1.0.0"})
+            stale.ts = int(time.time()) - restarted_client.TIMESTAMP_TOLERANCE - 1
+            with self.assertRaises(HTTPException) as expired:
+                await restarted_client.parse_request(stale, db, "/api/client/init")
+            self.assertEqual(expired.exception.detail, "REPLAY_ATTACK")
+            stale_hash = hashlib.sha256(stale.nonce.encode("utf-8")).hexdigest()
+            async with db.execute(
+                "SELECT COUNT(*) FROM request_nonces WHERE nonce_hash=?", (stale_hash,)
+            ) as cur:
                 self.assertEqual((await cur.fetchone())[0], 0)
 
     async def test_paused_product_does_not_block_an_online_product(self):
