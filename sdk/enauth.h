@@ -19,9 +19,9 @@
 
 namespace enauth {
 
-inline constexpr const char* SDK_VERSION = "2.2.0";
+inline constexpr const char* SDK_VERSION = "2.3.0";
 
-namespace hwid { std::string Collect(); }
+namespace hwid { std::string Collect(); std::string CollectLegacy(); }
 
 
 enum class Status {

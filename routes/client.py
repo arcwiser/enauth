@@ -524,6 +524,7 @@ async def client_login(request: Request, req: EncryptedRequest,
     secret      = app["secret_key"]
     license_key = payload.get("license_key", "").strip().upper()
     hwid        = payload.get("hwid", "").strip()
+    legacy_hwid = payload.get("legacy_hwid", "").strip()
     product_id  = (payload.get("product_id") or "").strip()
     level       = (payload.get("level") or "").strip().lower()
     client_version = (payload.get("version") or (app["version"] if req.protocol == 1 else "")).strip()
@@ -541,6 +542,8 @@ async def client_login(request: Request, req: EncryptedRequest,
     if not is_valid_hwid(hwid):
         await log_action(db, "login_fail", license_key=mask_license_key(license_key), app_id=app["id"],
                          ip=ip, hwid=hwid[:32], details="Invalid HWID format")
+        return enc_resp({"success": False, "message": "INVALID_HWID_FORMAT"}, secret, req.app_id)
+    if legacy_hwid and not is_valid_hwid(legacy_hwid):
         return enc_resp({"success": False, "message": "INVALID_HWID_FORMAT"}, secret, req.app_id)
 
     # ── Fetch license ──
@@ -623,7 +626,7 @@ async def client_login(request: Request, req: EncryptedRequest,
 
     # ── App-specific HWID ban check ──
     async with db.execute(
-        "SELECT reason FROM banned_hwids WHERE hwid = ? AND app_id = ?", (hwid, app["id"])
+        "SELECT reason FROM banned_hwids WHERE hwid IN (?, ?) AND app_id = ?", (hwid, legacy_hwid or hwid, app["id"])
     ) as cur:
         ban_row = await cur.fetchone()
     if ban_row:
@@ -659,6 +662,16 @@ async def client_login(request: Request, req: EncryptedRequest,
         hwid_rows = await cur.fetchall()
 
     known_hashes = [r["hwid_hash"] for r in hwid_rows]
+
+    if (hwid not in known_hashes and legacy_hwid and legacy_hwid in known_hashes and
+            req.protocol == 2 and version_at_least(sdk_version, "2.3.0")):
+        await db.execute(
+            "UPDATE hwids SET hwid_hash=?, last_seen=? WHERE license_id=? AND hwid_hash=?",
+            (hwid, utcnow(), lic["id"], legacy_hwid),
+        )
+        known_hashes = [hwid if value == legacy_hwid else value for value in known_hashes]
+        await log_action(db, "hwid_upgraded_v2", license_key=mask_license_key(license_key),
+                         app_id=app["id"], ip=ip, hwid=hwid, details="Legacy device binding upgraded")
 
     if hwid not in known_hashes:
         if len(known_hashes) >= lic["max_hwids"]:

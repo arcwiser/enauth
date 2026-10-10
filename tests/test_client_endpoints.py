@@ -501,6 +501,27 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
             async with db.execute("SELECT status FROM licenses WHERE id=?", (seeded["license_id"],)) as cur:
                 self.assertEqual((await cur.fetchone())["status"], "banned")
 
+    async def test_sdk_23_upgrades_legacy_hwid_without_consuming_a_slot(self):
+        seeded = await self._seed_app()
+        legacy_hwid, stronger_hwid = "1" * 64, "2" * 64
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("UPDATE licenses SET max_hwids=1 WHERE id=?", (seeded["license_id"],))
+            await db.execute("INSERT INTO hwids(license_id,hwid_hash) VALUES(?,?)", (seeded["license_id"], legacy_hwid))
+            await db.commit()
+            req = self._v2_request(seeded["app_id"], {
+                "version": "1.0.0", "license_key": seeded["license_key"], "hwid": stronger_hwid,
+                "legacy_hwid": legacy_hwid, "sdk_version": "2.3.0",
+            })
+            response = await self.client.client_login.__wrapped__(
+                _FakeRequest(path="/api/client/login"), req, db
+            )
+            payload = self._verify_v2_response(response, "/api/client/login", req.nonce)
+            self.assertTrue(payload["success"])
+            async with db.execute("SELECT hwid_hash FROM hwids WHERE license_id=?", (seeded["license_id"],)) as cur:
+                hashes = [row["hwid_hash"] for row in await cur.fetchall()]
+            self.assertEqual(hashes, [stronger_hwid])
+
     async def test_product_version_policy_blocks_compromised_client(self):
         seeded = await self._seed_app()
         path = "/api/client/login"
