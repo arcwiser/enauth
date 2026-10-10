@@ -49,6 +49,10 @@ int main() {
     static_assert(enauth::CONNECT_TIMEOUT_MS <= 10000, "Connect timeout must remain bounded");
     static_assert(enauth::SEND_TIMEOUT_MS <= 10000, "Send timeout must remain bounded");
     static_assert(enauth::RECEIVE_TIMEOUT_MS <= 15000, "Receive timeout must remain bounded");
+    static_assert(enauth::MAX_API_RESPONSE_BYTES <= 4u * 1024u * 1024u,
+                  "API responses must remain bounded");
+    static_assert(enauth::MAX_DOWNLOAD_RESPONSE_BYTES <= 190u * 1024u * 1024u,
+                  "Download envelopes must remain bounded");
 
     try {
         RequireThrows([] {
@@ -57,9 +61,27 @@ int main() {
         RequireThrows([] {
             enauth::Client client("https://auth.example.com", "app-test", "1.0.0", "not-a-key");
         }, "Invalid response-signing keys must be rejected");
+        RequireThrows([] {
+            enauth::Client client("https://user:pass@auth.example.com", "app-test", "1.0.0", kPublicKey);
+        }, "Credential-bearing server URLs must be rejected");
+        RequireThrows([] {
+            enauth::Client client("https://auth.example.com?redirect=evil", "app-test", "1.0.0", kPublicKey);
+        }, "Ambiguous server URLs must be rejected");
 
         enauth::Client loopback("http://127.0.0.1:8080", "app-test", "1.0.0", kPublicKey);
         enauth::Client client("https://auth.example.com", "app-test", "1.0.0", kPublicKey);
+        const auto invalidLogin = loopback.Login(std::string(enauth::MAX_LICENSE_KEY_BYTES + 1, 'A'));
+        Require(!invalidLogin.success && invalidLogin.message == "INVALID_INPUT",
+                "Oversized login input must be rejected before networking");
+        const auto uninitializedLogin = loopback.Login("VALID-LENGTH-KEY");
+        Require(!uninitializedLogin.success && uninitializedLogin.message == "NOT_INITIALIZED",
+                "Login must fail closed until initialization succeeds");
+        Require(!loopback.GetNews().success,
+                "Public SDK operations must respect initialization state");
+        Require(loopback.DownloadFile(std::string(enauth::MAX_RESOURCE_NAME_BYTES + 1, 'A')).empty(),
+                "Oversized download names must be rejected before networking");
+        Require(loopback.ValidateSession().status == enauth::Status::SessionExpired,
+                "Session operations must fail closed before login");
         const std::string decoded = client.TestDecryptResponseAt(
             Envelope(), kEndpoint, kNonce, 2000000030);
         Require(decoded == "{\"success\":true,\"message\":\"OK\"}",

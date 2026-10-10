@@ -19,11 +19,16 @@
 
 namespace enauth {
 
-inline constexpr const char* SDK_VERSION = "2.4.0";
+inline constexpr const char* SDK_VERSION = "2.5.0";
 inline constexpr int RESOLVE_TIMEOUT_MS = 10000;
 inline constexpr int CONNECT_TIMEOUT_MS = 10000;
 inline constexpr int SEND_TIMEOUT_MS = 10000;
 inline constexpr int RECEIVE_TIMEOUT_MS = 15000;
+inline constexpr size_t MAX_API_RESPONSE_BYTES = 4u * 1024u * 1024u;
+inline constexpr size_t MAX_DOWNLOAD_RESPONSE_BYTES = 190u * 1024u * 1024u;
+inline constexpr size_t MAX_LICENSE_KEY_BYTES = 256;
+inline constexpr size_t MAX_RESOURCE_NAME_BYTES = 255;
+inline constexpr size_t MAX_PRODUCT_VALUE_BYTES = 128;
 
 namespace hwid { std::string Collect(); std::string CollectPrevious(); std::string CollectLegacy(); }
 
@@ -211,6 +216,7 @@ private:
     void EncryptStore(std::vector<unsigned char>& target, const std::string& source);
     std::string DecryptField(const std::vector<unsigned char>& field) const;
     std::string GetMemoryKey() const;
+    void ClearSessionState();
 
     std::atomic<bool> m_initialized{false};
     std::atomic<bool> m_logged_in{false};

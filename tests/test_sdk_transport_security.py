@@ -27,6 +27,10 @@ class SdkTransportSecurityTests(unittest.TestCase):
         self.assertIn("WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2", self.source)
         self.assertIn("WinHttpSetTimeouts", self.source)
         self.assertIn("if (!WinHttpSetTimeouts", self.source)
+        self.assertIn("WINHTTP_ENABLE_SSL_REVOCATION", self.source)
+        self.assertIn("WINHTTP_OPTION_REDIRECT_POLICY_NEVER", self.source)
+        self.assertIn("WINHTTP_QUERY_CONTENT_LENGTH", self.source)
+        self.assertIn("if (!WinHttpQueryDataAvailable", self.source)
 
 
 if __name__ == "__main__":

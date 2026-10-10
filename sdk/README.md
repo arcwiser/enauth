@@ -280,6 +280,11 @@ strict TLS validation, persistent replay protection, asymmetric response
 verification, and encrypted session storage are performed automatically inside
 the SDK rather than called separately by application code.
 
+SDK 2.5 additionally enables TLS certificate-revocation checks, rejects redirects
+and ambiguous base URLs, fails on partial HTTP reads, enforces response and input
+size limits, requires successful initialization before login, and clears cached
+session state whenever validation can no longer be proven.
+
 ### Protocol 2 migration for existing installations
 
 New installations reject protocol 1 by default. For an existing installation

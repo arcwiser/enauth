@@ -129,14 +129,30 @@ static bool IsAllowedServerUrl(const std::string& value) {
     wchar_t hostBuffer[256]{};
     parts.lpszHostName = hostBuffer;
     parts.dwHostNameLength = 256;
+    parts.dwUserNameLength = static_cast<DWORD>(-1);
+    parts.dwPasswordLength = static_cast<DWORD>(-1);
+    parts.dwExtraInfoLength = static_cast<DWORD>(-1);
     std::wstring wideValue(value.begin(), value.end());
     if (!WinHttpCrackUrl(wideValue.c_str(), 0, 0, &parts)) return false;
+    if (parts.dwUserNameLength || parts.dwPasswordLength || parts.dwExtraInfoLength) return false;
     std::wstring host(hostBuffer, parts.dwHostNameLength);
     std::transform(host.begin(), host.end(), host.begin(), ::towlower);
     if (parts.nScheme == INTERNET_SCHEME_HTTPS) return true;
     return parts.nScheme == INTERNET_SCHEME_HTTP &&
         (host == L"localhost" || host == L"127.0.0.1" || host == L"::1");
 }
+
+class WinHttpHandle final {
+public:
+    explicit WinHttpHandle(HINTERNET value = nullptr) : value_(value) {}
+    ~WinHttpHandle() { if (value_) WinHttpCloseHandle(value_); }
+    WinHttpHandle(const WinHttpHandle&) = delete;
+    WinHttpHandle& operator=(const WinHttpHandle&) = delete;
+    HINTERNET get() const { return value_; }
+    explicit operator bool() const { return value_ != nullptr; }
+private:
+    HINTERNET value_;
+};
 
 // ─── WinHTTP POST ────────────────────────────────────────────────────────────
 
@@ -164,13 +180,12 @@ std::string Client::Post(const std::string& endpoint, const std::string& body) {
     if (!https && !(localhost && comps.nScheme == INTERNET_SCHEME_HTTP))
         throw std::runtime_error(OBFUSCATE("HTTPS is required for non-local EnAuth servers"));
 
-    HINTERNET hSession = WinHttpOpen(W_OBFUSCATE(L"EnAuth/1.0").c_str(),
-        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    WinHttpHandle hSession(WinHttpOpen(W_OBFUSCATE(L"EnAuth/2.5").c_str(),
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
     if (!hSession) throw std::runtime_error(OBFUSCATE("WinHttpOpen failed"));
 
-    if (!WinHttpSetTimeouts(hSession, RESOLVE_TIMEOUT_MS, CONNECT_TIMEOUT_MS,
+    if (!WinHttpSetTimeouts(hSession.get(), RESOLVE_TIMEOUT_MS, CONNECT_TIMEOUT_MS,
                             SEND_TIMEOUT_MS, RECEIVE_TIMEOUT_MS)) {
-        WinHttpCloseHandle(hSession);
         throw std::runtime_error(OBFUSCATE("Cannot configure network timeouts"));
     }
     if (https) {
@@ -178,34 +193,34 @@ std::string Client::Post(const std::string& endpoint, const std::string& body) {
 #ifdef WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3
         secureProtocols |= WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
 #endif
-        if (!WinHttpSetOption(hSession, WINHTTP_OPTION_SECURE_PROTOCOLS,
+        if (!WinHttpSetOption(hSession.get(), WINHTTP_OPTION_SECURE_PROTOCOLS,
                               &secureProtocols, sizeof(secureProtocols))) {
-            WinHttpCloseHandle(hSession);
             throw std::runtime_error(OBFUSCATE("Cannot enforce modern TLS"));
         }
     }
 
-    HINTERNET hConnect = WinHttpConnect(hSession, wHost, comps.nPort, 0);
+    WinHttpHandle hConnect(WinHttpConnect(hSession.get(), wHost, comps.nPort, 0));
     if (!hConnect) {
-        WinHttpCloseHandle(hSession);
         throw std::runtime_error(OBFUSCATE("WinHttpConnect failed"));
     }
-    HINTERNET hReq     = WinHttpOpenRequest(hConnect, W_OBFUSCATE(L"POST").c_str(), wPath,
+    WinHttpHandle hReq(WinHttpOpenRequest(hConnect.get(), W_OBFUSCATE(L"POST").c_str(), wPath,
         nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-        https ? WINHTTP_FLAG_SECURE : 0);
+        https ? WINHTTP_FLAG_SECURE : 0));
     if (!hReq) {
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
         throw std::runtime_error(OBFUSCATE("WinHttpOpenRequest failed"));
     }
 
     DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
-    if (!WinHttpSetOption(hReq, WINHTTP_OPTION_REDIRECT_POLICY,
+    if (!WinHttpSetOption(hReq.get(), WINHTTP_OPTION_REDIRECT_POLICY,
                          &redirectPolicy, sizeof(redirectPolicy))) {
-        WinHttpCloseHandle(hReq);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
         throw std::runtime_error("Cannot disable HTTP redirects");
+    }
+    if (https) {
+        DWORD enabledFeature = WINHTTP_ENABLE_SSL_REVOCATION;
+        if (!WinHttpSetOption(hReq.get(), WINHTTP_OPTION_ENABLE_FEATURE,
+                              &enabledFeature, sizeof(enabledFeature))) {
+            throw std::runtime_error(OBFUSCATE("Cannot enable certificate revocation checks"));
+        }
     }
 
 #ifdef ENAUTH_ENABLE_ANTI_DEBUG
@@ -214,30 +229,39 @@ std::string Client::Post(const std::string& endpoint, const std::string& body) {
 
     LPCWSTR hdrs = L"Content-Type: application/json";
     std::string response;
-    bool requestOk = WinHttpSendRequest(hReq, hdrs, (DWORD)-1,
+    bool requestOk = WinHttpSendRequest(hReq.get(), hdrs, (DWORD)-1,
                            (LPVOID)body.c_str(), (DWORD)body.size(),
                            (DWORD)body.size(), 0) &&
-        WinHttpReceiveResponse(hReq, nullptr);
+        WinHttpReceiveResponse(hReq.get(), nullptr);
     if (requestOk) {
         DWORD statusCode = 0;
         DWORD statusSize = sizeof(statusCode);
-        WinHttpQueryHeaders(hReq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        if (!WinHttpQueryHeaders(hReq.get(), WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                             WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize,
-                            WINHTTP_NO_HEADER_INDEX);
-        DWORD avail = 0;
-        while (WinHttpQueryDataAvailable(hReq, &avail) && avail > 0) {
-            // Download content is base64 inside a second base64 signed envelope.
-            const size_t limit = endpoint == "/api/client/download" ?
-                190u * 1024u * 1024u : 4u * 1024u * 1024u;
-            if (avail > limit - response.size()) {
-                WinHttpCloseHandle(hReq);
-                WinHttpCloseHandle(hConnect);
-                WinHttpCloseHandle(hSession);
+                            WINHTTP_NO_HEADER_INDEX)) {
+            throw std::runtime_error(OBFUSCATE("Missing HTTP status"));
+        }
+        const size_t limit = endpoint == "/api/client/download" ?
+            MAX_DOWNLOAD_RESPONSE_BYTES : MAX_API_RESPONSE_BYTES;
+        DWORD contentLength = 0;
+        DWORD contentLengthSize = sizeof(contentLength);
+        if (WinHttpQueryHeaders(hReq.get(), WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
+                                WINHTTP_HEADER_NAME_BY_INDEX, &contentLength, &contentLengthSize,
+                                WINHTTP_NO_HEADER_INDEX) && contentLength > limit) {
+            throw std::runtime_error(OBFUSCATE("Server response exceeded size limit"));
+        }
+        while (true) {
+            DWORD avail = 0;
+            if (!WinHttpQueryDataAvailable(hReq.get(), &avail))
+                throw std::runtime_error(OBFUSCATE("Failed while reading server response"));
+            if (avail == 0) break;
+            if (response.size() > limit || avail > limit - response.size()) {
                 throw std::runtime_error(OBFUSCATE("Server response exceeded size limit"));
             }
             std::string chunk(avail, '\0');
             DWORD read = 0;
-            if (!WinHttpReadData(hReq, &chunk[0], avail, &read)) break;
+            if (!WinHttpReadData(hReq.get(), &chunk[0], avail, &read) || read == 0)
+                throw std::runtime_error(OBFUSCATE("Failed while reading server response"));
             response.append(chunk.data(), read);
         }
         if (statusCode < 200 || statusCode >= 300) {
@@ -245,9 +269,6 @@ std::string Client::Post(const std::string& endpoint, const std::string& body) {
         }
     }
 
-    WinHttpCloseHandle(hReq);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
     if (!requestOk || response.empty())
         throw std::runtime_error(OBFUSCATE("EnAuth request failed"));
     return response;
@@ -436,11 +457,24 @@ Client::~Client() {
     wipe(m_enc_app_id);
     wipe(m_enc_version);
     wipe(m_enc_response_public_key);
+    ClearSessionState();
+    wipe(m_enc_memory_key);
+    m_xor_key = 0;
+}
+
+void Client::ClearSessionState() {
+    auto wipe = [](std::vector<unsigned char>& value) {
+        if (!value.empty()) SecureZeroMemory(value.data(), value.size());
+        value.clear();
+    };
     wipe(m_enc_token);
     wipe(m_enc_license_key);
     wipe(m_enc_expires_at);
-    wipe(m_enc_memory_key);
-    m_xor_key = 0;
+    for (auto& item : m_variables) {
+        if (!item.second.empty()) SecureZeroMemory(item.second.data(), item.second.size());
+    }
+    m_variables.clear();
+    m_logged_in = false;
 }
 
 std::string Client::GetHwid() const { return hwid::Collect(); }
@@ -449,6 +483,8 @@ InitResult Client::Init() {
     std::lock_guard<std::recursive_mutex> lock(m_request_mutex);
     SecurityCheck();
     InitResult result;
+    m_initialized = false;
+    ClearSessionState();
     try {
         std::string ver = GetVersion();
         std::string payload = std::string("{") + JsonStr(OBFUSCATE("version"), ver) + "," +
@@ -474,6 +510,7 @@ InitResult Client::Init() {
         result.success = false;
         result.status  = Status::NetworkError;
         result.message = e.what();
+        ClearSessionState();
     }
     return result;
 }
@@ -483,6 +520,18 @@ LoginResult Client::Login(const std::string& license_key,
                            const std::string& level) {
     std::lock_guard<std::recursive_mutex> lock(m_request_mutex);
     LoginResult result;
+    ClearSessionState();
+    if (license_key.empty() || license_key.size() > MAX_LICENSE_KEY_BYTES ||
+        product_id.size() > MAX_PRODUCT_VALUE_BYTES || level.size() > MAX_PRODUCT_VALUE_BYTES) {
+        result.status = Status::InvalidKey;
+        result.message = OBFUSCATE("INVALID_INPUT");
+        return result;
+    }
+    if (!m_initialized) {
+        result.status = Status::ServerError;
+        result.message = OBFUSCATE("NOT_INITIALIZED");
+        return result;
+    }
     try {
         std::string hw = hwid::Collect();
         std::string previousHwid = hwid::CollectPrevious();
@@ -556,6 +605,7 @@ LoginResult Client::Login(const std::string& license_key,
         result.success = false;
         result.status  = Status::NetworkError;
         result.message = e.what();
+        ClearSessionState();
     }
     return result;
 }
@@ -563,6 +613,11 @@ LoginResult Client::Login(const std::string& license_key,
 NewsResult Client::GetNews() {
     std::lock_guard<std::recursive_mutex> lock(m_request_mutex);
     NewsResult result;
+    if (!m_initialized) {
+        result.status = Status::ServerError;
+        result.message = OBFUSCATE("NOT_INITIALIZED");
+        return result;
+    }
     try {
         const std::string endpoint = OBFUSCATE("/api/client/news");
         std::string nonce;
@@ -602,6 +657,11 @@ NewsResult Client::GetNews() {
 SimpleResult Client::Heartbeat() {
     std::lock_guard<std::recursive_mutex> lock(m_request_mutex);
     SimpleResult result;
+    if (!m_logged_in) {
+        result.status = Status::SessionExpired;
+        result.message = OBFUSCATE("SESSION_EXPIRED");
+        return result;
+    }
     try {
         std::string token = GetSessionToken();
         std::string payload = std::string("{") + JsonStr(OBFUSCATE("token"), token) + "," +
@@ -617,11 +677,12 @@ SimpleResult Client::Heartbeat() {
         result.status   = MessageToStatus(result.message);
         const std::string rotatedToken = JsonGet(dec, OBFUSCATE("token"));
         if (result.success && !rotatedToken.empty()) EncryptStore(m_enc_token, rotatedToken);
-        if (!result.success) m_logged_in = false;
+        if (!result.success) ClearSessionState();
     } catch (const std::exception& e) {
         result.success = false;
         result.status  = Status::NetworkError;
         result.message = e.what();
+        ClearSessionState();
     }
     return result;
 }
@@ -629,6 +690,12 @@ SimpleResult Client::Heartbeat() {
 SimpleResult Client::Logout() {
     std::lock_guard<std::recursive_mutex> lock(m_request_mutex);
     SimpleResult result;
+    if (!m_logged_in) {
+        ClearSessionState();
+        result.status = Status::SessionExpired;
+        result.message = OBFUSCATE("SESSION_EXPIRED");
+        return result;
+    }
     try {
         std::string token = GetSessionToken();
         std::string payload = std::string("{") + JsonStr(OBFUSCATE("token"), token) + "," +
@@ -643,16 +710,18 @@ SimpleResult Client::Logout() {
         result.message  = JsonGet(dec, OBFUSCATE("message"));
         result.status   = MessageToStatus(result.message);
     } catch (...) {}
-    m_logged_in = false;
-    m_enc_token.clear();
-    m_enc_license_key.clear();
-    m_enc_expires_at.clear();
+    ClearSessionState();
     return result;
 }
 
 SimpleResult Client::ValidateSession() {
     std::lock_guard<std::recursive_mutex> lock(m_request_mutex);
     SimpleResult result;
+    if (!m_logged_in) {
+        result.status = Status::SessionExpired;
+        result.message = OBFUSCATE("SESSION_EXPIRED");
+        return result;
+    }
     try {
         std::string token = GetSessionToken();
         std::string payload = std::string("{") + JsonStr(OBFUSCATE("token"), token) + "," +
@@ -668,16 +737,19 @@ SimpleResult Client::ValidateSession() {
         result.status   = MessageToStatus(result.message);
         const std::string rotatedToken = JsonGet(dec, OBFUSCATE("token"));
         if (result.success && !rotatedToken.empty()) EncryptStore(m_enc_token, rotatedToken);
+        if (!result.success) ClearSessionState();
     } catch (const std::exception& e) {
         result.success = false;
         result.status  = Status::NetworkError;
         result.message = e.what();
+        ClearSessionState();
     }
     return result;
 }
 
 std::vector<unsigned char> Client::DownloadFile(const std::string& name) {
     std::lock_guard<std::recursive_mutex> lock(m_request_mutex);
+    if (!m_logged_in || name.empty() || name.size() > MAX_RESOURCE_NAME_BYTES) return {};
     SecurityCheck();
     try {
         std::string token = GetSessionToken();
@@ -768,7 +840,8 @@ std::vector<unsigned char> Client::DownloadFile(const std::string& name) {
 
 bool Client::AutoUpdateLoader(const std::string& name, const std::string& currentVersion) {
     std::lock_guard<std::recursive_mutex> lock(m_request_mutex);
-    if (!m_logged_in || name.empty() || currentVersion.empty()) return false;
+    if (!m_logged_in || name.empty() || name.size() > MAX_RESOURCE_NAME_BYTES ||
+        currentVersion.empty() || currentVersion.size() > MAX_PRODUCT_VALUE_BYTES) return false;
     try {
         std::string token = GetSessionToken();
         std::string hwid = GetHwid();
