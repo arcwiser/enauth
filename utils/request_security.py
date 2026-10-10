@@ -24,12 +24,19 @@ def resolve_client_ip(peer_ip: str, forwarded_for: str | None = None) -> str:
     networks = _trusted_proxy_networks()
     if os.getenv("TRUST_PROXY_HEADERS", "false").lower() != "true" or not any(peer in n for n in networks):
         return str(peer)
+    if not forwarded_for:
+        return str(peer)
     chain = []
-    for value in (forwarded_for or "").split(","):
+    for value in forwarded_for.split(","):
+        value = value.strip()
+        if not value:
+            return str(peer)
         try:
-            chain.append(ipaddress.ip_address(value.strip()))
+            chain.append(ipaddress.ip_address(value))
         except ValueError:
-            continue
+            # A partially valid forwarding chain is ambiguous. Ignore the
+            # entire header instead of letting an attacker influence identity.
+            return str(peer)
     chain.append(peer)
     for address in reversed(chain):
         if not any(address in network for network in networks):

@@ -12,7 +12,6 @@ from pydantic import BaseModel, Field, model_validator
 import json
 import aiosqlite
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 
 from database import get_db
 from utils.crypto import (
@@ -25,9 +24,6 @@ from utils.crypto import (
 from utils.response_signing import sign_response
 from utils.logger import log_action
 from utils.request_security import resolve_client_ip
-
-limiter = Limiter(key_func=get_remote_address)
-router = APIRouter(prefix="/api/client", tags=["client"])
 
 # ─── Security Constants ───────────────────────────────────────────────────────
 import os
@@ -95,6 +91,12 @@ class EncryptedRequest(BaseModel):
 def get_ip(request: Request) -> str:
     return resolve_client_ip(request.client.host if request.client else "unknown",
                              request.headers.get("X-Forwarded-For"))
+
+
+# Authentication decisions, audit records, and rate limits must use exactly
+# the same trusted identity. SlowAPI calls this function for its bucket key.
+limiter = Limiter(key_func=get_ip)
+router = APIRouter(prefix="/api/client", tags=["client"])
 
 
 def generate_device_fingerprint(request: Request, hwid: str) -> str:
