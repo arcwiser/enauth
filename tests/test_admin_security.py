@@ -492,6 +492,141 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(await self.admin.list_download_violations(app_id="app-v", limit=100, user=caller, db=db), [])
 
+    async def test_cross_tenant_resources_are_invisible_and_immutable(self):
+        tenant_a = {"id": "tenant-a", "username": "tenant-a", "role": "owner", "_source": "auth_users"}
+        tenant_b = {"id": "tenant-b", "username": "tenant-b", "role": "owner", "_source": "auth_users"}
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            for tenant in (tenant_a, tenant_b):
+                await db.execute(
+                    "INSERT INTO auth_users(id,username,password_hash,role) VALUES(?,?,?,?)",
+                    (tenant["id"], tenant["username"], "hash", "owner"),
+                )
+            await db.execute(
+                "INSERT INTO applications(id,name,secret_key,owner_user_id) VALUES(?,?,?,?)",
+                ("app-a", "Tenant A App", "a" * 64, tenant_a["id"]),
+            )
+            await db.execute(
+                "INSERT INTO applications(id,name,secret_key,owner_user_id) VALUES(?,?,?,?)",
+                ("app-b", "Tenant B App", "b" * 64, tenant_b["id"]),
+            )
+            await db.execute("INSERT INTO products(id,app_id,name,level) VALUES(?,?,?,?)",
+                             ("product-a", "app-a", "A Product", "a"))
+            await db.execute("INSERT INTO products(id,app_id,name,level) VALUES(?,?,?,?)",
+                             ("product-b", "app-b", "B Product", "b"))
+            await db.execute("INSERT INTO licenses(id,key,key_hash,app_id) VALUES(?,?,?,?)",
+                             ("license-a", "A…KEY", "1" * 64, "app-a"))
+            await db.execute("INSERT INTO licenses(id,key,key_hash,app_id) VALUES(?,?,?,?)",
+                             ("license-b", "B…KEY", "2" * 64, "app-b"))
+            await db.execute(
+                "INSERT INTO app_files(id,app_id,name,content) VALUES(?,?,?,?)",
+                ("file-a", "app-a", "a.bin", b"a"),
+            )
+            await db.execute(
+                "INSERT INTO app_files(id,app_id,name,content) VALUES(?,?,?,?)",
+                ("file-b", "app-b", "b.bin", b"b"),
+            )
+            await db.execute(
+                """INSERT INTO sessions(id,token,license_id,hwid,ip,app_id,expires_at)
+                   VALUES(?,?,?,?,?,?,datetime('now','+1 hour'))""",
+                ("session-a", "token-a", "license-a", "a" * 64, "127.0.0.1", "app-a"),
+            )
+            await db.execute(
+                """INSERT INTO sessions(id,token,license_id,hwid,ip,app_id,expires_at)
+                   VALUES(?,?,?,?,?,?,datetime('now','+1 hour'))""",
+                ("session-b", "token-b", "license-b", "b" * 64, "127.0.0.2", "app-b"),
+            )
+            await db.execute("INSERT INTO logs(app_id,action,details) VALUES(?,?,?)",
+                             ("app-a", "tenant_a_event", "private-a"))
+            await db.execute("INSERT INTO logs(app_id,action,details) VALUES(?,?,?)",
+                             ("app-b", "tenant_b_event", "private-b"))
+            await db.execute(
+                "INSERT INTO resellers(id,username,password_hash,owner_user_id) VALUES(?,?,?,?)",
+                ("reseller-a", "reseller-a", "hash", tenant_a["id"]),
+            )
+            await db.execute(
+                "INSERT INTO resellers(id,username,password_hash,owner_user_id) VALUES(?,?,?,?)",
+                ("reseller-b", "reseller-b", "hash", tenant_b["id"]),
+            )
+            await db.execute(
+                "INSERT INTO device_fingerprints(id,license_id,fingerprint) VALUES(?,?,?)",
+                ("device-b", "license-b", "fingerprint-b"),
+            )
+            await db.commit()
+
+            apps = await self.admin.list_apps(user=tenant_a, db=db)
+            products = await self.admin.list_products(user=tenant_a, db=db)
+            licenses = await self.admin.list_licenses(user=tenant_a, db=db)
+            files = await self.admin.list_files(user=tenant_a, db=db)
+            sessions = await self.admin.list_sessions(user=tenant_a, db=db)
+            logs = await self.admin.list_logs(user=tenant_a, db=db)
+            resellers = await self.admin.list_resellers(user=tenant_a, db=db)
+
+            self.assertEqual({row["id"] for row in apps}, {"app-a"})
+            self.assertEqual({row["id"] for row in products}, {"product-a"})
+            self.assertEqual({row["id"] for row in licenses}, {"license-a"})
+            self.assertEqual({row["id"] for row in files}, {"file-a"})
+            self.assertEqual({row["id"] for row in sessions}, {"session-a"})
+            self.assertEqual({row["action"] for row in logs}, {"tenant_a_event"})
+            self.assertEqual({row["id"] for row in resellers}, {"reseller-a"})
+
+            async def assert_hidden(awaitable):
+                with self.assertRaises(HTTPException) as error:
+                    await awaitable
+                self.assertEqual(error.exception.status_code, 404)
+
+            await assert_hidden(self.admin.regen_secret("app-b", user=tenant_a, db=db))
+            await assert_hidden(self.admin.update_app(
+                "app-b", self.admin.UpdateAppBody(name="stolen"), user=tenant_a, db=db,
+            ))
+            await assert_hidden(self.admin.ban_license("license-b", user=tenant_a, db=db))
+            await assert_hidden(self.admin.update_file_visibility(
+                "file-b", self.admin.FileVisibilityBody(portal_visible=True), user=tenant_a, db=db,
+            ))
+            await assert_hidden(self.admin.reseller_ban_key(
+                "license-b", reseller={"id": "reseller-a"}, db=db,
+            ))
+            await assert_hidden(self.admin.portal_name_device(
+                "device-b", self.admin.PortalDeviceNameBody(name="stolen"),
+                lic={"id": "license-a"}, db=db,
+            ))
+
+            async with db.execute("SELECT name,secret_key FROM applications WHERE id='app-b'") as cur:
+                foreign_app = await cur.fetchone()
+            async with db.execute("SELECT status FROM licenses WHERE id='license-b'") as cur:
+                foreign_license = await cur.fetchone()
+            async with db.execute("SELECT portal_visible FROM app_files WHERE id='file-b'") as cur:
+                foreign_file = await cur.fetchone()
+            self.assertEqual((foreign_app["name"], foreign_app["secret_key"]), ("Tenant B App", "b" * 64))
+            self.assertEqual(foreign_license["status"], "active")
+            self.assertEqual(foreign_file["portal_visible"], 0)
+
+    async def test_tenant_cannot_search_admin_identities_or_global_health(self):
+        tenant = {"id": "tenant-a", "username": "tenant-a", "role": "owner", "_source": "auth_users"}
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("INSERT INTO admin_users(id,username,password_hash,role) VALUES(?,?,?,?)",
+                             ("global-admin", "global-secret-admin", "hash", "owner"))
+            await db.commit()
+            result = await self.admin.global_search(
+                query="global-secret-admin", category="users", limit=20, offset=0,
+                user=tenant, db=db,
+            )
+            self.assertEqual(result["items"], [])
+            with self.assertRaises(HTTPException) as activity_error:
+                await self.admin.activity_timeline(
+                    "user", "global-admin", user=tenant, db=db,
+                )
+            self.assertEqual(activity_error.exception.status_code, 403)
+            with self.assertRaises(HTTPException) as health_error:
+                await self.admin.require_owner(tenant)
+            self.assertEqual(health_error.exception.status_code, 403)
+            health_route = next(
+                route for route in self.admin.router.routes
+                if getattr(route, "path", None) == "/api/admin/operations/health"
+            )
+            self.assertIn(self.admin.require_owner, [dependency.call for dependency in health_route.dependant.dependencies])
+
 
 if __name__ == "__main__":
     unittest.main()

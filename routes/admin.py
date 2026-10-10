@@ -1842,7 +1842,7 @@ async def security_control_center(user=Depends(require_admin), db: aiosqlite.Con
 
 
 @router.get("/operations/health")
-async def operations_health(user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
+async def operations_health(user=Depends(require_owner), db: aiosqlite.Connection = Depends(get_db)):
     started = time.perf_counter()
     async with db.execute("SELECT 1") as cur:
         await cur.fetchone()
@@ -3343,7 +3343,8 @@ async def global_search(query: str,
             params.append(owner_id)
         items.extend(await fetch(sql + " ORDER BY l.created_at DESC LIMIT ?", tuple(params + [max_bucket])))
 
-    if category in (None, "users"):
+    # Administrative identities are global control-plane data, not tenant data.
+    if category in (None, "users") and user.get("_source") == "admin_users" and user.get("role") == "owner":
         sql = """SELECT u.id as entity_id, u.username as title, u.role as subtitle, u.created_at,
                         NULL as app_name, 'user' as entity_type,
                         u.role as details,
@@ -3468,6 +3469,7 @@ async def activity_timeline(entity_type: str, entity_id: str,
             return {"items": rows_to_list(await cur.fetchall()), "entity_type": entity_type, "entity_id": entity_id}
 
     if entity_type == "user":
+        require_panel_owner(user)
         sql = """SELECT lg.* FROM logs lg
                  WHERE lg.details LIKE ? OR lg.details LIKE ?"""
         async with db.execute(sql + " ORDER BY timestamp DESC LIMIT ? OFFSET ?", (f"%{entity_id}%", f"%{entity_id}%", limit, offset)) as cur:
@@ -3563,7 +3565,10 @@ async def update_app(app_id: str, body: UpdateAppBody, user=Depends(require_admi
     if owner_id:
         sql += " AND owner_user_id = ?"
         args.append(owner_id)
-    await db.execute(sql, args)
+    cursor = await db.execute(sql, args)
+    if cursor.rowcount != 1:
+        await db.rollback()
+        raise HTTPException(404, "App not found")
     await db.commit()
     return {"ok": True}
 
@@ -3573,9 +3578,12 @@ async def delete_app(app_id: str, user=Depends(require_admin),
                      db: aiosqlite.Connection = Depends(get_db)):
     owner_id = auth_owner_id(user)
     if owner_id:
-        await db.execute("DELETE FROM applications WHERE id=? AND owner_user_id = ?", (app_id, owner_id))
+        cursor = await db.execute("DELETE FROM applications WHERE id=? AND owner_user_id = ?", (app_id, owner_id))
     else:
-        await db.execute("DELETE FROM applications WHERE id=?", (app_id,))
+        cursor = await db.execute("DELETE FROM applications WHERE id=?", (app_id,))
+    if cursor.rowcount != 1:
+        await db.rollback()
+        raise HTTPException(404, "App not found")
     await db.commit()
     return {"ok": True}
 
@@ -3601,12 +3609,9 @@ async def bulk_delete_apps(body: BulkIdsBody, user=Depends(require_admin),
 @router.post("/apps/{app_id}/regenerate-secret")
 async def regen_secret(app_id: str, user=Depends(require_admin),
                        db: aiosqlite.Connection = Depends(get_db)):
+    await _owned_app(app_id, auth_owner_id(user), db)
     new_secret = generate_app_secret()
-    owner_id = auth_owner_id(user)
-    if owner_id:
-        await db.execute("UPDATE applications SET secret_key=? WHERE id=? AND owner_user_id = ?", (new_secret, app_id, owner_id))
-    else:
-        await db.execute("UPDATE applications SET secret_key=? WHERE id=?", (new_secret, app_id))
+    await db.execute("UPDATE applications SET secret_key=? WHERE id=?", (new_secret, app_id))
     await db.commit()
     return {"secret_key": new_secret}
 
