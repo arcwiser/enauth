@@ -18,6 +18,8 @@ except ImportError:
 load_dotenv(Path(__file__).parent / ".env")
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -39,6 +41,7 @@ from utils.response_signing import ensure_response_signing_key, response_public_
 from utils.request_limits import RequestBodyLimitMiddleware
 from utils.runtime_metrics import record as record_request_metric
 from utils.request_security import csrf_origin_allowed
+from utils.api_errors import safe_http_exception, safe_validation_exception, safe_unhandled_exception
 
 # ─── Lifespan ────────────────────────────────────────────────────────────────
 
@@ -140,6 +143,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.add_exception_handler(StarletteHTTPException, safe_http_exception)
+app.add_exception_handler(RequestValidationError, safe_validation_exception)
+app.add_exception_handler(Exception, safe_unhandled_exception)
 
 app.add_middleware(
     RequestBodyLimitMiddleware,

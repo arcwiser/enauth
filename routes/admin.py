@@ -25,7 +25,7 @@ from routes.client import limiter
 from utils.crypto import (
     generate_license_key, generate_app_secret,
     generate_session_token, generate_uid,
-    hash_password, verify_password,
+    hash_password, verify_password, verify_password_constant_time,
     hash_license_key, mask_license_key, encrypt_license_key, display_license_key, encrypt_bytes,
     license_lookup_hashes, current_license_lookup_key_id,
 )
@@ -370,7 +370,10 @@ async def admin_login(response: Response, request: Request = None, body: LoginBo
         user = await cur.fetchone()
     # Security: use a constant-time generic error to prevent username enumeration.
     # An attacker must not be able to tell whether the username or password was wrong.
-    if not user or not verify_password(body.password, user["password_hash"]):
+    password_valid = verify_password_constant_time(
+        body.password, user["password_hash"] if user else None
+    )
+    if not user or not password_valid:
         raise HTTPException(401, "Invalid credentials")
 
     # 2FA Check
@@ -1278,7 +1281,10 @@ async def revoke_reseller_pricing(reseller_id: str, pricing_point_id: str, user=
 async def reseller_signin(request: Request, body: LoginBody, db: aiosqlite.Connection = Depends(get_db)):
     async with db.execute("SELECT * FROM resellers WHERE username = ? AND is_active = 1", (body.username,)) as cur:
         reseller = await cur.fetchone()
-    if not reseller or not verify_password(body.password, reseller["password_hash"]):
+    password_valid = verify_password_constant_time(
+        body.password, reseller["password_hash"] if reseller else None
+    )
+    if not reseller or not password_valid:
         raise HTTPException(401, "Invalid reseller credentials")
     token = generate_session_token()
     await db.execute(
@@ -4646,6 +4652,9 @@ async def portal_login(request: Request = None, body: PortalLoginBody = None, db
         lic = await cur.fetchone()
 
     # Security: use a generic error to prevent username enumeration via portal.
+    password_valid = verify_password_constant_time(
+        body.password, lic["client_password_hash"] if lic else None
+    )
     if not lic:
         raise HTTPException(401, "Invalid credentials")
 
@@ -4654,7 +4663,7 @@ async def portal_login(request: Request = None, body: PortalLoginBody = None, db
     if lic["login_strikes"] >= MAX_LOGIN_STRIKES:
         raise HTTPException(403, "Account locked due to too many failed attempts")
 
-    if not verify_password(body.password, lic["client_password_hash"]):
+    if not password_valid:
         await db.execute("UPDATE licenses SET login_strikes = login_strikes + 1 WHERE id = ?", (lic["id"],))
         await db.commit()
         raise HTTPException(401, "Invalid credentials")

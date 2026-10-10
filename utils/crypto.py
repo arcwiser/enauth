@@ -305,6 +305,20 @@ def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
 
 
+_DUMMY_PASSWORD_HASH = "$2b$12$sdzJF97gQQ/es0bk6xUQVOZNX7T/ldjKG.ISDc2b8TyeTHrI/Nai6"
+
+
+def verify_password_constant_time(password: str, hashed: str | None) -> bool:
+    """Always perform a bcrypt check so missing accounts do not create a timing oracle."""
+    candidate = hashed or _DUMMY_PASSWORD_HASH
+    try:
+        valid = verify_password(password, candidate)
+    except (TypeError, ValueError):
+        verify_password(password, _DUMMY_PASSWORD_HASH)
+        return False
+    return bool(hashed) and valid
+
+
 # ─── HWID Validation ─────────────────────────────────────────────────────────
 
 def is_valid_hwid(hwid: str) -> bool:
