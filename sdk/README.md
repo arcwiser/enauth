@@ -200,7 +200,7 @@ credentials in the client.
 
 ## HWID Collection
 
-SDK 2.3 builds a versioned device fingerprint from the SMBIOS system UUID,
+SDK 2.4 builds a versioned device fingerprint from the SMBIOS system UUID,
 physical-drive serial, Windows Machine GUID, system-volume serial, and CPU
 signature. Known placeholder OEM values are discarded, and at least two strong
 signals must be available before the v2 fingerprint is used. Computer names and
@@ -208,8 +208,11 @@ MAC addresses are deliberately excluded as primary identifiers because they are
 easy to change and cause avoidable false device resets.
 
 Raw hardware identifiers never leave the client: normalized values are combined
-and SHA-256 hashed locally. On the first SDK 2.3 login, the client also submits
-the previous hash for a one-time server-side binding upgrade. The old value must
+and SHA-256 hashed locally. It also generates a random 256-bit installation secret,
+seals it with Windows DPAPI, and mixes it into the final fingerprint. Copying
+serial strings or the encrypted registry value to another Windows account or
+installation does not reproduce the same result. On the first SDK 2.4 login, the
+client also submits its previous hashes for a one-time server-side binding upgrade. The old value must
 already belong to that license, so existing customers do not consume another
 HWID slot during migration. Subsequent session requests use only the v2 hash.
 

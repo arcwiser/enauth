@@ -4,6 +4,8 @@
 #endif
 #include <windows.h>
 #include <winioctl.h>
+#include <wincrypt.h>
+#include <bcrypt.h>
 #include <intrin.h>
 #include <algorithm>
 #include <cctype>
@@ -61,17 +63,57 @@ static std::string FirmwareUuid() {
     }
     return {};
 }
+static std::string HexBytes(const BYTE* data, size_t size) {
+    std::ostringstream out;
+    for (size_t i = 0; i < size; ++i) out << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(data[i]);
+    return out.str();
+}
+static std::string InstallationSecret() {
+    const std::string path = OBFUSCATE("Software\\EnAuth");
+    const std::string valueName = OBFUSCATE("DeviceSeedV1");
+    HKEY key = nullptr;
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, path.c_str(), 0, nullptr, 0, KEY_READ | KEY_WRITE,
+                        nullptr, &key, nullptr) != ERROR_SUCCESS) return {};
+    std::vector<BYTE> protectedData(512); DWORD type = 0, size = static_cast<DWORD>(protectedData.size());
+    LONG read = RegQueryValueExA(key, valueName.c_str(), nullptr, &type, protectedData.data(), &size);
+    if (read != ERROR_SUCCESS || type != REG_BINARY || size == 0 || size > protectedData.size()) {
+        BYTE random[32] = {};
+        if (BCryptGenRandom(nullptr, random, sizeof(random), BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) { RegCloseKey(key); return {}; }
+        DATA_BLOB plain{sizeof(random), random}, sealed{};
+        if (!CryptProtectData(&plain, L"EnAuth device seed", nullptr, nullptr, nullptr,
+                              CRYPTPROTECT_UI_FORBIDDEN, &sealed)) {
+            SecureZeroMemory(random, sizeof(random)); RegCloseKey(key); return {};
+        }
+        const LONG written = RegSetValueExA(key, valueName.c_str(), 0, REG_BINARY, sealed.pbData, sealed.cbData);
+        if (written == ERROR_SUCCESS) { protectedData.assign(sealed.pbData, sealed.pbData + sealed.cbData); size = sealed.cbData; }
+        LocalFree(sealed.pbData); SecureZeroMemory(random, sizeof(random));
+        if (written != ERROR_SUCCESS) { RegCloseKey(key); return {}; }
+    } else protectedData.resize(size);
+    RegCloseKey(key);
+    DATA_BLOB sealed{size, protectedData.data()}, plain{};
+    if (!CryptUnprotectData(&sealed, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &plain)) return {};
+    std::string result = plain.cbData == 32 ? HexBytes(plain.pbData, plain.cbData) : std::string();
+    if (plain.pbData) { SecureZeroMemory(plain.pbData, plain.cbData); LocalFree(plain.pbData); }
+    SecureZeroMemory(protectedData.data(), protectedData.size());
+    return result;
+}
 std::string CollectLegacy() {
     char name[MAX_COMPUTERNAME_LENGTH + 1] = {}; DWORD nameLength = sizeof(name); GetComputerNameA(name, &nameLength);
     const std::string volume = VolumeSerial(), machine = MachineGuid();
     return SHA256Hex(OBFUSCATE("VOL:") + (volume.empty() ? OBFUSCATE("NOVOL") : volume) + OBFUSCATE("|GUID:") +
         (machine.empty() ? OBFUSCATE("NOGUID") : machine) + OBFUSCATE("|CPU:") + CpuSignature() + OBFUSCATE("|NAME:") + std::string(name));
 }
-std::string Collect() {
+static std::string CollectHardwareV2() {
     const std::string firmware = FirmwareUuid(), disk = DiskSerial(), machine = MachineGuid();
     const unsigned strongSignals = (!firmware.empty()) + (!disk.empty()) + (!machine.empty());
     if (strongSignals < 2) return CollectLegacy();
     return SHA256Hex(OBFUSCATE("ENA-HWID-V2|FW:") + firmware + OBFUSCATE("|DISK:") + disk + OBFUSCATE("|MACHINE:") + machine +
         OBFUSCATE("|VOL:") + VolumeSerial() + OBFUSCATE("|CPU:") + CpuSignature());
+}
+std::string CollectPrevious() { return CollectHardwareV2(); }
+std::string Collect() {
+    const std::string hardware = CollectHardwareV2(), seed = InstallationSecret();
+    if (seed.empty()) return hardware;
+    return SHA256Hex(OBFUSCATE("ENA-HWID-V3|HW:") + hardware + OBFUSCATE("|POSSESSION:") + seed);
 }
 } }

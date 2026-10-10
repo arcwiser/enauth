@@ -426,12 +426,14 @@ LoginResult Client::Login(const std::string& license_key,
     LoginResult result;
     try {
         std::string hw = hwid::Collect();
+        std::string previousHwid = hwid::CollectPrevious();
         std::string legacyHwid = hwid::CollectLegacy();
         std::string version = GetVersion();
         std::string payload = std::string("{") +
             JsonStr(OBFUSCATE("license_key"), license_key) + "," +
             JsonStr(OBFUSCATE("hwid"), hw) + "," +
-            JsonStr(OBFUSCATE("legacy_hwid"), legacyHwid) + "," +
+            JsonStr(OBFUSCATE("legacy_hwid"), previousHwid) + "," +
+            JsonStr(OBFUSCATE("legacy_hwid_v1"), legacyHwid) + "," +
             JsonStr(OBFUSCATE("version"), version) + "," +
             JsonStr(OBFUSCATE("sdk_version"), SDK_VERSION);
         if (!product_id.empty()) payload += "," + JsonStr(OBFUSCATE("product_id"), product_id);
@@ -439,6 +441,7 @@ LoginResult Client::Login(const std::string& license_key,
         payload += "}";
         if (!version.empty()) SecureZeroMemory(version.data(), version.size());
         if (!legacyHwid.empty()) SecureZeroMemory(legacyHwid.data(), legacyHwid.size());
+        if (!previousHwid.empty()) SecureZeroMemory(previousHwid.data(), previousHwid.size());
         const std::string endpoint = OBFUSCATE("/api/client/login");
         std::string nonce;
         std::string body = BuildRequest(payload, nonce);
