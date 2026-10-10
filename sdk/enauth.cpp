@@ -14,6 +14,7 @@
 #include <winternl.h>
 #include <algorithm>
 #include <cwctype>
+#include <cctype>
 
 #pragma comment(lib, "ntdll.lib")
 
@@ -115,6 +116,28 @@ static std::string WideToUtf8(const wchar_t* text) {
     return result;
 }
 
+static bool IsValidResponsePublicKey(const std::string& value) {
+    return value.size() == 128 && std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+        return std::isxdigit(ch) != 0;
+    });
+}
+
+static bool IsAllowedServerUrl(const std::string& value) {
+    if (value.empty()) return false;
+    URL_COMPONENTSW parts{};
+    parts.dwStructSize = sizeof(parts);
+    wchar_t hostBuffer[256]{};
+    parts.lpszHostName = hostBuffer;
+    parts.dwHostNameLength = 256;
+    std::wstring wideValue(value.begin(), value.end());
+    if (!WinHttpCrackUrl(wideValue.c_str(), 0, 0, &parts)) return false;
+    std::wstring host(hostBuffer, parts.dwHostNameLength);
+    std::transform(host.begin(), host.end(), host.begin(), ::towlower);
+    if (parts.nScheme == INTERNET_SCHEME_HTTPS) return true;
+    return parts.nScheme == INTERNET_SCHEME_HTTP &&
+        (host == L"localhost" || host == L"127.0.0.1" || host == L"::1");
+}
+
 // ─── WinHTTP POST ────────────────────────────────────────────────────────────
 
 std::string Client::Post(const std::string& endpoint, const std::string& body) {
@@ -145,7 +168,22 @@ std::string Client::Post(const std::string& endpoint, const std::string& body) {
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) throw std::runtime_error(OBFUSCATE("WinHttpOpen failed"));
 
-    WinHttpSetTimeouts(hSession, 10000, 10000, 10000, 15000);
+    if (!WinHttpSetTimeouts(hSession, RESOLVE_TIMEOUT_MS, CONNECT_TIMEOUT_MS,
+                            SEND_TIMEOUT_MS, RECEIVE_TIMEOUT_MS)) {
+        WinHttpCloseHandle(hSession);
+        throw std::runtime_error(OBFUSCATE("Cannot configure network timeouts"));
+    }
+    if (https) {
+        DWORD secureProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+#ifdef WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3
+        secureProtocols |= WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+#endif
+        if (!WinHttpSetOption(hSession, WINHTTP_OPTION_SECURE_PROTOCOLS,
+                              &secureProtocols, sizeof(secureProtocols))) {
+            WinHttpCloseHandle(hSession);
+            throw std::runtime_error(OBFUSCATE("Cannot enforce modern TLS"));
+        }
+    }
 
     HINTERNET hConnect = WinHttpConnect(hSession, wHost, comps.nPort, 0);
     if (!hConnect) {
@@ -236,6 +274,13 @@ std::string Client::BuildRequest(const std::string& json_payload, std::string& r
 std::string Client::DecryptResponse(const std::string& json_response,
                                     const std::string& endpoint,
                                     const std::string& requestNonce) {
+    return DecryptResponseAt(json_response, endpoint, requestNonce, UnixTime());
+}
+
+std::string Client::DecryptResponseAt(const std::string& json_response,
+                                      const std::string& endpoint,
+                                      const std::string& requestNonce,
+                                      long long now) {
     const auto envelope = detail::ParseObject(json_response);
     if (!envelope.contains("protocol") || !envelope["protocol"].is_number_integer() ||
         envelope["protocol"] != 2) {
@@ -252,7 +297,6 @@ std::string Client::DecryptResponse(const std::string& json_response,
     const std::string returnedAppId = detail::StringField(envelope, "app_id");
     if (payload.empty() || serverSig.empty() || tsText.empty() || validUntilText.empty())
         throw std::runtime_error(OBFUSCATE("Unsigned server response"));
-    const long long now = UnixTime();
     if (responseTs < 0 || responseTs > now + 60 || validUntil < now ||
         validUntil < responseTs || validUntil - responseTs > 120)
         throw std::runtime_error(OBFUSCATE("Stale server response"));
@@ -304,6 +348,12 @@ Client::Client(const std::string& server_url, const std::string& app_id,
                const std::string& version,
                const std::string& response_public_key_hex)
 {
+    if (!IsAllowedServerUrl(server_url))
+        throw std::invalid_argument("HTTPS is required except for loopback development");
+    if (app_id.empty() || version.empty())
+        throw std::invalid_argument("Application ID and version are required");
+    if (!IsValidResponsePublicKey(response_public_key_hex))
+        throw std::invalid_argument("A 128-character ECDSA P-256 public key is required");
     m_xor_key = GenerateRuntimeKey();
     std::string memoryKey = SecureRandomHex(32);
     m_enc_memory_key.reserve(memoryKey.size());
@@ -321,6 +371,15 @@ Client::Client(const std::string& server_url, const std::string& app_id,
     HideThread();
 #endif
 }
+
+#ifdef ENAUTH_TESTING
+std::string Client::TestDecryptResponseAt(const std::string& json_response,
+                                          const std::string& endpoint,
+                                          const std::string& request_nonce,
+                                          long long now) {
+    return DecryptResponseAt(json_response, endpoint, request_nonce, now);
+}
+#endif
 
 void Client::EncryptStore(std::vector<unsigned char>& target, const std::string& source) {
     std::lock_guard<std::recursive_mutex> lock(m_request_mutex);

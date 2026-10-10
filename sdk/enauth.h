@@ -20,6 +20,10 @@
 namespace enauth {
 
 inline constexpr const char* SDK_VERSION = "2.4.0";
+inline constexpr int RESOLVE_TIMEOUT_MS = 10000;
+inline constexpr int CONNECT_TIMEOUT_MS = 10000;
+inline constexpr int SEND_TIMEOUT_MS = 10000;
+inline constexpr int RECEIVE_TIMEOUT_MS = 15000;
 
 namespace hwid { std::string Collect(); std::string CollectPrevious(); std::string CollectLegacy(); }
 
@@ -174,6 +178,13 @@ public:
                               std::function<void()> on_expire = nullptr);
     void StopHeartbeatThread();
 
+#ifdef ENAUTH_TESTING
+    std::string TestDecryptResponseAt(const std::string& json_response,
+                                      const std::string& endpoint,
+                                      const std::string& request_nonce,
+                                      long long now);
+#endif
+
 private:
     // Serialize requests across token reads, network calls and token rotation.
     mutable std::recursive_mutex m_request_mutex;
@@ -216,6 +227,10 @@ private:
     std::string  DecryptResponse(const std::string& json_response,
                                  const std::string& endpoint,
                                  const std::string& request_nonce);
+    std::string  DecryptResponseAt(const std::string& json_response,
+                                   const std::string& endpoint,
+                                   const std::string& request_nonce,
+                                   long long now);
     SimpleResult ParseSimple(const std::string& decrypted_json);
     Status       MessageToStatus(const std::string& msg);
 
