@@ -150,6 +150,9 @@ The SDK includes:
   the SDK; the signing private key stays on the server.
 - Cryptographically random per-request replay nonces
 - Fail-closed asymmetric server signature, request-context, and expiry validation
+- Interruptible, single-owner heartbeat worker with bounded intervals. Starting it
+  again safely replaces the previous worker, and any failed heartbeat invalidates
+  the local session immediately before the expiry callback runs.
 - Release builds enable CFG, CET shadow-stack compatibility, Spectre mitigations,
   ASLR, DEP, stack checks, and link-time optimization when built with MSVC
 - Post-login requests include the device HWID so copied session tokens can be

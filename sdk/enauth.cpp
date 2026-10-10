@@ -992,6 +992,7 @@ bool Client::AutoUpdateLoader(const std::string& name, const std::string& curren
         CloseHandle(process.hProcess);
         return true;
     } catch (...) {
+        ClearSessionState();
         return false;
     }
 }
@@ -1007,32 +1008,50 @@ bool Client::TestAutoUpdatePathAllowed(const std::wstring& path) {
 #endif
 
 void Client::StartHeartbeatThread(int interval_sec, std::function<void()> on_expire) {
-    m_hb_callback = on_expire;
-    m_hb_running  = true;
-    m_hb_thread   = std::thread([this, interval_sec]() {
+    StopHeartbeatThread();
+    const int boundedInterval = std::clamp(interval_sec, 10, 3600);
+    {
+        std::lock_guard<std::mutex> lock(m_hb_mutex);
+        m_hb_callback = std::move(on_expire);
+        m_hb_running = true;
+    }
+    m_hb_thread = std::thread([this, boundedInterval]() {
         HideThread();
-        int fail_count = 0;
-        while (m_hb_running) {
-            std::this_thread::sleep_for(std::chrono::seconds(interval_sec));
-            if (!m_hb_running) break;
-            auto r = Heartbeat();
-            if (!r.success) {
-                ++fail_count;
-                if (fail_count >= 3) {
-                    m_logged_in = false;
-                    if (m_hb_callback) m_hb_callback();
-                    break;
+        std::unique_lock<std::mutex> lock(m_hb_mutex);
+        while (m_hb_running.load()) {
+            if (m_hb_wakeup.wait_for(lock, std::chrono::seconds(boundedInterval),
+                                     [this] { return !m_hb_running.load(); })) break;
+            lock.unlock();
+            const auto result = Heartbeat();
+            lock.lock();
+            if (!result.success) {
+                m_hb_running = false;
+                auto callback = m_hb_callback;
+                lock.unlock();
+                if (callback) {
+                    try { callback(); } catch (...) {}
                 }
-            } else {
-                fail_count = 0;
+                return;
             }
         }
     });
 }
 
 void Client::StopHeartbeatThread() {
-    m_hb_running = false;
-    if (m_hb_thread.joinable()) m_hb_thread.join();
+    {
+        std::lock_guard<std::mutex> lock(m_hb_mutex);
+        m_hb_running = false;
+    }
+    m_hb_wakeup.notify_all();
+    if (m_hb_thread.joinable()) {
+        if (m_hb_thread.get_id() == std::this_thread::get_id()) {
+            m_hb_thread.detach();
+        } else {
+            m_hb_thread.join();
+        }
+    }
+    std::lock_guard<std::mutex> lock(m_hb_mutex);
+    m_hb_callback = nullptr;
 }
 
 static void SehCheck() {

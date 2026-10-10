@@ -109,6 +109,9 @@ int main() {
                 "Oversized download names must be rejected before networking");
         Require(loopback.ValidateSession().status == enauth::Status::SessionExpired,
                 "Session operations must fail closed before login");
+        loopback.StartHeartbeatThread(0);
+        loopback.StartHeartbeatThread(999999);
+        loopback.StopHeartbeatThread();
         Require(!enauth::Client::TestValidatePortableExecutable({'M', 'Z'}),
                 "An MZ prefix alone must not qualify as a loader update");
         std::vector<unsigned char> executable(512, 0);

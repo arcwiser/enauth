@@ -12,6 +12,7 @@
 #include <vector>
 #include <map>
 #include <mutex>
+#include <condition_variable>
 
 #include <winhttp.h>
 
@@ -19,7 +20,7 @@
 
 namespace enauth {
 
-inline constexpr const char* SDK_VERSION = "2.6.0";
+inline constexpr const char* SDK_VERSION = "2.6.1";
 inline constexpr int RESOLVE_TIMEOUT_MS = 10000;
 inline constexpr int CONNECT_TIMEOUT_MS = 10000;
 inline constexpr int SEND_TIMEOUT_MS = 10000;
@@ -225,9 +226,11 @@ private:
     std::map<std::string, std::string> m_variables;
 
     // Heartbeat thread
-    std::thread            m_hb_thread;
-    std::atomic<bool>      m_hb_running{false};
-    std::function<void()>  m_hb_callback;
+    std::thread             m_hb_thread;
+    std::atomic<bool>       m_hb_running{false};
+    std::function<void()>   m_hb_callback;
+    std::mutex              m_hb_mutex;
+    std::condition_variable m_hb_wakeup;
 
     // Internal helpers
     std::string  BuildRequest(const std::string& json_payload, std::string& request_nonce);
