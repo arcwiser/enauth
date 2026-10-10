@@ -195,18 +195,25 @@ static bool IsValidResponsePublicKey(const std::string& value) {
 }
 
 static bool IsAllowedServerUrl(const std::string& value) {
-    if (value.empty()) return false;
+    if (value.empty() || value.size() > 2048 ||
+        !std::all_of(value.begin(), value.end(), [](unsigned char ch) { return ch >= 0x21 && ch <= 0x7e; }))
+        return false;
     URL_COMPONENTSW parts{};
     parts.dwStructSize = sizeof(parts);
-    wchar_t hostBuffer[256]{};
+    wchar_t hostBuffer[256]{}, pathBuffer[8]{};
     parts.lpszHostName = hostBuffer;
     parts.dwHostNameLength = 256;
+    parts.lpszUrlPath = pathBuffer;
+    parts.dwUrlPathLength = 8;
     parts.dwUserNameLength = static_cast<DWORD>(-1);
     parts.dwPasswordLength = static_cast<DWORD>(-1);
     parts.dwExtraInfoLength = static_cast<DWORD>(-1);
     std::wstring wideValue(value.begin(), value.end());
     if (!WinHttpCrackUrl(wideValue.c_str(), 0, 0, &parts)) return false;
-    if (parts.dwUserNameLength || parts.dwPasswordLength || parts.dwExtraInfoLength) return false;
+    if (parts.dwUserNameLength || parts.dwPasswordLength || parts.dwExtraInfoLength ||
+        parts.dwHostNameLength == 0) return false;
+    const std::wstring path(pathBuffer, parts.dwUrlPathLength);
+    if (!path.empty() && path != L"/") return false;
     std::wstring host(hostBuffer, parts.dwHostNameLength);
     std::transform(host.begin(), host.end(), host.begin(), ::towlower);
     if (parts.nScheme == INTERNET_SCHEME_HTTPS) return true;
@@ -229,6 +236,9 @@ private:
 // ─── WinHTTP POST ────────────────────────────────────────────────────────────
 
 std::string Client::Post(const std::string& endpoint, const std::string& body) {
+    if (endpoint.empty() || endpoint.front() != '/' || endpoint.find_first_of("?#\\\r\n") != std::string::npos ||
+        body.empty() || body.size() > MAX_REQUEST_BODY_BYTES || body.size() > MAXDWORD)
+        throw std::runtime_error(OBFUSCATE("Invalid request parameters"));
     URL_COMPONENTSW comps = {};
     comps.dwStructSize = sizeof(comps);
     wchar_t wHost[256] = {}, wPath[1024] = {};
@@ -252,7 +262,7 @@ std::string Client::Post(const std::string& endpoint, const std::string& body) {
     if (!https && !(localhost && comps.nScheme == INTERNET_SCHEME_HTTP))
         throw std::runtime_error(OBFUSCATE("HTTPS is required for non-local EnAuth servers"));
 
-    WinHttpHandle hSession(WinHttpOpen(W_OBFUSCATE(L"EnAuth/2.5").c_str(),
+    WinHttpHandle hSession(WinHttpOpen(W_OBFUSCATE(L"EnAuth/2.7").c_str(),
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
     if (!hSession) throw std::runtime_error(OBFUSCATE("WinHttpOpen failed"));
 
@@ -299,7 +309,8 @@ std::string Client::Post(const std::string& endpoint, const std::string& body) {
     SecurityCheck();
 #endif
 
-    LPCWSTR hdrs = L"Content-Type: application/json";
+    LPCWSTR hdrs = L"Content-Type: application/json\r\nAccept: application/json\r\n"
+                   L"Accept-Encoding: identity\r\nCache-Control: no-store";
     std::string response;
     bool requestOk = WinHttpSendRequest(hReq.get(), hdrs, (DWORD)-1,
                            (LPVOID)body.c_str(), (DWORD)body.size(),
@@ -312,6 +323,32 @@ std::string Client::Post(const std::string& endpoint, const std::string& body) {
                             WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize,
                             WINHTTP_NO_HEADER_INDEX)) {
             throw std::runtime_error(OBFUSCATE("Missing HTTP status"));
+        }
+        if (statusCode < 200 || statusCode >= 300)
+            throw std::runtime_error(OBFUSCATE("EnAuth server rejected request"));
+
+        wchar_t contentType[128]{};
+        DWORD contentTypeSize = sizeof(contentType);
+        if (!WinHttpQueryHeaders(hReq.get(), WINHTTP_QUERY_CONTENT_TYPE,
+                                 WINHTTP_HEADER_NAME_BY_INDEX, contentType, &contentTypeSize,
+                                 WINHTTP_NO_HEADER_INDEX))
+            throw std::runtime_error(OBFUSCATE("Missing response content type"));
+        std::wstring normalizedType(contentType);
+        std::transform(normalizedType.begin(), normalizedType.end(), normalizedType.begin(), ::towlower);
+        if (normalizedType.rfind(L"application/json", 0) != 0)
+            throw std::runtime_error(OBFUSCATE("Unexpected response content type"));
+
+        wchar_t contentEncoding[64]{};
+        DWORD contentEncodingSize = sizeof(contentEncoding);
+        if (WinHttpQueryHeaders(hReq.get(), WINHTTP_QUERY_CONTENT_ENCODING,
+                                WINHTTP_HEADER_NAME_BY_INDEX, contentEncoding, &contentEncodingSize,
+                                WINHTTP_NO_HEADER_INDEX)) {
+            std::wstring encoding(contentEncoding);
+            std::transform(encoding.begin(), encoding.end(), encoding.begin(), ::towlower);
+            if (!encoding.empty() && encoding != L"identity")
+                throw std::runtime_error(OBFUSCATE("Compressed responses are not accepted"));
+        } else if (GetLastError() != ERROR_WINHTTP_HEADER_NOT_FOUND) {
+            throw std::runtime_error(OBFUSCATE("Invalid response content encoding"));
         }
         const size_t limit = endpoint == "/api/client/download" ?
             MAX_DOWNLOAD_RESPONSE_BYTES : MAX_API_RESPONSE_BYTES;
@@ -335,9 +372,6 @@ std::string Client::Post(const std::string& endpoint, const std::string& body) {
             if (!WinHttpReadData(hReq.get(), &chunk[0], avail, &read) || read == 0)
                 throw std::runtime_error(OBFUSCATE("Failed while reading server response"));
             response.append(chunk.data(), read);
-        }
-        if (statusCode < 200 || statusCode >= 300) {
-            response.clear();
         }
     }
 
@@ -454,7 +488,9 @@ Client::Client(const std::string& server_url, const std::string& app_id,
         m_enc_memory_key.push_back(static_cast<unsigned char>(memoryKey[i]) ^
             static_cast<unsigned char>(m_xor_key + (i * 29u)));
     SecureZeroMemory(memoryKey.data(), memoryKey.size());
-    EncryptStore(m_enc_server_url, server_url);
+    std::string normalizedServerUrl = server_url;
+    if (normalizedServerUrl.size() > 1 && normalizedServerUrl.back() == '/') normalizedServerUrl.pop_back();
+    EncryptStore(m_enc_server_url, normalizedServerUrl);
     EncryptStore(m_enc_app_id,     app_id);
     EncryptStore(m_enc_version,    version);
     EncryptStore(m_enc_response_public_key, response_public_key_hex);
@@ -1034,6 +1070,10 @@ std::string Client::TestBoundedJsonString(const std::string& json,
     const auto document = detail::ParseObject(json);
     if (!document.is_object()) throw std::runtime_error("Expected JSON object");
     return BoundedJsonString(document, key, maximum, required);
+}
+
+bool Client::TestAllowedServerUrl(const std::string& value) {
+    return IsAllowedServerUrl(value);
 }
 #endif
 

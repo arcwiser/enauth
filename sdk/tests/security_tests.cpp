@@ -94,6 +94,14 @@ int main() {
         RequireThrows([] {
             enauth::Client client("https://auth.example.com?redirect=evil", "app-test", "1.0.0", kPublicKey);
         }, "Ambiguous server URLs must be rejected");
+        Require(enauth::Client::TestAllowedServerUrl("https://auth.example.com/"),
+                "A root-only trailing slash must be accepted and normalized");
+        Require(!enauth::Client::TestAllowedServerUrl("https://auth.example.com/api"),
+                "Base URLs with path prefixes must be rejected");
+        Require(!enauth::Client::TestAllowedServerUrl("https://auth.example.com/#fragment"),
+                "Base URLs with fragments must be rejected");
+        Require(!enauth::Client::TestAllowedServerUrl("https://auth.example.com\r\nX-Test: injected"),
+                "Control characters must be rejected from server URLs");
 
         enauth::Client loopback("http://127.0.0.1:8080", "app-test", "1.0.0", kPublicKey);
         enauth::Client client("https://auth.example.com", "app-test", "1.0.0", kPublicKey);

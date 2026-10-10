@@ -29,6 +29,9 @@ class SdkTransportSecurityTests(unittest.TestCase):
         self.assertIn("if (!WinHttpSetTimeouts", self.source)
         self.assertIn("WINHTTP_ENABLE_SSL_REVOCATION", self.source)
         self.assertIn("WINHTTP_OPTION_REDIRECT_POLICY_NEVER", self.source)
+        self.assertIn("Accept-Encoding: identity", self.source)
+        self.assertIn("WINHTTP_QUERY_CONTENT_TYPE", self.source)
+        self.assertIn("WINHTTP_QUERY_CONTENT_ENCODING", self.source)
         self.assertIn("WINHTTP_QUERY_CONTENT_LENGTH", self.source)
         self.assertIn("if (!WinHttpQueryDataAvailable", self.source)
 

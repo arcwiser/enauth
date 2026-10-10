@@ -142,7 +142,8 @@ Check `Status` enum in `enauth.h` for all possible status codes:
 The SDK includes:
 - Strict operating-system TLS certificate validation
 - HTTPS enforcement for every non-local server
-- Network timeouts and a 4 MiB response limit
+- Canonical root-only server URLs, redirect blocking, JSON-only identity-encoded
+  responses, bounded request bodies, network timeouts, and response-size limits
 - TLS transport protection with server-side authorization on every protected operation
 - Signed payload delivery bound to the exact application, endpoint, request nonce,
   timestamp, and short absolute response expiry
