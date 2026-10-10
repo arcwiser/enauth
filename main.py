@@ -62,9 +62,22 @@ def validate_startup_configuration(debug_mode: bool):
     if not os.getenv("ADMIN_PASSWORD"):
         app_log.warning("ADMIN_PASSWORD is not set; a random password will be generated if no admin user exists.")
     license_pepper = os.getenv("LICENSE_KEY_PEPPER", "")
-    if len(license_pepper) < 32:
-        print("CRITICAL ERROR: LICENSE_KEY_PEPPER must contain at least 32 characters.")
+    lookup_key = os.getenv("LICENSE_LOOKUP_KEY", "")
+    encryption_key = os.getenv("LICENSE_ENCRYPTION_KEY", "")
+    if lookup_key or encryption_key:
+        if len(lookup_key) < 32 or len(encryption_key) < 32:
+            print("CRITICAL ERROR: LICENSE_LOOKUP_KEY and LICENSE_ENCRYPTION_KEY must each contain at least 32 characters.")
+            sys.exit(1)
+        if secrets.compare_digest(lookup_key, encryption_key):
+            print("CRITICAL ERROR: license lookup and encryption keys must be different.")
+            sys.exit(1)
+    elif len(license_pepper) < 32:
+        print("CRITICAL ERROR: configure separate LICENSE_LOOKUP_KEY and LICENSE_ENCRYPTION_KEY values.")
         sys.exit(1)
+    else:
+        app_log.warning(
+            "LICENSE_KEY_PEPPER compatibility mode is active; configure separate license lookup and encryption keys."
+        )
     if int(os.getenv("AUTO_BACKUP_HOURS", "0")) > 0 and len(os.getenv("BACKUP_ENCRYPTION_KEY", "")) < 32:
         print("CRITICAL ERROR: BACKUP_ENCRYPTION_KEY must contain at least 32 characters when scheduled backups are enabled.")
         sys.exit(1)

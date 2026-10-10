@@ -14,7 +14,8 @@ from pydantic import BaseModel, Field
 from database import get_db
 from routes.admin import require_api_key
 from utils.crypto import (generate_license_key, generate_uid, hash_license_key,
-                          mask_license_key, encrypt_license_key, display_license_key)
+                          mask_license_key, encrypt_license_key, display_license_key,
+                          license_lookup_hashes, current_license_lookup_key_id)
 from utils.logger import log_action
 from utils.uploads import read_build_upload, validate_release_name, validate_release_version
 from utils.request_security import resolve_client_ip
@@ -115,12 +116,13 @@ async def require_app(db: aiosqlite.Connection, app_id: str):
 
 async def find_license(db: aiosqlite.Connection, app_id: str, identifier: str):
     identifier = identifier.strip()
-    digest = hash_license_key(identifier)
+    digests = [digest for _, digest in license_lookup_hashes(identifier)]
+    placeholders = ",".join("?" for _ in digests)
     async with db.execute(
-        """SELECT * FROM licenses
-           WHERE app_id = ? AND (id = ? OR key_hash = ?)
+        f"""SELECT * FROM licenses
+           WHERE app_id = ? AND (id = ? OR key_hash IN ({placeholders}))
            LIMIT 1""",
-        (app_id, identifier, digest),
+        (app_id, identifier, *digests),
     ) as cur:
         row = await cur.fetchone()
     if not row:
@@ -378,8 +380,10 @@ async def licenses(app_id: str, search: Optional[str] = None, limit: int = 25,
     sql = "SELECT id, key, key_ciphertext, status, expires_at, max_hwids, notes, created_at FROM licenses WHERE app_id = ?"
     args = [app_id]
     if search:
-        sql += " AND (id = ? OR key_hash = ? OR notes LIKE ?)"
-        args.extend([search, hash_license_key(search), f"%{search}%"])
+        digests = [digest for _, digest in license_lookup_hashes(search)]
+        placeholders = ",".join("?" for _ in digests)
+        sql += f" AND (id = ? OR key_hash IN ({placeholders}) OR notes LIKE ?)"
+        args.extend([search, *digests, f"%{search}%"])
     sql += " ORDER BY created_at DESC LIMIT ?"
     args.append(limit)
     async with db.execute(sql, args) as cur:
@@ -412,9 +416,9 @@ async def generate(app_id: str, body: GenerateBody, key=Depends(require_scope("l
         license_id = generate_uid()
         await db.execute(
             """INSERT INTO licenses
-               (id, key, key_hash, key_ciphertext, app_id, max_hwids, expires_at, notes)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (license_id, mask_license_key(raw_key), hash_license_key(raw_key), encrypt_license_key(raw_key), app_id,
+               (id, key, key_hash, key_hash_version, key_ciphertext, app_id, max_hwids, expires_at, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (license_id, mask_license_key(raw_key), hash_license_key(raw_key), current_license_lookup_key_id(), encrypt_license_key(raw_key), app_id,
              body.max_hwids, expires_at, body.notes),
         )
         await db.execute(

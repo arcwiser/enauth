@@ -7,6 +7,7 @@ import secrets
 import string
 import uuid
 import time
+import re
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
@@ -136,16 +137,89 @@ def normalize_license_key(value: str) -> str:
     return value.strip().upper()
 
 
+_KEY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+
+
+def _parse_previous_keys(env_name: str) -> dict[str, str]:
+    raw = os.getenv(env_name, "").strip()
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{env_name} must be a JSON object") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{env_name} must be a JSON object")
+    result = {}
+    for key_id, secret in value.items():
+        if not isinstance(key_id, str) or not _KEY_ID_RE.fullmatch(key_id):
+            raise RuntimeError(f"{env_name} contains an invalid key ID")
+        if not isinstance(secret, str) or len(secret) < 32:
+            raise RuntimeError(f"{env_name} keys must contain at least 32 characters")
+        result[key_id] = secret
+    return result
+
+
+def _legacy_license_secret() -> str:
+    secret = os.getenv("LICENSE_KEY_PEPPER", "")
+    if not secret:
+        raise RuntimeError("License key configuration is required")
+    return secret
+
+
+def _license_lookup_keyring() -> tuple[str, dict[str, str]]:
+    current_secret = os.getenv("LICENSE_LOOKUP_KEY", "").strip()
+    current_id = os.getenv("LICENSE_LOOKUP_KEY_ID", "v1").strip()
+    if current_secret:
+        if len(current_secret) < 32:
+            raise RuntimeError("LICENSE_LOOKUP_KEY must contain at least 32 characters")
+        if not _KEY_ID_RE.fullmatch(current_id):
+            raise RuntimeError("LICENSE_LOOKUP_KEY_ID is invalid")
+        keys = _parse_previous_keys("LICENSE_LOOKUP_PREVIOUS_KEYS")
+        if current_id in keys:
+            raise RuntimeError("Current lookup key ID cannot also be a previous key")
+        keys[current_id] = current_secret
+        return current_id, keys
+    return "legacy-v1", {"legacy-v1": _legacy_license_secret()}
+
+
+def _license_encryption_keyring() -> tuple[str, dict[str, str]]:
+    current_secret = os.getenv("LICENSE_ENCRYPTION_KEY", "").strip()
+    current_id = os.getenv("LICENSE_ENCRYPTION_KEY_ID", "v1").strip()
+    if current_secret:
+        if len(current_secret) < 32:
+            raise RuntimeError("LICENSE_ENCRYPTION_KEY must contain at least 32 characters")
+        if not _KEY_ID_RE.fullmatch(current_id):
+            raise RuntimeError("LICENSE_ENCRYPTION_KEY_ID is invalid")
+        keys = _parse_previous_keys("LICENSE_ENCRYPTION_PREVIOUS_KEYS")
+        if current_id in keys:
+            raise RuntimeError("Current encryption key ID cannot also be a previous key")
+        keys[current_id] = current_secret
+        legacy = os.getenv("LICENSE_KEY_PEPPER", "").strip()
+        if legacy:
+            keys.setdefault("legacy-v1", legacy)
+        return current_id, keys
+    return "legacy-v1", {"legacy-v1": _legacy_license_secret()}
+
+
+def current_license_lookup_key_id() -> str:
+    return _license_lookup_keyring()[0]
+
+
+def license_lookup_hashes(value: str) -> list[tuple[str, str]]:
+    """Return current then previous versioned hashes for zero-downtime lookup rotation."""
+    current_id, keys = _license_lookup_keyring()
+    normalized = normalize_license_key(value).encode("utf-8")
+    ordered_ids = [current_id, *(key_id for key_id in keys if key_id != current_id)]
+    return [
+        (key_id, hmaclib.new(keys[key_id].encode("utf-8"), normalized, hashlib.sha256).hexdigest())
+        for key_id in ordered_ids
+    ]
+
+
 def hash_license_key(value: str) -> str:
     """Return a deterministic, server-peppered lookup hash for a license."""
-    pepper = os.getenv("LICENSE_KEY_PEPPER", "")
-    if not pepper:
-        raise RuntimeError("LICENSE_KEY_PEPPER is required")
-    return hmaclib.new(
-        pepper.encode("utf-8"),
-        normalize_license_key(value).encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
+    return license_lookup_hashes(value)[0][1]
 
 
 def mask_license_key(value: str) -> str:
@@ -155,30 +229,42 @@ def mask_license_key(value: str) -> str:
     return f"{normalized[:8]}…{normalized[-4:]}"
 
 
-def _license_encryption_key() -> bytes:
-    """Derive a separate AES-256 key from the required server pepper."""
-    pepper = os.getenv("LICENSE_KEY_PEPPER", "")
-    if not pepper:
-        raise RuntimeError("LICENSE_KEY_PEPPER is required")
-    return hashlib.sha256(b"enauth-license-storage-v1\0" + pepper.encode("utf-8")).digest()
+def _derive_license_encryption_key(secret: str, version: bytes) -> bytes:
+    return hashlib.sha256(version + b"\0" + secret.encode("utf-8")).digest()
 
 
 def encrypt_license_key(value: str) -> str:
     """Encrypt a license for authorized later display; never store it as plaintext."""
+    key_id, keys = _license_encryption_keyring()
     nonce = os.urandom(_NONCE_LEN)
-    ciphertext = AESGCM(_license_encryption_key()).encrypt(
-        nonce, normalize_license_key(value).encode("utf-8"), b"enauth-license-key-v1"
+    aad = f"enauth-license-key-v2|{key_id}".encode("ascii")
+    ciphertext = AESGCM(_derive_license_encryption_key(keys[key_id], b"enauth-license-storage-v2")).encrypt(
+        nonce, normalize_license_key(value).encode("utf-8"), aad
     )
-    return base64.urlsafe_b64encode(nonce + ciphertext).decode("ascii")
+    encoded = base64.urlsafe_b64encode(nonce + ciphertext).decode("ascii")
+    return f"v2.{key_id}.{encoded}"
 
 
 def decrypt_license_key(value: str) -> str:
-    raw = base64.urlsafe_b64decode(value.encode("ascii"))
+    _, keys = _license_encryption_keyring()
+    if value.startswith("v2."):
+        try:
+            _, key_id, encoded = value.split(".", 2)
+            secret = keys[key_id]
+        except (ValueError, KeyError) as exc:
+            raise ValueError("Unknown license encryption key version") from exc
+        raw = base64.urlsafe_b64decode(encoded.encode("ascii"))
+        aad = f"enauth-license-key-v2|{key_id}".encode("ascii")
+        derived = _derive_license_encryption_key(secret, b"enauth-license-storage-v2")
+    else:
+        raw = base64.urlsafe_b64decode(value.encode("ascii"))
+        aad = b"enauth-license-key-v1"
+        if "legacy-v1" not in keys:
+            raise ValueError("Legacy license encryption key is unavailable")
+        derived = _derive_license_encryption_key(keys["legacy-v1"], b"enauth-license-storage-v1")
     if len(raw) < _NONCE_LEN + 17:
         raise ValueError("Invalid stored license ciphertext")
-    plaintext = AESGCM(_license_encryption_key()).decrypt(
-        raw[:_NONCE_LEN], raw[_NONCE_LEN:], b"enauth-license-key-v1"
-    )
+    plaintext = AESGCM(derived).decrypt(raw[:_NONCE_LEN], raw[_NONCE_LEN:], aad)
     return plaintext.decode("utf-8")
 
 

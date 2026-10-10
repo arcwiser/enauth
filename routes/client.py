@@ -18,7 +18,8 @@ from utils.crypto import (
     encrypt_payload, decrypt_payload,
     verify_signature, compute_signature,
     generate_session_token, generate_uid,
-    is_valid_hwid, hash_license_key, mask_license_key,
+    is_valid_hwid, hash_license_key, mask_license_key, license_lookup_hashes,
+    encrypt_license_key,
     encrypt_bytes, derive_session_download_secret, derive_ticket_download_secret,
 )
 from utils.response_signing import sign_response
@@ -550,8 +551,11 @@ async def client_login(request: Request, req: EncryptedRequest,
         return enc_resp({"success": False, "message": "INVALID_HWID_FORMAT"}, secret, req.app_id)
 
     # ── Fetch license ──
+    lookup_hashes = license_lookup_hashes(license_key)
+    placeholders = ",".join("?" for _ in lookup_hashes)
     async with db.execute(
-        "SELECT * FROM licenses WHERE key_hash = ? AND app_id = ?", (hash_license_key(license_key), app["id"])
+        f"SELECT * FROM licenses WHERE key_hash IN ({placeholders}) AND app_id = ?",
+        (*[digest for _, digest in lookup_hashes], app["id"]),
     ) as cur:
         lic = await cur.fetchone()
 
@@ -560,6 +564,13 @@ async def client_login(request: Request, req: EncryptedRequest,
         await log_action(db, "login_fail", license_key=mask_license_key(license_key), app_id=app["id"],
                          ip=ip, hwid=hwid, details="Key not found")
         return enc_resp({"success": False, "message": "INVALID_KEY"}, secret, req.app_id)
+
+    current_key_id, current_hash = lookup_hashes[0]
+    if lic["key_hash"] != current_hash or lic["key_hash_version"] != current_key_id:
+        await db.execute(
+            "UPDATE licenses SET key_hash=?, key_hash_version=?, key_ciphertext=? WHERE id=?",
+            (current_hash, current_key_id, encrypt_license_key(license_key), lic["id"]),
+        )
 
     # ── Brute force lockout (5 strikes) ──
     if lic["login_strikes"] >= MAX_LOGIN_STRIKES:

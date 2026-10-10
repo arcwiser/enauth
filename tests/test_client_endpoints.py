@@ -22,6 +22,7 @@ from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 from utils.crypto import (
     compute_signature, decrypt_bytes, decrypt_payload, derive_session_download_secret,
     derive_ticket_download_secret, encrypt_payload, hash_license_key, mask_license_key,
+    license_lookup_hashes,
 )
 
 
@@ -250,6 +251,43 @@ class ClientEndpointTests(unittest.IsolatedAsyncioTestCase):
             )
             with self.assertRaises(ValueError):
                 decrypt_bytes(download_payload["data"], wrong_session_secret)
+
+    async def test_login_lazily_rotates_legacy_license_keys(self):
+        seeded = await self._seed_app()
+        names = (
+            "LICENSE_LOOKUP_KEY_ID", "LICENSE_LOOKUP_KEY", "LICENSE_LOOKUP_PREVIOUS_KEYS",
+            "LICENSE_ENCRYPTION_KEY_ID", "LICENSE_ENCRYPTION_KEY",
+        )
+        original = {name: os.environ.get(name) for name in names}
+        try:
+            os.environ["LICENSE_LOOKUP_KEY_ID"] = "lookup-v2"
+            os.environ["LICENSE_LOOKUP_KEY"] = "L" * 32
+            os.environ["LICENSE_LOOKUP_PREVIOUS_KEYS"] = json.dumps({
+                "legacy-v1": os.environ["LICENSE_KEY_PEPPER"]
+            })
+            os.environ["LICENSE_ENCRYPTION_KEY_ID"] = "enc-v2"
+            os.environ["LICENSE_ENCRYPTION_KEY"] = "E" * 32
+            request = self._encrypted_request(seeded["app_id"], seeded["secret"], {
+                "version": "1.0.0", "license_key": seeded["license_key"], "hwid": "e" * 64,
+            })
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                response = await self.client.client_login.__wrapped__(_FakeRequest(), request, db)
+                self.assertTrue(self._decrypt_response(response, seeded["secret"])["success"])
+                async with db.execute(
+                    "SELECT key_hash,key_hash_version,key_ciphertext FROM licenses WHERE id=?",
+                    (seeded["license_id"],),
+                ) as cur:
+                    row = await cur.fetchone()
+            self.assertEqual(row["key_hash_version"], "lookup-v2")
+            self.assertEqual(row["key_hash"], license_lookup_hashes(seeded["license_key"])[0][1])
+            self.assertTrue(row["key_ciphertext"].startswith("v2.enc-v2."))
+        finally:
+            for name, value in original.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
 
     async def test_session_is_revoked_when_hwid_changes(self):
         seeded = await self._seed_app()

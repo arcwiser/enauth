@@ -184,6 +184,16 @@ class DatabaseMigrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue({"monthly_quota", "monthly_used", "quota_reset_at"} <= reseller_columns)
         self.assertEqual(tables, {"sdk_releases", "sdk_compatibility", "portal_device_names", "hwid_reset_requests"})
 
+    async def test_license_key_version_schema(self):
+        await self.database.init_db()
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("PRAGMA table_info(licenses)") as cur:
+                columns = {row[1] for row in await cur.fetchall()}
+            async with db.execute("PRAGMA user_version") as cur:
+                version = (await cur.fetchone())[0]
+        self.assertIn("key_hash_version", columns)
+        self.assertGreaterEqual(version, 17)
+
 
 if __name__ == "__main__":
     unittest.main()

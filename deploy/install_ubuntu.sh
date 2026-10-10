@@ -39,8 +39,11 @@ replace_setting() {
   fi
 }
 
-if grep -Eq '^LICENSE_KEY_PEPPER=(|replace-with-)' "${env_file}"; then
-  replace_setting "LICENSE_KEY_PEPPER" "$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n')"
+if grep -Eq '^LICENSE_LOOKUP_KEY=(|replace-with-)' "${env_file}"; then
+  replace_setting "LICENSE_LOOKUP_KEY" "$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n')"
+fi
+if grep -Eq '^LICENSE_ENCRYPTION_KEY=(|replace-with-)' "${env_file}"; then
+  replace_setting "LICENSE_ENCRYPTION_KEY" "$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n')"
 fi
 
 if grep -q '^ADMIN_PASSWORD=$' "${env_file}"; then

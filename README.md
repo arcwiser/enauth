@@ -69,7 +69,7 @@ Before starting the server for the first time:
 1. Copy `.env.example` to `.env`.
 2. Set `HOST`, `PORT`, and `DB_PATH` if you want custom values.
 3. Set `ADMIN_USERNAME` and `ADMIN_PASSWORD` if you want a known initial admin login.
-4. Generate and set a stable `LICENSE_KEY_PEPPER` containing at least 32 random characters. Back it up separately; losing it makes existing keys unverifiable.
+4. Generate different random values for `LICENSE_LOOKUP_KEY` and `LICENSE_ENCRYPTION_KEY`. Back both up separately; losing them makes existing keys unusable.
 5. If you do not set `ADMIN_PASSWORD`, the server generates one on first startup and prints it once to the terminal.
 6. Use HTTPS directly or place the service behind a trusted reverse proxy. Set `COOKIE_SECURE=true` when the public URL is HTTPS.
 
@@ -126,11 +126,11 @@ From the project root:
 
 ```bash
 cp .env.example .env
-# Set ADMIN_PASSWORD and LICENSE_KEY_PEPPER before continuing.
+# Set ADMIN_PASSWORD, LICENSE_LOOKUP_KEY, and LICENSE_ENCRYPTION_KEY first.
 docker compose up -d --build
 ```
 
-Compose refuses to start without those two secrets. Its default origin is
+Compose refuses to start without those three secrets. Its default origin is
 `http://localhost:8080`; set `CORS_ORIGINS` to the exact public dashboard
 origin before deployment.
 

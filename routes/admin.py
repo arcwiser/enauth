@@ -27,6 +27,7 @@ from utils.crypto import (
     generate_session_token, generate_uid,
     hash_password, verify_password,
     hash_license_key, mask_license_key, encrypt_license_key, display_license_key, encrypt_bytes,
+    license_lookup_hashes, current_license_lookup_key_id,
 )
 from utils.logger import app_log, log_action
 from utils.response_signing import KEY_PATH as RESPONSE_SIGNING_KEY_PATH, response_public_key_hex, sign_response
@@ -1451,10 +1452,11 @@ async def reseller_buy_key(body: ResellerBuyBody, reseller=Depends(require_resel
         license_id = generate_uid()
         license_key = generate_license_key()
         await db.execute(
-            """INSERT INTO licenses (id, key, key_hash, key_ciphertext, app_id, max_hwids, expires_at, notes)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO licenses (id, key, key_hash, key_hash_version, key_ciphertext, app_id, max_hwids, expires_at, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (license_id, mask_license_key(license_key), hash_license_key(license_key),
-             encrypt_license_key(license_key), target["app_id"], 1, expires, f"product_id={target['product_id']}"),
+             current_license_lookup_key_id(), encrypt_license_key(license_key), target["app_id"], 1, expires,
+             f"product_id={target['product_id']}"),
         )
         await db.execute(
             "INSERT OR IGNORE INTO license_products (id, license_id, product_id, expires_at) VALUES (?, ?, ?, ?)",
@@ -1743,6 +1745,8 @@ async def dashboard(user=Depends(require_admin), db: aiosqlite.Connection = Depe
         "secure_cookies": COOKIE_SECURE,
         "restricted_cors": os.getenv("CORS_ORIGINS", "*").strip() != "*",
         "license_pepper_set": bool(os.getenv("LICENSE_KEY_PEPPER", "").strip()),
+        "license_keys_separated": bool(os.getenv("LICENSE_LOOKUP_KEY", "").strip()) and
+                                  bool(os.getenv("LICENSE_ENCRYPTION_KEY", "").strip()),
         "debug_disabled": os.getenv("DEBUG", "false").lower() != "true",
     }
     return {
@@ -1826,6 +1830,8 @@ async def security_control_center(user=Depends(require_admin), db: aiosqlite.Con
         "cors_restricted": os.getenv("CORS_ORIGINS", "*").strip() != "*",
         "debug_disabled": os.getenv("DEBUG", "false").lower() != "true",
         "license_pepper_configured": bool(os.getenv("LICENSE_KEY_PEPPER", "").strip()),
+        "license_keys_separated": bool(os.getenv("LICENSE_LOOKUP_KEY", "").strip()) and
+                                  bool(os.getenv("LICENSE_ENCRYPTION_KEY", "").strip()),
         "legacy_protocol_disabled": os.getenv("ALLOW_LEGACY_PROTOCOL", "true").lower() != "true",
         "backup_encryption_configured": bool(BACKUP_ENCRYPTION_KEY),
         "automatic_backups_enabled": int(os.getenv("AUTO_BACKUP_HOURS", "0")) > 0,
@@ -2551,13 +2557,14 @@ async def parse_license_import(file: UploadFile, owner_id: Optional[str], db) ->
     for number, row in enumerate(input_rows, 2):
         key = (row.get("license_key") or "").strip()
         app_id = (row.get("app_id") or "").strip()
-        key_hash = hash_license_key(key) if key else ""
+        candidate_hashes = license_lookup_hashes(key) if key else []
+        key_hash = candidate_hashes[0][1] if candidate_hashes else ""
         row_errors = []
         if len(key) < 8 or len(key) > 255:
             row_errors.append("license_key must be 8-255 characters")
         if app_id not in allowed_apps:
             row_errors.append("application is missing or outside your account")
-        if key_hash in existing_hashes or key_hash in seen:
+        if any(digest in existing_hashes for _, digest in candidate_hashes) or key_hash in seen:
             row_errors.append("duplicate license key")
         status_value = (row.get("status") or "active").strip().lower()
         if status_value not in {"active", "banned"}:
@@ -2610,9 +2617,9 @@ async def import_licenses_csv(confirm: bool = Form(False), file: UploadFile = Fi
         license_id = generate_uid()
         await db.execute(
             """INSERT INTO licenses
-               (id,key,key_hash,key_ciphertext,app_id,status,max_hwids,expires_at,notes,metadata)
-               VALUES(?,?,?,?,?,?,?,?,?,?)""",
-            (license_id, mask_license_key(row["key"]), row["key_hash"], encrypt_license_key(row["key"]),
+               (id,key,key_hash,key_hash_version,key_ciphertext,app_id,status,max_hwids,expires_at,notes,metadata)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (license_id, mask_license_key(row["key"]), row["key_hash"], current_license_lookup_key_id(), encrypt_license_key(row["key"]),
              row["app_id"], row["status"], row["max_hwids"], row["expires_at"], row["notes"], row["metadata"]),
         )
         for product_id in row["product_ids"]:
@@ -2677,9 +2684,9 @@ async def create_license(body: CreateLicenseBody,
         lid = generate_uid()
         notes = body.notes
         await db.execute(
-            """INSERT INTO licenses (id, key, key_hash, key_ciphertext, app_id, max_hwids, expires_at, notes, metadata)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
-            (lid, mask_license_key(key), hash_license_key(key), encrypt_license_key(key),
+            """INSERT INTO licenses (id, key, key_hash, key_hash_version, key_ciphertext, app_id, max_hwids, expires_at, notes, metadata)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (lid, mask_license_key(key), hash_license_key(key), current_license_lookup_key_id(), encrypt_license_key(key),
              body.app_id, body.max_hwids, expires, notes, body.metadata),
         )
         for pid in unique_pids:
@@ -4592,9 +4599,11 @@ async def portal_register(request: Request = None, body: PortalRegisterBody = No
             raise HTTPException(409, "Username already taken for this application")
 
     license_key = body.license_key.strip().upper()
+    lookup_hashes = license_lookup_hashes(license_key)
+    placeholders = ",".join("?" for _ in lookup_hashes)
     async with db.execute(
-        "SELECT * FROM licenses WHERE key_hash = ? AND app_id = ?",
-        (hash_license_key(license_key), app_id),
+        f"SELECT * FROM licenses WHERE key_hash IN ({placeholders}) AND app_id = ?",
+        (*[digest for _, digest in lookup_hashes], app_id),
     ) as cur:
         lic = await cur.fetchone()
     if not lic:
