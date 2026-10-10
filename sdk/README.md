@@ -280,13 +280,20 @@ strict TLS validation, persistent replay protection, asymmetric response
 verification, and encrypted session storage are performed automatically inside
 the SDK rather than called separately by application code.
 
-### Protocol 2 migration
+### Protocol 2 migration for existing installations
 
-1. Deploy the server with `ALLOW_LEGACY_PROTOCOL=true`.
+New installations reject protocol 1 by default. For an existing installation
+that still has old clients, use this controlled migration:
+
+1. Explicitly deploy the server with `ALLOW_LEGACY_PROTOCOL=true`.
 2. Copy the response-signing public key into each new SDK build and distribute it.
 3. Require the new client version for every application.
 4. Set `ALLOW_LEGACY_PROTOCOL=false` and restart the server.
 5. Rotate the old application secret after all legacy clients are retired.
+
+Never enable protocol 1 on a fresh installation. The compatibility flag restores
+the extractable shared-secret protocol and exists only to prevent an abrupt
+lockout while old clients are replaced.
 
 New protocol 2 clients never receive or embed the application secret. TLS protects
 requests in transit; licenses and short-lived, app-bound sessions remain the

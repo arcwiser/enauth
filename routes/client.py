@@ -36,7 +36,7 @@ MAX_LOGIN_STRIKES    = int(os.getenv("MAX_LOGIN_STRIKES", "5"))          # lock 
 NONCE_CACHE_SIZE     = int(os.getenv("NONCE_CACHE_SIZE", "10000"))      # max unique nonces to remember
 NONCE_TTL            = int(os.getenv("NONCE_TTL", "120"))                # seconds to keep a nonce (2× tolerance)
 REQUIRE_SESSION_HWID = os.getenv("REQUIRE_SESSION_HWID", "true").lower() == "true"
-ALLOW_LEGACY_PROTOCOL = os.getenv("ALLOW_LEGACY_PROTOCOL", "true").lower() == "true"
+ALLOW_LEGACY_PROTOCOL = os.getenv("ALLOW_LEGACY_PROTOCOL", "false").lower() == "true"
 _response_context: ContextVar[tuple[int, str, str]] = ContextVar(
     "enauth_response_context", default=(1, "", "")
 )

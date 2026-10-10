@@ -1838,7 +1838,7 @@ async def security_control_center(user=Depends(require_admin), db: aiosqlite.Con
         "license_pepper_configured": bool(os.getenv("LICENSE_KEY_PEPPER", "").strip()),
         "license_keys_separated": bool(os.getenv("LICENSE_LOOKUP_KEY", "").strip()) and
                                   bool(os.getenv("LICENSE_ENCRYPTION_KEY", "").strip()),
-        "legacy_protocol_disabled": os.getenv("ALLOW_LEGACY_PROTOCOL", "true").lower() != "true",
+        "legacy_protocol_disabled": os.getenv("ALLOW_LEGACY_PROTOCOL", "false").lower() != "true",
         "backup_encryption_configured": bool(BACKUP_ENCRYPTION_KEY),
         "automatic_backups_enabled": int(os.getenv("AUTO_BACKUP_HOURS", "0")) > 0,
     }
@@ -2234,7 +2234,7 @@ async def developer_overview(request: Request, user=Depends(require_admin),
         "openapi_url": "/api/admin/developer/openapi",
         "interactive_docs_url": "/docs",
         "response_signing": {"algorithm": "ECDSA-P256-SHA256", "public_key_hex": response_public_key_hex()},
-        "protocol": {"current": 2, "legacy_allowed": os.getenv("ALLOW_LEGACY_PROTOCOL", "true").lower() == "true"},
+        "protocol": {"current": 2, "legacy_allowed": os.getenv("ALLOW_LEGACY_PROTOCOL", "false").lower() == "true"},
         "limits": {"max_json_bytes": int(os.getenv("MAX_JSON_BYTES", str(2 * 1024 * 1024))),
                    "max_upload_bytes": int(os.getenv("MAX_BUILD_UPLOAD_BYTES", str(100 * 1024 * 1024))),
                    "session_token_seconds": int(os.getenv("SESSION_TOKEN_SECONDS", "300"))},

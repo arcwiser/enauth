@@ -72,6 +72,7 @@ Before starting the server for the first time:
 4. Generate different random values for `LICENSE_LOOKUP_KEY` and `LICENSE_ENCRYPTION_KEY`. Back both up separately; losing them makes existing keys unusable.
 5. If you do not set `ADMIN_PASSWORD`, the server generates one on first startup and prints it once to the terminal.
 6. Use HTTPS directly or place the service behind a trusted reverse proxy. Set `COOKIE_SECURE=true` when the public URL is HTTPS.
+7. Keep `ALLOW_LEGACY_PROTOCOL=false` for new deployments. Enable it only temporarily when migrating pre-v2 clients.
 
 ### Local Development Run
 

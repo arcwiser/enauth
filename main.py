@@ -81,6 +81,10 @@ def validate_startup_configuration(debug_mode: bool):
         app_log.warning(
             "LICENSE_KEY_PEPPER compatibility mode is active; configure separate license lookup and encryption keys."
         )
+    if os.getenv("ALLOW_LEGACY_PROTOCOL", "false").lower() == "true":
+        app_log.warning(
+            "Legacy client protocol 1 is enabled. Use this only during a controlled SDK migration window."
+        )
     if int(os.getenv("AUTO_BACKUP_HOURS", "0")) > 0 and len(os.getenv("BACKUP_ENCRYPTION_KEY", "")) < 32:
         print("CRITICAL ERROR: BACKUP_ENCRYPTION_KEY must contain at least 32 characters when scheduled backups are enabled.")
         sys.exit(1)
