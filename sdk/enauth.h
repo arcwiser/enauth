@@ -20,7 +20,7 @@
 
 namespace enauth {
 
-inline constexpr const char* SDK_VERSION = "2.6.1";
+inline constexpr const char* SDK_VERSION = "2.7.0";
 inline constexpr int RESOLVE_TIMEOUT_MS = 10000;
 inline constexpr int CONNECT_TIMEOUT_MS = 10000;
 inline constexpr int SEND_TIMEOUT_MS = 10000;
@@ -30,6 +30,13 @@ inline constexpr size_t MAX_DOWNLOAD_RESPONSE_BYTES = 190u * 1024u * 1024u;
 inline constexpr size_t MAX_LICENSE_KEY_BYTES = 256;
 inline constexpr size_t MAX_RESOURCE_NAME_BYTES = 255;
 inline constexpr size_t MAX_PRODUCT_VALUE_BYTES = 128;
+inline constexpr size_t MAX_SESSION_TOKEN_BYTES = 1024;
+inline constexpr size_t MAX_SERVER_MESSAGE_BYTES = 512;
+inline constexpr size_t MAX_VARIABLE_COUNT = 256;
+inline constexpr size_t MAX_VARIABLE_NAME_BYTES = 128;
+inline constexpr size_t MAX_VARIABLE_VALUE_BYTES = 4096;
+inline constexpr size_t MAX_NEWS_ITEMS = 100;
+inline constexpr size_t MAX_NEWS_FIELD_BYTES = 16384;
 
 namespace hwid { std::string Collect(); std::string CollectPrevious(); std::string CollectLegacy(); }
 
@@ -191,6 +198,10 @@ public:
                                       long long now);
     static bool TestValidatePortableExecutable(const std::vector<unsigned char>& data);
     static bool TestAutoUpdatePathAllowed(const std::wstring& path);
+    static std::string TestBoundedJsonString(const std::string& json,
+                                             const std::string& key,
+                                             size_t maximum,
+                                             bool required);
 #endif
 
 private:

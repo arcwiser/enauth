@@ -148,6 +148,17 @@ int main() {
                 "Normal quoted Windows paths must be allowed");
         Require(!enauth::Client::TestAutoUpdatePathAllowed(L"C:\\Loader&calc.exe"),
                 "Command metacharacters must be rejected from updater paths");
+        Require(enauth::Client::TestBoundedJsonString("{\"token\":\"abc\"}", "token", 3, true) == "abc",
+                "Bounded response strings must accept valid fields");
+        RequireThrows([] {
+            enauth::Client::TestBoundedJsonString("{\"token\":\"abcd\"}", "token", 3, true);
+        }, "Oversized response fields must fail closed");
+        RequireThrows([] {
+            enauth::Client::TestBoundedJsonString("{}", "token", 32, true);
+        }, "Missing required response fields must fail closed");
+        RequireThrows([] {
+            enauth::Client::TestBoundedJsonString("{\"token\":123}", "token", 32, true);
+        }, "Wrongly typed response fields must fail closed");
         const std::string decoded = client.TestDecryptResponseAt(
             Envelope(), kEndpoint, kNonce, 2000000030);
         Require(decoded == "{\"success\":true,\"message\":\"OK\"}",

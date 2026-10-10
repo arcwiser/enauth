@@ -88,6 +88,26 @@ static bool JsonBool(const std::string& json, const std::string& key) {
         document[key].is_boolean() && document[key].get<bool>();
 }
 
+static std::string BoundedJsonString(const nlohmann::json& object,
+                                     const std::string& key,
+                                     size_t maximum,
+                                     bool required = false) {
+    auto field = object.find(key);
+    if (field == object.end() || field->is_null()) {
+        if (required) throw std::runtime_error("Missing required response field");
+        return {};
+    }
+    if (!field->is_string()) throw std::runtime_error("Invalid response field type");
+    std::string value = field->get<std::string>();
+    if ((required && value.empty()) || value.size() > maximum)
+        throw std::runtime_error("Invalid response field length");
+    return value;
+}
+
+static std::string PublicRequestFailure() {
+    return OBFUSCATE("REQUEST_FAILED");
+}
+
 static long long UnixTime() {
     return std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -548,20 +568,23 @@ InitResult Client::Init() {
         std::string raw = Post(endpoint, body);
         std::string dec = DecryptResponse(raw, endpoint, nonce);
 
+        const auto document = detail::ParseObject(dec);
+        if (!document.is_object()) throw std::runtime_error("Invalid initialization response");
         result.success          = JsonBool(dec, OBFUSCATE("success"));
-        result.message          = JsonGet(dec, OBFUSCATE("message"));
+        result.message          = BoundedJsonString(document, OBFUSCATE("message"), MAX_SERVER_MESSAGE_BYTES);
         result.status           = MessageToStatus(result.message);
-        result.server_time      = JsonGet(dec, OBFUSCATE("server_time"));
-        result.required_version = JsonGet(dec, OBFUSCATE("required_version"));
-        result.minimum_sdk_version = JsonGet(dec, OBFUSCATE("minimum_sdk_version"));
-        result.recommended_sdk_version = JsonGet(dec, OBFUSCATE("recommended_sdk_version"));
-        result.upgrade_message = JsonGet(dec, OBFUSCATE("upgrade_message"));
+        result.server_time = BoundedJsonString(document, OBFUSCATE("server_time"), MAX_PRODUCT_VALUE_BYTES);
+        result.required_version = BoundedJsonString(document, OBFUSCATE("required_version"), MAX_PRODUCT_VALUE_BYTES);
+        result.minimum_sdk_version = BoundedJsonString(document, OBFUSCATE("minimum_sdk_version"), MAX_PRODUCT_VALUE_BYTES);
+        result.recommended_sdk_version = BoundedJsonString(document, OBFUSCATE("recommended_sdk_version"), MAX_PRODUCT_VALUE_BYTES);
+        result.upgrade_message = BoundedJsonString(document, OBFUSCATE("upgrade_message"), MAX_SERVER_MESSAGE_BYTES);
 
         if (result.success) m_initialized = true;
-    } catch (const std::exception& e) {
+    } catch (const std::exception&) {
         result.success = false;
         result.status  = Status::NetworkError;
-        result.message = e.what();
+        result.message = PublicRequestFailure();
+        m_initialized = false;
         ClearSessionState();
     }
     return result;
@@ -608,42 +631,30 @@ LoginResult Client::Login(const std::string& license_key,
         std::string raw = Post(endpoint, body);
         std::string dec = DecryptResponse(raw, endpoint, nonce);
 
+        const auto document = detail::ParseObject(dec);
+        if (!document.is_object()) throw std::runtime_error("Invalid login response");
         result.success    = JsonBool(dec, OBFUSCATE("success"));
-        result.message    = JsonGet(dec, OBFUSCATE("message"));
+        result.message    = BoundedJsonString(document, OBFUSCATE("message"), MAX_SERVER_MESSAGE_BYTES);
         result.status     = MessageToStatus(result.message);
-        result.token      = JsonGet(dec, OBFUSCATE("token"));
-        result.expires_at = JsonGet(dec, OBFUSCATE("expires_at"));
-        result.minimum_sdk_version = JsonGet(dec, OBFUSCATE("minimum_sdk_version"));
-        result.recommended_sdk_version = JsonGet(dec, OBFUSCATE("recommended_sdk_version"));
-        result.upgrade_message = JsonGet(dec, OBFUSCATE("upgrade_message"));
+        result.token = BoundedJsonString(document, OBFUSCATE("token"), MAX_SESSION_TOKEN_BYTES, result.success);
+        result.expires_at = BoundedJsonString(document, OBFUSCATE("expires_at"), MAX_PRODUCT_VALUE_BYTES);
+        result.minimum_sdk_version = BoundedJsonString(document, OBFUSCATE("minimum_sdk_version"), MAX_PRODUCT_VALUE_BYTES);
+        result.recommended_sdk_version = BoundedJsonString(document, OBFUSCATE("recommended_sdk_version"), MAX_PRODUCT_VALUE_BYTES);
+        result.upgrade_message = BoundedJsonString(document, OBFUSCATE("upgrade_message"), MAX_SERVER_MESSAGE_BYTES);
 
-        if (result.message.empty()) {
-            if (!dec.empty()) {
-                result.message = dec;
-            } else if (!result.success) {
-                result.message = OBFUSCATE("EMPTY_RESPONSE");
-            }
-        }
+        if (result.message.empty()) result.message = result.success ? OBFUSCATE("OK") : OBFUSCATE("REQUEST_FAILED");
 
-        std::string vars_json = JsonGet(dec, OBFUSCATE("variables"));
-        if (!vars_json.empty()) {
-            size_t pos = 0;
-            while ((pos = vars_json.find('"', pos)) != std::string::npos) {
-                size_t k_start = pos + 1;
-                size_t k_end   = vars_json.find('"', k_start);
-                if (k_end == std::string::npos) break;
-                std::string key = vars_json.substr(k_start, k_end - k_start);
-                pos = vars_json.find(':', k_end);
-                if (pos == std::string::npos) break;
-                pos = vars_json.find('"', pos);
-                if (pos == std::string::npos) break;
-                size_t v_start = pos + 1;
-                size_t v_end   = vars_json.find('"', v_start);
-                if (v_end == std::string::npos) break;
-                std::string val = vars_json.substr(v_start, v_end - v_start);
-                m_variables[key] = val;
-                result.variables[key] = val;
-                pos = v_end + 1;
+        auto variables = document.find(OBFUSCATE("variables"));
+        if (variables != document.end() && !variables->is_null()) {
+            if (!variables->is_object() || variables->size() > MAX_VARIABLE_COUNT)
+                throw std::runtime_error("Invalid variables response");
+            for (auto item = variables->begin(); item != variables->end(); ++item) {
+                if (item.key().empty() || item.key().size() > MAX_VARIABLE_NAME_BYTES ||
+                    !item.value().is_string()) throw std::runtime_error("Invalid variable field");
+                std::string value = item.value().get<std::string>();
+                if (value.size() > MAX_VARIABLE_VALUE_BYTES) throw std::runtime_error("Variable too large");
+                m_variables[item.key()] = value;
+                result.variables[item.key()] = std::move(value);
             }
         }
 
@@ -653,10 +664,12 @@ LoginResult Client::Login(const std::string& license_key,
             EncryptStore(m_enc_license_key, license_key);
             m_logged_in   = true;
         }
-    } catch (const std::exception& e) {
+    } catch (const std::exception&) {
         result.success = false;
         result.status  = Status::NetworkError;
-        result.message = e.what();
+        result.message = PublicRequestFailure();
+        if (!result.token.empty()) SecureZeroMemory(result.token.data(), result.token.size());
+        result.token.clear();
         ClearSessionState();
     }
     return result;
@@ -682,26 +695,25 @@ NewsResult Client::GetNews() {
         result.status  = MessageToStatus(result.message);
 
         if (result.success) {
-            std::string items_json = JsonGet(dec, OBFUSCATE("news"));
-            // Very basic manual JSON array parsing
-            size_t pos = 0;
-            while ((pos = items_json.find('{', pos)) != std::string::npos) {
-                size_t end = items_json.find('}', pos);
-                if (end == std::string::npos) break;
-                std::string obj = items_json.substr(pos, end - pos + 1);
+            const auto document = detail::ParseObject(dec);
+            auto news = document.find(OBFUSCATE("news"));
+            if (news == document.end() || !news->is_array() || news->size() > MAX_NEWS_ITEMS)
+                throw std::runtime_error("Invalid news response");
+            for (const auto& obj : *news) {
+                if (!obj.is_object()) throw std::runtime_error("Invalid news item");
                 NewsItem item;
-                item.id         = JsonGet(obj, OBFUSCATE("id"));
-                item.title      = JsonGet(obj, OBFUSCATE("title"));
-                item.content    = JsonGet(obj, OBFUSCATE("content"));
-                item.color      = JsonGet(obj, OBFUSCATE("color"));
-                item.created_at = JsonGet(obj, OBFUSCATE("created_at"));
+                item.id = BoundedJsonString(obj, OBFUSCATE("id"), MAX_PRODUCT_VALUE_BYTES);
+                item.title = BoundedJsonString(obj, OBFUSCATE("title"), MAX_SERVER_MESSAGE_BYTES);
+                item.content = BoundedJsonString(obj, OBFUSCATE("content"), MAX_NEWS_FIELD_BYTES);
+                item.color = BoundedJsonString(obj, OBFUSCATE("color"), 32);
+                item.created_at = BoundedJsonString(obj, OBFUSCATE("created_at"), MAX_PRODUCT_VALUE_BYTES);
                 result.items.push_back(item);
-                pos = end + 1;
             }
         }
-    } catch (const std::exception& e) {
+    } catch (const std::exception&) {
         result.success = false;
-        result.message = e.what();
+        result.status = Status::NetworkError;
+        result.message = PublicRequestFailure();
     }
     return result;
 }
@@ -728,12 +740,14 @@ SimpleResult Client::Heartbeat() {
         result.message  = JsonGet(dec, OBFUSCATE("message"));
         result.status   = MessageToStatus(result.message);
         const std::string rotatedToken = JsonGet(dec, OBFUSCATE("token"));
-        if (result.success && !rotatedToken.empty()) EncryptStore(m_enc_token, rotatedToken);
+        if (result.success && (rotatedToken.empty() || rotatedToken.size() > MAX_SESSION_TOKEN_BYTES))
+            throw std::runtime_error("Invalid rotated token");
+        if (result.success) EncryptStore(m_enc_token, rotatedToken);
         if (!result.success) ClearSessionState();
-    } catch (const std::exception& e) {
+    } catch (const std::exception&) {
         result.success = false;
         result.status  = Status::NetworkError;
-        result.message = e.what();
+        result.message = PublicRequestFailure();
         ClearSessionState();
     }
     return result;
@@ -788,12 +802,14 @@ SimpleResult Client::ValidateSession() {
         result.message  = JsonGet(dec, OBFUSCATE("message"));
         result.status   = MessageToStatus(result.message);
         const std::string rotatedToken = JsonGet(dec, OBFUSCATE("token"));
-        if (result.success && !rotatedToken.empty()) EncryptStore(m_enc_token, rotatedToken);
+        if (result.success && (rotatedToken.empty() || rotatedToken.size() > MAX_SESSION_TOKEN_BYTES))
+            throw std::runtime_error("Invalid rotated token");
+        if (result.success) EncryptStore(m_enc_token, rotatedToken);
         if (!result.success) ClearSessionState();
-    } catch (const std::exception& e) {
+    } catch (const std::exception&) {
         result.success = false;
         result.status  = Status::NetworkError;
-        result.message = e.what();
+        result.message = PublicRequestFailure();
         ClearSessionState();
     }
     return result;
@@ -826,7 +842,8 @@ std::vector<unsigned char> Client::DownloadFile(const std::string& name) {
         const std::string ticketHash = JsonGet(ticketResponse, OBFUSCATE("sha256"));
         const std::string ticketVersion = JsonGet(ticketResponse, OBFUSCATE("version"));
         const std::string ticketFileType = JsonGet(ticketResponse, OBFUSCATE("file_type"));
-        if (ticket.empty() || ticketToken.empty() || ticketFileId.empty() ||
+        if (ticket.empty() || ticket.size() > MAX_SESSION_TOKEN_BYTES || ticketToken.empty() ||
+            ticketToken.size() > MAX_SESSION_TOKEN_BYTES || ticketFileId.empty() ||
             !IsLowerHexDigest(ticketHash) || ticketVersion.empty() || ticketFileType.empty()) {
             SecureZeroMemory(token.data(), token.size());
             SecureZeroMemory(deviceHwid.data(), deviceHwid.size());
@@ -848,7 +865,9 @@ std::vector<unsigned char> Client::DownloadFile(const std::string& name) {
         std::string raw = Post(endpoint, body);
         std::string dec = DecryptResponse(raw, endpoint, nonce);
         const std::string rotatedToken = JsonGet(dec, OBFUSCATE("token"));
-        if (!rotatedToken.empty()) EncryptStore(m_enc_token, rotatedToken);
+        if (rotatedToken.empty() || rotatedToken.size() > MAX_SESSION_TOKEN_BYTES)
+            throw std::runtime_error("Invalid rotated token");
+        EncryptStore(m_enc_token, rotatedToken);
 
         if (JsonBool(dec, OBFUSCATE("success"))) {
             std::string b64_data = JsonGet(dec, OBFUSCATE("data"));
@@ -910,7 +929,9 @@ bool Client::AutoUpdateLoader(const std::string& name, const std::string& curren
         std::string rotatedToken = JsonGet(response, OBFUSCATE("token"));
         std::string latestVersion = JsonGet(response, OBFUSCATE("version"));
         std::string fileType = JsonGet(response, OBFUSCATE("file_type"));
-        if (!rotatedToken.empty()) EncryptStore(m_enc_token, rotatedToken);
+        if (rotatedToken.empty() || rotatedToken.size() > MAX_SESSION_TOKEN_BYTES)
+            throw std::runtime_error("Invalid rotated token");
+        EncryptStore(m_enc_token, rotatedToken);
         SecureZeroMemory(token.data(), token.size());
         SecureZeroMemory(hwid.data(), hwid.size());
         if (!JsonBool(response, OBFUSCATE("success")) || fileType != OBFUSCATE("loader") ||
@@ -1004,6 +1025,15 @@ bool Client::TestValidatePortableExecutable(const std::vector<unsigned char>& da
 
 bool Client::TestAutoUpdatePathAllowed(const std::wstring& path) {
     return IsAutoUpdatePathAllowed(path);
+}
+
+std::string Client::TestBoundedJsonString(const std::string& json,
+                                          const std::string& key,
+                                          size_t maximum,
+                                          bool required) {
+    const auto document = detail::ParseObject(json);
+    if (!document.is_object()) throw std::runtime_error("Expected JSON object");
+    return BoundedJsonString(document, key, maximum, required);
 }
 #endif
 

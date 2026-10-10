@@ -150,6 +150,10 @@ The SDK includes:
   the SDK; the signing private key stays on the server.
 - Cryptographically random per-request replay nonces
 - Fail-closed asymmetric server signature, request-context, and expiry validation
+- Strict response schemas and size limits for session tokens, messages, variables,
+  news, and release metadata. Successful authentication and token rotation fail
+  closed when a required token is missing or malformed; raw responses and internal
+  exception details are never copied into public error messages.
 - Interruptible, single-owner heartbeat worker with bounded intervals. Starting it
   again safely replaces the previous worker, and any failed heartbeat invalidates
   the local session immediately before the expiry callback runs.

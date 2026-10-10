@@ -32,6 +32,11 @@ class SdkTransportSecurityTests(unittest.TestCase):
         self.assertIn("WINHTTP_QUERY_CONTENT_LENGTH", self.source)
         self.assertIn("if (!WinHttpQueryDataAvailable", self.source)
 
+    def test_public_errors_do_not_expose_raw_responses_or_exceptions(self):
+        self.assertNotIn("result.message = e.what()", self.source)
+        self.assertNotIn("result.message = dec", self.source)
+        self.assertIn('OBFUSCATE("REQUEST_FAILED")', self.source)
+
 
 if __name__ == "__main__":
     unittest.main()
