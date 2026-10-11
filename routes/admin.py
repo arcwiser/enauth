@@ -1831,17 +1831,53 @@ async def security_control_center(user=Depends(require_admin), db: aiosqlite.Con
         ) as cur:
             outstanding_tickets = int((await cur.fetchone())[0])
 
+    signing_key_protected = (RESPONSE_SIGNING_KEY_PATH.is_file() and
+                             ((RESPONSE_SIGNING_KEY_PATH.stat().st_mode & 0o077) == 0
+                              if os.name != "nt" else True))
+    proxy_headers_enabled = os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true"
     settings = {
         "secure_cookies": COOKIE_SECURE,
         "cors_restricted": os.getenv("CORS_ORIGINS", "*").strip() != "*",
         "debug_disabled": os.getenv("DEBUG", "false").lower() != "true",
-        "license_pepper_configured": bool(os.getenv("LICENSE_KEY_PEPPER", "").strip()),
         "license_keys_separated": bool(os.getenv("LICENSE_LOOKUP_KEY", "").strip()) and
                                   bool(os.getenv("LICENSE_ENCRYPTION_KEY", "").strip()),
         "legacy_protocol_disabled": os.getenv("ALLOW_LEGACY_PROTOCOL", "false").lower() != "true",
         "backup_encryption_configured": bool(BACKUP_ENCRYPTION_KEY),
         "automatic_backups_enabled": int(os.getenv("AUTO_BACKUP_HOURS", "0")) > 0,
+        "signing_key_protected": signing_key_protected,
+        "trusted_proxy_configured": (not proxy_headers_enabled or
+                                     bool(os.getenv("TRUSTED_PROXY_CIDRS", "").strip())),
     }
+    recommendation_catalog = {
+        "secure_cookies": ("critical", "Require secure session cookies",
+                           "Set COOKIE_SECURE=true so browser sessions are never sent over plain HTTP.", "Open settings", "settings.html"),
+        "cors_restricted": ("critical", "Restrict browser origins",
+                            "Replace wildcard CORS with the exact HTTPS panel origin.", "Open settings", "settings.html"),
+        "debug_disabled": ("critical", "Disable production debug mode",
+                           "Set DEBUG=false to hide development endpoints and diagnostics.", "Open settings", "settings.html"),
+        "license_keys_separated": ("high", "Separate license secrets",
+                                   "Configure independent LICENSE_LOOKUP_KEY and LICENSE_ENCRYPTION_KEY values.", "Read SDK guidance", "sdk.html"),
+        "legacy_protocol_disabled": ("high", "Disable legacy clients",
+                                     "Keep ALLOW_LEGACY_PROTOCOL=false after all clients use protocol 2.", "Review SDK versions", "sdk.html"),
+        "backup_encryption_configured": ("high", "Encrypt server backups",
+                                         "Configure BACKUP_ENCRYPTION_KEY before creating scheduled backups.", "Manage backups", "backups.html"),
+        "automatic_backups_enabled": ("medium", "Schedule automatic backups",
+                                      "Set AUTO_BACKUP_HOURS so recovery does not depend on manual snapshots.", "Manage backups", "backups.html"),
+        "signing_key_protected": ("critical", "Protect the response-signing key",
+                                  "Ensure the signing-key file exists and is readable only by the EnAuth service account.", "View server health", "health.html"),
+        "trusted_proxy_configured": ("critical", "Restrict trusted proxies",
+                                     "When proxy headers are enabled, allow only the reverse proxy network in TRUSTED_PROXY_CIDRS.", "Open settings", "settings.html"),
+    }
+    recommendations = [
+        {"id": key, "severity": item[0], "title": item[1], "description": item[2],
+         "action_label": item[3], "action_href": item[4]}
+        for key, item in recommendation_catalog.items() if not settings[key]
+    ]
+    severity_order = {"critical": 0, "high": 1, "medium": 2}
+    recommendations.sort(key=lambda item: severity_order[item["severity"]])
+    security_score = round(100 * sum(bool(value) for value in settings.values()) / len(settings))
+    security_grade = "A" if security_score >= 90 else "B" if security_score >= 80 else \
+        "C" if security_score >= 70 else "D" if security_score >= 60 else "F"
     return {
         "generated_at": utcnow(),
         "applications": apps,
@@ -1849,7 +1885,14 @@ async def security_control_center(user=Depends(require_admin), db: aiosqlite.Con
         "recent_security_events": recent_events,
         "outstanding_download_tickets": outstanding_tickets,
         "security_settings": settings,
-        "security_score": round(100 * sum(bool(v) for v in settings.values()) / len(settings)),
+        "security_score": security_score,
+        "security_grade": security_grade,
+        "recommendations": recommendations,
+        "finding_counts": {
+            "critical": sum(item["severity"] == "critical" for item in recommendations),
+            "high": sum(item["severity"] == "high" for item in recommendations),
+            "medium": sum(item["severity"] == "medium" for item in recommendations),
+        },
     }
 
 

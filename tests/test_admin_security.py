@@ -450,6 +450,10 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
             await db.commit()
             overview = await self.admin.security_control_center(user=caller, db=db)
             self.assertEqual(overview["applications"][0]["active_sessions"], 1)
+            self.assertIn(overview["security_grade"], {"A", "B", "C", "D", "F"})
+            self.assertEqual(set(overview["finding_counts"]), {"critical", "high", "medium"})
+            self.assertTrue(all(set(item) == {"id", "severity", "title", "description", "action_label", "action_href"}
+                                for item in overview["recommendations"]))
             self.assertNotIn("never-return-this-secret", str(overview))
 
             with self.assertRaises(HTTPException):
