@@ -447,11 +447,19 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
                    VALUES(?,?,?,?,?,?,datetime('now','+1 hour'),datetime('now','+5 minutes'),2)""",
                 ("sess-sec", "token-sec", "lic-sec", "h" * 64, "127.0.0.1", "app-sec"),
             )
+            await db.execute(
+                "INSERT INTO logs(action,app_id,ip,details) VALUES(?,?,?,?)",
+                ("login_fail", "app-sec", "127.0.0.1", "invalid key"),
+            )
             await db.commit()
             overview = await self.admin.security_control_center(user=caller, db=db)
             self.assertEqual(overview["applications"][0]["active_sessions"], 1)
             self.assertIn(overview["security_grade"], {"A", "B", "C", "D", "F"})
             self.assertEqual(set(overview["finding_counts"]), {"critical", "high", "medium"})
+            self.assertEqual(len(overview["security_trend"]), 7)
+            self.assertEqual(set(overview["security_trend"][0]), {"date", "count"})
+            self.assertEqual(sum(day["count"] for day in overview["security_trend"]), 1)
+            self.assertEqual(overview["event_breakdown"][0]["action"], "login_fail")
             self.assertTrue(all(set(item) == {"id", "severity", "title", "description", "action_label", "action_href"}
                                 for item in overview["recommendations"]))
             self.assertNotIn("never-return-this-secret", str(overview))

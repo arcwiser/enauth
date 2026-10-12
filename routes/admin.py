@@ -1801,6 +1801,8 @@ async def security_control_center(user=Depends(require_admin), db: aiosqlite.Con
     app_ids = [app["id"] for app in apps]
     event_counts = {"failed_auth": 0, "replay": 0, "hwid_limit": 0, "suspicious": 0}
     recent_events = []
+    trend_counts = {}
+    event_breakdown = []
     outstanding_tickets = 0
     if app_ids:
         marks = _qmarks(len(app_ids))
@@ -1830,6 +1832,30 @@ async def security_control_center(user=Depends(require_admin), db: aiosqlite.Con
             app_ids,
         ) as cur:
             outstanding_tickets = int((await cur.fetchone())[0])
+        security_event_sql = "(action LIKE '%fail%' OR action IN ('suspicious_login','login_hwid_limit','build_revoked','emergency_lockdown'))"
+        async with db.execute(
+            f"""SELECT date(timestamp) AS day,COUNT(*) AS count FROM logs
+                WHERE timestamp>=datetime('now','-6 days','start of day')
+                  AND app_id IN ({marks}) AND {security_event_sql}
+                GROUP BY date(timestamp) ORDER BY day""",
+            app_ids,
+        ) as cur:
+            trend_counts = {row["day"]: int(row["count"]) for row in await cur.fetchall()}
+        async with db.execute(
+            f"""SELECT action,COUNT(*) AS count FROM logs
+                WHERE timestamp>=datetime('now','-7 days')
+                  AND app_id IN ({marks}) AND {security_event_sql}
+                GROUP BY action ORDER BY count DESC,action LIMIT 6""",
+            app_ids,
+        ) as cur:
+            event_breakdown = rows_to_list(await cur.fetchall())
+
+    today = datetime.now(timezone.utc).date()
+    security_trend = [
+        {"date": (today - timedelta(days=offset)).isoformat(),
+         "count": trend_counts.get((today - timedelta(days=offset)).isoformat(), 0)}
+        for offset in range(6, -1, -1)
+    ]
 
     signing_key_protected = (RESPONSE_SIGNING_KEY_PATH.is_file() and
                              ((RESPONSE_SIGNING_KEY_PATH.stat().st_mode & 0o077) == 0
@@ -1893,6 +1919,8 @@ async def security_control_center(user=Depends(require_admin), db: aiosqlite.Con
             "high": sum(item["severity"] == "high" for item in recommendations),
             "medium": sum(item["severity"] == "medium" for item in recommendations),
         },
+        "security_trend": security_trend,
+        "event_breakdown": event_breakdown,
     }
 
 
