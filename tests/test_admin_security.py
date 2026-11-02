@@ -364,6 +364,80 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
             await db.commit()
             response = await self.admin.portal_download_file("f-1", lic=lic, db=db)
             self.assertEqual(response.headers["content-disposition"].split(";")[0], 'attachment')
+            async with db.execute(
+                "SELECT source FROM file_download_events WHERE file_id='f-1' AND license_id='l-1'"
+            ) as cur:
+                self.assertEqual((await cur.fetchone())["source"], "portal")
+
+    async def test_portal_files_require_live_entitlements_and_live_releases(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute(
+                "INSERT INTO applications(id,name,secret_key) VALUES(?,?,?)",
+                ("app-portal", "Portal App", "s" * 64),
+            )
+            for product_id in ("product-owned", "product-restricted"):
+                await db.execute(
+                    "INSERT INTO products(id,app_id,name,level) VALUES(?,?,?,?)",
+                    (product_id, "app-portal", product_id, product_id),
+                )
+            await db.execute(
+                "INSERT INTO licenses(id,key,key_hash,app_id) VALUES(?,?,?,?)",
+                ("license-portal", "masked", "p" * 64, "app-portal"),
+            )
+            await db.execute(
+                """INSERT INTO license_products(id,license_id,product_id,expires_at)
+                   VALUES(?,?,?,datetime('now','+1 hour'))""",
+                ("entitlement-owned", "license-portal", "product-owned"),
+            )
+            await db.execute(
+                """INSERT INTO license_products(id,license_id,product_id,expires_at)
+                   VALUES(?,?,?,datetime('now','-1 hour'))""",
+                ("entitlement-restricted", "license-portal", "product-restricted"),
+            )
+            await db.execute(
+                """INSERT INTO app_files(id,app_id,name,content,portal_visible)
+                   VALUES(?,?,?,?,1)""",
+                ("mapped-file", "app-portal", "mapped.bin", b"restricted"),
+            )
+            await db.execute(
+                "INSERT INTO app_file_products(file_id,product_id) VALUES(?,?)",
+                ("mapped-file", "product-restricted"),
+            )
+            await db.execute(
+                """INSERT INTO app_files
+                   (id,app_id,name,content,portal_visible,product_id,is_revoked,is_active)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                ("revoked-file", "app-portal", "revoked.bin", b"revoked", 1,
+                 "product-owned", 1, 0),
+            )
+            await db.commit()
+            lic = {"id": "license-portal", "app_id": "app-portal"}
+
+            self.assertEqual(await self.admin.portal_list_files(lic=lic, db=db), [])
+            for file_id in ("mapped-file", "revoked-file"):
+                with self.assertRaises(HTTPException) as denied:
+                    await self.admin.portal_download_file(file_id, lic=lic, db=db)
+                self.assertEqual(denied.exception.status_code, 404)
+
+            await db.execute(
+                """UPDATE license_products SET expires_at=datetime('now','+1 hour')
+                   WHERE id='entitlement-restricted'"""
+            )
+            await db.commit()
+            visible = await self.admin.portal_list_files(lic=lic, db=db)
+            self.assertEqual([item["id"] for item in visible], ["mapped-file"])
+            response = await self.admin.portal_download_file("mapped-file", lic=lic, db=db)
+            self.assertEqual(response.headers["content-disposition"].split(";")[0], "attachment")
+
+            await db.execute(
+                "UPDATE license_products SET is_paused=1 WHERE id='entitlement-restricted'"
+            )
+            await db.commit()
+            self.assertEqual(await self.admin.portal_list_files(lic=lic, db=db), [])
+            with self.assertRaises(HTTPException) as paused:
+                await self.admin.portal_download_file("mapped-file", lic=lic, db=db)
+            self.assertEqual(paused.exception.status_code, 404)
 
     async def test_public_status_does_not_expose_application_secrets(self):
         async with aiosqlite.connect(self.db_path) as db:

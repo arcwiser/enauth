@@ -24,8 +24,13 @@ jobs:
         shell: pwsh
         run: |
           $matches = git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- ':!sdk/json.hpp'
-          if ($LASTEXITCODE -eq 0) { Write-Error "Unresolved merge conflict markers found:`n$matches" }
-          if ($LASTEXITCODE -gt 1) { exit $LASTEXITCODE }
+          $grepExitCode = $LASTEXITCODE
+          if ($grepExitCode -eq 0) {
+            Write-Error "Unresolved merge conflict markers found:`n$matches"
+            exit 1
+          }
+          if ($grepExitCode -gt 1) { exit $grepExitCode }
+          exit 0
 
       - name: Compile Python sources
         run: python -m compileall -q main.py database.py routes utils migrations
