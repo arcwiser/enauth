@@ -4968,14 +4968,47 @@ async def review_reset_request(request_id: str, decision: str, user=Depends(requ
 
 # ─── End-User Portal Files ──────────────────────────────────────────────────
 
+_PORTAL_FILE_ACCESS_SQL = """
+    f.app_id = ? AND f.portal_visible = 1
+    AND f.is_active = 1 AND f.is_archived = 0 AND f.is_revoked = 0
+    AND (f.available_from IS NULL OR f.available_from <= CURRENT_TIMESTAMP)
+    AND (f.available_until IS NULL OR f.available_until > CURRENT_TIMESTAMP)
+    AND (
+        (
+            f.product_id IS NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM app_file_products unrestricted_afp
+                WHERE unrestricted_afp.file_id = f.id
+            )
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM license_products portal_lp
+            JOIN products portal_p ON portal_p.id = portal_lp.product_id
+            WHERE portal_lp.license_id = ?
+              AND portal_p.app_id = f.app_id
+              AND portal_p.is_active = 1 AND portal_p.is_paused = 0
+              AND portal_lp.is_paused = 0
+              AND (portal_lp.expires_at IS NULL OR portal_lp.expires_at > CURRENT_TIMESTAMP)
+              AND (
+                  portal_lp.product_id = f.product_id
+                  OR EXISTS (
+                      SELECT 1 FROM app_file_products allowed_afp
+                      WHERE allowed_afp.file_id = f.id
+                        AND allowed_afp.product_id = portal_lp.product_id
+                  )
+              )
+        )
+    )
+"""
+
+
 @router.get("/portal/files")
 async def portal_list_files(lic=Depends(require_portal_user), db: aiosqlite.Connection = Depends(get_db)):
-    sql = """SELECT id, name, created_at, product_id
-             FROM app_files
-             WHERE app_id = ? AND portal_visible = 1
-               AND (product_id IS NULL OR product_id IN
-                    (SELECT product_id FROM license_products WHERE license_id=?))
-             ORDER BY created_at DESC"""
+    sql = f"""SELECT f.id, f.name, f.created_at, f.product_id
+              FROM app_files f
+              WHERE {_PORTAL_FILE_ACCESS_SQL}
+              ORDER BY f.created_at DESC"""
     async with db.execute(sql, (lic["app_id"], lic["id"])) as cur:
         return rows_to_list(await cur.fetchall())
 
@@ -4983,9 +5016,9 @@ async def portal_list_files(lic=Depends(require_portal_user), db: aiosqlite.Conn
 @router.get("/portal/files/{file_id}/download")
 async def portal_download_file(file_id: str, lic=Depends(require_portal_user), db: aiosqlite.Connection = Depends(get_db)):
     async with db.execute(
-        """SELECT name, content FROM app_files WHERE id = ? AND app_id = ? AND portal_visible=1
-           AND (product_id IS NULL OR product_id IN
-                (SELECT product_id FROM license_products WHERE license_id=?))""",
+        f"""SELECT f.id, f.name, f.content
+            FROM app_files f
+            WHERE f.id = ? AND {_PORTAL_FILE_ACCESS_SQL}""",
         (file_id, lic["app_id"], lic["id"]),
     ) as cur:
         row = await cur.fetchone()
@@ -4995,6 +5028,12 @@ async def portal_download_file(file_id: str, lic=Depends(require_portal_user), d
 
     content = row["content"]
     filename = row["name"]
+
+    await db.execute(
+        "INSERT INTO file_download_events(file_id,license_id,source) VALUES(?,?,?)",
+        (row["id"], lic["id"], "portal"),
+    )
+    await db.commit()
 
     # Security: sanitize filename to prevent HTTP header injection via
     # Content-Disposition. Strip any characters outside safe ASCII printable
