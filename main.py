@@ -186,10 +186,16 @@ async def security_middleware(request: Request, call_next):
     response.headers["X-Request-ID"] = request_id
     response.headers["X-Response-Time-Ms"] = f"{elapsed_ms:.2f}"
     response.headers["Server-Timing"] = f"app;dur={elapsed_ms:.2f}"
-    if request.url.path.startswith("/api/client/download"):
+    if (request.url.path.startswith("/api/client/download") or
+            request.url.path.startswith("/api/integrations")):
         response.headers["Cache-Control"] = "no-store, private, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
+    if request.url.path.startswith("/api/integrations"):
+        vary = {item.strip() for item in response.headers.get("Vary", "").split(",") if item.strip()}
+        vary.update(("X-API-Key", "X-Discord-Key"))
+        response.headers["Vary"] = ", ".join(sorted(vary))
+        response.headers["X-Robots-Tag"] = "noindex, nofollow"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"

@@ -399,9 +399,26 @@ CREATE TABLE IF NOT EXISTS api_keys (
     allowed_ips TEXT,
     usage_count INTEGER NOT NULL DEFAULT 0,
     last_ip     TEXT,
+    rate_limit_per_minute INTEGER,
+    rate_window_minute INTEGER,
+    rate_window_count INTEGER NOT NULL DEFAULT 0,
     expires_at  DATETIME,
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS api_idempotency_keys (
+    credential_id        TEXT NOT NULL,
+    credential_kind      TEXT NOT NULL,
+    operation            TEXT NOT NULL,
+    idempotency_key_hash TEXT NOT NULL,
+    request_hash         TEXT NOT NULL,
+    result_json          TEXT,
+    expires_at           DATETIME NOT NULL,
+    created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(credential_id, credential_kind, operation, idempotency_key_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_idempotency_expires ON api_idempotency_keys(expires_at);
 
 CREATE TABLE IF NOT EXISTS download_tickets (
     id TEXT PRIMARY KEY,

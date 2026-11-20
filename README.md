@@ -434,6 +434,127 @@ When running in debug mode (`DEBUG=true`), API documentation is available at:
 - Swagger UI: `http://localhost:8080/docs`
 - ReDoc: `http://localhost:8080/redoc`
 
+### Management API keys
+
+Create an app-bound API key from **API Keys** in the owner panel and send it in
+the `X-API-Key` header. Prefer the smallest required scopes and an IP/CIDR
+allowlist. The management API is rooted at `/api/integrations`.
+
+Only owner accounts may issue, rotate, update, or revoke management API keys.
+Scope names are validated when a key is created or edited: unknown scopes and
+unknown resource wildcards are rejected, duplicates are removed, and names are
+stored in a canonical lowercase form.
+
+Each key may also have its own requests-per-minute ceiling. The counter is
+updated atomically in SQLite, so the limit is shared by all server workers and
+survives ordinary process concurrency rather than existing only in memory.
+
+Every `/api/integrations` response is marked `no-store, private`, varies on the
+credential headers, and is excluded from indexing. Requests supplying both an
+API key and Discord key are rejected instead of silently choosing the more
+privileged credential.
+
+Common license operations:
+
+| Operation | Method and path | Required scope |
+| --- | --- | --- |
+| List keys, product names, and levels | `GET /apps/{app_id}/licenses` | `licenses.read` |
+| Inspect one key's levels and metadata | `GET /apps/{app_id}/licenses/{id_or_key}` | `licenses.read` |
+| Generate keys for a level | `POST /apps/{app_id}/licenses` | `licenses.generate` |
+| Update status, expiry, HWID limit, notes, or metadata | `PATCH /apps/{app_id}/licenses/{id_or_key}` | `licenses.modify` |
+| Ban/blacklist a key | `POST /apps/{app_id}/licenses/{id_or_key}/blacklist` | `licenses.modify` |
+| Unblacklist a key | `POST /apps/{app_id}/licenses/{id_or_key}/unblacklist` | `licenses.modify` |
+| Reset a key's HWID bindings | `POST /apps/{app_id}/licenses/{id_or_key}/reset-hwid` | `licenses.modify` |
+| Add a level to a key | `POST /apps/{app_id}/licenses/{id_or_key}/products` | `licenses.modify` |
+| Pause/resume one level | `POST /apps/{app_id}/licenses/{id_or_key}/products/{product_id}/pause` or `/resume` | `licenses.modify` |
+| Remove a level from a key | `DELETE /apps/{app_id}/licenses/{id_or_key}/products/{product_id}` | `licenses.modify` |
+| Permanently delete a key | `DELETE /apps/{app_id}/licenses/{id_or_key}` | `licenses.delete` |
+
+Bulk license automation accepts up to 100 IDs or raw keys per request. Inputs
+are fully resolved and deduplicated before the transaction starts, so an unknown
+identifier cannot leave a partially modified batch.
+
+| Bulk operation | Method and path | Required scope |
+| --- | --- | --- |
+| Blacklist keys | `POST /apps/{app_id}/licenses/bulk/blacklist` | `licenses.modify` |
+| Unblacklist keys | `POST /apps/{app_id}/licenses/bulk/unblacklist` | `licenses.modify` |
+| Reset HWIDs and device fingerprints | `POST /apps/{app_id}/licenses/bulk/reset-hwid` | `licenses.modify` |
+| Permanently delete keys | `POST /apps/{app_id}/licenses/bulk/delete` | `licenses.delete` |
+
+The delete body must include `"confirm":"DELETE"`. Bulk blacklisting and HWID
+resets immediately revoke affected sessions.
+
+Product-level administration is also available through API keys:
+
+| Operation | Method and path | Required scope |
+| --- | --- | --- |
+| List levels and version policies | `GET /apps/{app_id}/products` | `products.read` |
+| Create a level | `POST /apps/{app_id}/products` | `products.modify` |
+| Rename, deactivate, or change version policy | `PATCH /apps/{app_id}/products/{product_id}` | `products.modify` |
+| Pause/resume a level-wide outage | `POST /apps/{app_id}/products/{product_id}/pause` or `/resume` | `products.modify` |
+| Preview outage restoration | `GET /apps/{app_id}/products/{product_id}/resume-preview` | `products.read` |
+| Delete a level | `DELETE /apps/{app_id}/products/{product_id}?force=true` | `products.delete` |
+
+Deleting a product with assigned licenses is rejected unless `force=true` is
+explicitly supplied. Deactivation and client-version policy changes revoke that
+product's current sessions so the new policy is enforced on the next login.
+
+Unbound owner API keys can administer applications:
+
+| Operation | Method and path | Required scope |
+| --- | --- | --- |
+| Create an application | `POST /apps` | `apps.create` |
+| Update app name, version, or download-abuse policy | `PATCH /apps/{app_id}` | `apps.modify` |
+| Rotate the legacy application secret | `POST /apps/{app_id}/rotate-secret` | `apps.secrets` |
+| Delete an application | `DELETE /apps/{app_id}?force=true` | `apps.delete` |
+
+Initial and rotated application secrets are returned only by their respective
+calls. Secret rotation requires its own high-risk scope and is not granted by
+the legacy `write` scope. App-bound keys cannot create or access other apps.
+
+`licenses.read` returns a masked key plus `products` and `levels`. Add the
+separate high-risk `licenses.reveal` scope only when the integration genuinely
+needs stored plaintext keys. Newly generated keys are returned once by the
+generation call regardless, so the caller can deliver them without retaining
+ongoing reveal access. Destructive `*.delete` operations likewise require an
+explicit delete scope; the legacy broad `write` scope does not grant them.
+
+```bash
+# Discover available product names and level identifiers.
+curl -H "X-API-Key: $ENAUT_API_KEY" \
+  "https://auth.example.com/api/integrations/apps/APP_ID"
+
+# Generate two 30-day keys for level "pro".
+curl -X POST -H "X-API-Key: $ENAUT_API_KEY" \
+  -H "Idempotency-Key: order-2026-000042" \
+  -H "Content-Type: application/json" \
+  -d '{"product_level":"pro","duration_hours":720,"count":2,"max_hwids":1}' \
+  "https://auth.example.com/api/integrations/apps/APP_ID/licenses"
+
+# Read the product names and levels assigned to a key without revealing it.
+curl -H "X-API-Key: $ENAUT_API_KEY" \
+  "https://auth.example.com/api/integrations/apps/APP_ID/licenses/LICENSE_ID"
+```
+
+Use `GET /apps/{app_id}/capabilities` to verify what the presented credential
+can do. An owner key with the `admin` scope can use every management operation,
+but narrowly scoped, app-bound keys are recommended for production automation.
+
+Other least-privilege scopes include `logs.read`, `sessions.read`,
+`sessions.modify`, `builds.read`, `builds.upload`, `builds.delete`, `news.read`,
+`news.modify`, `news.delete`, `hwids.read`, and `hwids.modify`. Global variable
+access is split between `variables.read`, `variables.modify`,
+`variables.secrets`, and `variables.delete`; secret values stay masked unless
+`variables.secrets` is present, and modifying or declassifying an existing
+secret also requires that explicit high-risk scope.
+
+Generation accepts an optional `Idempotency-Key` header containing 8-200 safe
+ASCII characters. Repeating the same request with the same credential and key
+within 24 hours returns the original generated licenses without creating more.
+Reusing it with different parameters returns HTTP 409. Retry records contain
+only license IDs and response metadata; full keys are reconstructed from their
+existing AES-GCM encrypted storage rather than copied into a plaintext cache.
+
 ## Client SDK Integration
 
 See `sdk/README.md` for detailed C++ SDK integration instructions.
@@ -496,6 +617,36 @@ For issues and questions, please refer to the project documentation or contact t
 
 ### Unreleased
 
+- Allowed `licenses.read` API keys to inspect assigned product names and levels
+  without granting access to plaintext license credentials.
+- Prevented internal lookup hashes, encrypted key material, and client password
+  hashes from leaking through license-detail responses.
+- Required explicit scopes for destructive API deletes instead of granting them
+  to legacy broad `write` keys.
+- Added explicit API aliases for blacklisting and unblacklisting license keys.
+- Added API-key operations to add, pause, resume, compensate, and remove one
+  product level on a license without disturbing its other levels.
+- Added scoped license updates for status, expiration/lifetime, HWID limits,
+  notes, and structured metadata, with bound-seat validation and session revocation.
+- Added scoped product-level listing, creation, configuration, version-policy
+  management, and guarded deletion through API keys.
+- Added product outage pause/resume APIs with session revocation, downtime
+  restoration, optional compensation, and a read-only impact preview.
+- Added scoped application creation, updates, one-time secret rotation, and
+  guarded deletion. Bound keys remain limited to their configured application.
+- Restricted management API-key issuance and lifecycle operations to owners and
+  added strict scope validation/canonicalization to prevent configuration drift.
+- Added optional durable per-key rate limits with atomic shared counters and
+  owner-panel controls to contain leaked or malfunctioning integrations.
+- Added atomic bulk blacklist, unblacklist, HWID/device reset, and confirmed
+  deletion operations for up to 100 license identifiers per API request.
+- Added concurrency-safe, 24-hour idempotency for license generation so network
+  retries cannot accidentally mint duplicate batches or duplicate plaintext keys.
+- Replaced remaining broad integration permissions with resource-specific scopes
+  for logs, sessions, builds, news, variables, and HWID bans while preserving
+  documented legacy `read`/`write` compatibility for non-destructive operations.
+- Marked all management API responses non-cacheable and rejected requests that
+  ambiguously supply both supported integration credential types.
 - Added application-wide and per-product outage pause/resume controls.
 - Added automatic downtime restoration plus optional compensation for affected entitlements.
 - Added operational monitoring and production configuration checks to the dashboard.

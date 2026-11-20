@@ -1,4 +1,5 @@
 import os
+import asyncio
 import unittest
 
 from utils.request_security import csrf_origin_allowed, resolve_client_ip
@@ -76,6 +77,35 @@ class RequestSecurityTests(unittest.TestCase):
 
         self.assertEqual(rejected_status, 403)
         self.assertEqual(rejected_body, {"detail": "CSRF_ORIGIN_REJECTED"})
+
+    def test_integration_responses_are_never_cacheable(self):
+        import main
+        from starlette.requests import Request
+        from starlette.responses import JSONResponse
+
+        path = "/api/integrations/apps/app-1/licenses"
+        scope = {
+            "type": "http", "asgi": {"version": "3.0"},
+            "http_version": "1.1", "method": "GET", "scheme": "https",
+            "path": path, "raw_path": path.encode(), "query_string": b"",
+            "server": ("testserver", 443), "client": ("127.0.0.1", 12345),
+            "headers": [(b"host", b"testserver")],
+        }
+
+        async def exercise():
+            async def handler(_request):
+                response = JSONResponse({"key": "sensitive"})
+                response.headers["Vary"] = "Origin"
+                return response
+            return await main.security_middleware(Request(scope), handler)
+
+        response = asyncio.run(exercise())
+        self.assertEqual(response.headers["cache-control"], "no-store, private, max-age=0")
+        self.assertEqual(response.headers["pragma"], "no-cache")
+        self.assertEqual(response.headers["expires"], "0")
+        self.assertEqual(set(response.headers["vary"].split(", ")),
+                         {"Origin", "X-API-Key", "X-Discord-Key"})
+        self.assertEqual(response.headers["x-robots-tag"], "noindex, nofollow")
 
 
 if __name__ == "__main__":

@@ -575,6 +575,20 @@ class AdminSecurityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored["key_hash"], __import__("hashlib").sha256(rotated["key"].encode()).hexdigest())
             self.assertEqual(stored["is_active"], 1)
 
+    async def test_api_key_scopes_are_strictly_validated_and_canonicalized(self):
+        body = self.admin.CreateApiKeyBody(
+            name="Scoped", scopes=" Licenses.Read,apps.read,licenses.read,PRODUCTS.* "
+        )
+        self.assertEqual(body.scopes, "apps.read,licenses.read,products.*")
+        self.assertEqual(self.admin.CreateApiKeyBody(name="Admin", scopes="admin,apps.read").scopes,
+                         "admin")
+        self.assertEqual(self.admin.CreateApiKeyBody(name="All", scopes="*,read").scopes, "*")
+        for invalid in ("licenses.read,unknown.scope", "unknown.*", ", ,"):
+            with self.subTest(scopes=invalid), self.assertRaises(ValueError):
+                self.admin.CreateApiKeyBody(name="Invalid", scopes=invalid)
+        updated = self.admin.UpdateApiKeyBody(scopes="write,licenses.delete")
+        self.assertEqual(updated.scopes, "licenses.delete,write")
+
     async def test_license_csv_export_reveals_authorized_keys_and_escapes_formulas(self):
         caller = {"id": "owner-1", "username": "owner", "role": "owner", "_source": "admin_users"}
         license_key = "EXPORT-ABCDEF-123456"

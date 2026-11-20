@@ -30,6 +30,7 @@ from utils.crypto import (
     license_lookup_hashes, current_license_lookup_key_id,
 )
 from utils.logger import app_log, log_action
+from utils.api_scopes import normalize_api_scopes
 from utils.response_signing import KEY_PATH as RESPONSE_SIGNING_KEY_PATH, response_public_key_hex, sign_response
 from utils.runtime_metrics import snapshot as runtime_metrics_snapshot
 from utils.uploads import read_build_upload, validate_release_name, validate_release_version
@@ -118,6 +119,7 @@ async def cleanup_runtime_state(db: aiosqlite.Connection):
     await db.execute("DELETE FROM sessions WHERE expires_at <= ? OR COALESCE(token_expires_at, expires_at) <= ?", (now, now))
     await db.execute("DELETE FROM temp_2fa_sessions WHERE expires_at <= ?", (now,))
     await db.execute("DELETE FROM download_tickets WHERE expires_at <= ? OR consumed_at IS NOT NULL", (now,))
+    await db.execute("DELETE FROM api_idempotency_keys WHERE expires_at <= ?", (now,))
     await db.execute("DELETE FROM logs WHERE timestamp < datetime(?, '-30 days')", (now,))
     await db.commit()
 
@@ -2277,7 +2279,8 @@ async def developer_overview(request: Request, user=Depends(require_admin),
     """Non-secret integration inventory for the Developer Center."""
     async with db.execute(
         """SELECT ak.id,ak.name,ak.key_prefix,ak.scopes,ak.is_active,ak.last_used,ak.expires_at,
-                  ak.usage_count,ak.last_ip,ak.app_id,a.name AS app_name,ak.allowed_ips
+                  ak.usage_count,ak.last_ip,ak.app_id,a.name AS app_name,ak.allowed_ips,
+                  ak.rate_limit_per_minute,ak.rate_window_count
            FROM api_keys ak LEFT JOIN applications a ON a.id=ak.app_id
            WHERE ak.user_id=? ORDER BY ak.last_used DESC,ak.created_at DESC""", (user["id"],),
     ) as cur:
@@ -2289,16 +2292,35 @@ async def developer_overview(request: Request, user=Depends(require_admin),
         application_count = (await cur.fetchone())[0]
     scopes = [
         {"name": "apps.read", "description": "Read application and product metadata"},
+        {"name": "apps.create", "description": "Create applications and receive their initial secret once"},
         {"name": "apps.modify", "description": "Pause apps and change product status"},
+        {"name": "apps.secrets", "description": "Rotate and reveal application secrets"},
+        {"name": "apps.delete", "description": "Permanently delete applications and dependent data"},
+        {"name": "products.read", "description": "Read product levels and client-version policy"},
+        {"name": "products.modify", "description": "Create or update product levels"},
+        {"name": "products.delete", "description": "Permanently delete product levels"},
         {"name": "licenses.read", "description": "List licenses and customer requests"},
         {"name": "licenses.generate", "description": "Generate new licenses"},
         {"name": "licenses.modify", "description": "Ban, extend, reset, or update licenses"},
         {"name": "licenses.reveal", "description": "Reveal stored plaintext license keys"},
         {"name": "licenses.delete", "description": "Permanently delete licenses"},
         {"name": "logs.read", "description": "Read application security events"},
+        {"name": "sessions.read", "description": "List active application sessions"},
+        {"name": "sessions.modify", "description": "Terminate individual or all application sessions"},
         {"name": "builds.read", "description": "List protected releases"},
         {"name": "builds.upload", "description": "Publish or replace protected releases"},
         {"name": "builds.delete", "description": "Delete protected releases"},
+        {"name": "news.read", "description": "Read application news"},
+        {"name": "news.modify", "description": "Publish application news"},
+        {"name": "news.delete", "description": "Delete application news"},
+        {"name": "variables.read", "description": "Read global variables with secret values masked"},
+        {"name": "variables.modify", "description": "Create or update non-secret variables"},
+        {"name": "variables.secrets", "description": "Reveal or update secret variables"},
+        {"name": "variables.delete", "description": "Delete global variables"},
+        {"name": "hwids.read", "description": "List application HWID bans"},
+        {"name": "hwids.modify", "description": "Ban or unban HWIDs"},
+        {"name": "resellers.read", "description": "Read reseller account summaries"},
+        {"name": "resellers.credit", "description": "Credit reseller balances"},
     ]
     return {
         "api_base": str(request.base_url).rstrip("/") + "/api/integrations",
@@ -3811,6 +3833,12 @@ class CreateApiKeyBody(BaseModel):
     expires_days: Optional[int] = Field(default=None, ge=1, le=3650)
     app_id: Optional[str] = Field(default=None, max_length=128)
     allowed_ips: list[str] = Field(default_factory=list, max_length=50)
+    rate_limit_per_minute: Optional[int] = Field(default=None, ge=1, le=10000)
+
+    @field_validator("scopes")
+    @classmethod
+    def validate_scopes(cls, value):
+        return normalize_api_scopes(value)
 
     @field_validator("allowed_ips")
     @classmethod
@@ -3830,6 +3858,14 @@ class UpdateApiKeyBody(BaseModel):
     is_active: Optional[bool] = None
     app_id: Optional[str] = Field(default=None, max_length=128)
     allowed_ips: Optional[list[str]] = Field(default=None, max_length=50)
+    rate_limit_per_minute: Optional[int] = Field(default=None, ge=1, le=10000)
+
+    @field_validator("scopes")
+    @classmethod
+    def validate_scopes(cls, value):
+        if value is None:
+            return value
+        return normalize_api_scopes(value)
 
     @field_validator("allowed_ips")
     @classmethod
@@ -3986,7 +4022,7 @@ async def verify_password_reset(request: Request = None, body: PasswordResetVeri
 # ─── API Keys ────────────────────────────────────────────────────────────────
 
 @router.get("/api-keys", tags=["API Keys"])
-async def list_api_keys(user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
+async def list_api_keys(user=Depends(require_owner), db: aiosqlite.Connection = Depends(get_db)):
     """
     List all API keys for the current authenticated user.
     
@@ -3996,7 +4032,8 @@ async def list_api_keys(user=Depends(require_admin), db: aiosqlite.Connection = 
     """
     async with db.execute(
         """SELECT ak.id,ak.name,ak.scopes,ak.is_active,ak.last_used,ak.expires_at,ak.created_at,
-                  ak.app_id,ak.allowed_ips,ak.usage_count,ak.last_ip,a.name AS app_name
+                  ak.app_id,ak.allowed_ips,ak.usage_count,ak.last_ip,ak.rate_limit_per_minute,
+                  ak.rate_window_minute,ak.rate_window_count,a.name AS app_name
            FROM api_keys ak LEFT JOIN applications a ON a.id=ak.app_id
            WHERE ak.user_id = ? ORDER BY ak.created_at DESC""",
         (user["id"],)
@@ -4005,7 +4042,7 @@ async def list_api_keys(user=Depends(require_admin), db: aiosqlite.Connection = 
 
 
 @router.post("/api-keys", tags=["API Keys"])
-async def create_api_key(body: CreateApiKeyBody, user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
+async def create_api_key(body: CreateApiKeyBody, user=Depends(require_owner), db: aiosqlite.Connection = Depends(get_db)):
     """
     Create a new API key for external integrations.
     
@@ -4042,21 +4079,23 @@ async def create_api_key(body: CreateApiKeyBody, user=Depends(require_admin), db
         await _owned_app(body.app_id, auth_owner_id(user), db)
     await db.execute(
         """INSERT INTO api_keys
-           (id,user_id,key_hash,key_prefix,name,scopes,expires_at,app_id,allowed_ips)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
+           (id,user_id,key_hash,key_prefix,name,scopes,expires_at,app_id,allowed_ips,rate_limit_per_minute)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
         (key_id, user["id"], key_hash, key_prefix, body.name, body.scopes, expires_at,
-         body.app_id, json.dumps(body.allowed_ips) if body.allowed_ips else None)
+         body.app_id, json.dumps(body.allowed_ips) if body.allowed_ips else None,
+         body.rate_limit_per_minute)
     )
     await log_action(db, "api_key_created", details=f"API key created: {body.name}")
     await db.commit()
 
     # Return the key only once
     return {"id": key_id, "key": api_key, "name": body.name, "scopes": body.scopes,
-            "expires_at": expires_at, "app_id": body.app_id, "allowed_ips": body.allowed_ips}
+            "expires_at": expires_at, "app_id": body.app_id, "allowed_ips": body.allowed_ips,
+            "rate_limit_per_minute": body.rate_limit_per_minute}
 
 
 @router.put("/api-keys/{key_id}", tags=["API Keys"])
-async def update_api_key(key_id: str, body: UpdateApiKeyBody, user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
+async def update_api_key(key_id: str, body: UpdateApiKeyBody, user=Depends(require_owner), db: aiosqlite.Connection = Depends(get_db)):
     """
     Update an existing API key.
     
@@ -4095,6 +4134,9 @@ async def update_api_key(key_id: str, body: UpdateApiKeyBody, user=Depends(requi
     if body.allowed_ips is not None:
         updates.append("allowed_ips = ?")
         args.append(json.dumps(body.allowed_ips) if body.allowed_ips else None)
+    if "rate_limit_per_minute" in body.model_fields_set:
+        updates.extend(("rate_limit_per_minute = ?", "rate_window_minute = NULL", "rate_window_count = 0"))
+        args.append(body.rate_limit_per_minute)
 
     if not updates:
         raise HTTPException(400, "Nothing to update")
@@ -4108,7 +4150,7 @@ async def update_api_key(key_id: str, body: UpdateApiKeyBody, user=Depends(requi
 
 
 @router.post("/api-keys/{key_id}/rotate", tags=["API Keys"])
-async def rotate_api_key(key_id: str, user=Depends(require_admin),
+async def rotate_api_key(key_id: str, user=Depends(require_owner),
                          db: aiosqlite.Connection = Depends(get_db)):
     """Replace an API credential atomically and reveal the replacement once."""
     async with db.execute(
@@ -4135,7 +4177,7 @@ async def rotate_api_key(key_id: str, user=Depends(require_admin),
 
 
 @router.delete("/api-keys/{key_id}", tags=["API Keys"])
-async def delete_api_key(key_id: str, user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
+async def delete_api_key(key_id: str, user=Depends(require_owner), db: aiosqlite.Connection = Depends(get_db)):
     """
     Delete an API key permanently.
     

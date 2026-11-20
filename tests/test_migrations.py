@@ -109,6 +109,26 @@ class DatabaseMigrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("expires_at", entitlement_columns)
         self.assertIn("product_id", session_columns)
 
+    async def test_api_key_rate_limit_schema(self):
+        await self.database.init_db()
+        async with self.database.aiosqlite.connect(self.db_path) as db:
+            async with db.execute("PRAGMA table_info(api_keys)") as cur:
+                columns = {row[1] for row in await cur.fetchall()}
+        self.assertTrue({"rate_limit_per_minute", "rate_window_minute", "rate_window_count"} <= columns)
+
+    async def test_api_idempotency_schema(self):
+        await self.database.init_db()
+        async with self.database.aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='api_idempotency_keys'"
+            ) as cur:
+                table = await cur.fetchone()
+            async with db.execute("PRAGMA table_info(api_idempotency_keys)") as cur:
+                columns = {row[1] for row in await cur.fetchall()}
+        self.assertIsNotNone(table)
+        self.assertTrue({"credential_id", "operation", "idempotency_key_hash", "request_hash",
+                         "result_json", "expires_at"} <= columns)
+
     async def test_status_portal_and_entitlement_schema(self):
         await self.database.init_db()
         async with self.database.aiosqlite.connect(self.db_path) as db:

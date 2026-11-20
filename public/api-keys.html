@@ -64,6 +64,10 @@
         <label class="form-label">Expires (days, optional)</label>
         <input class="input" id="create-expires" type="number" placeholder="Leave empty for no expiration">
       </div>
+      <div class="form-group">
+        <label class="form-label">Requests per minute (optional)</label>
+        <input class="input" id="create-rate-limit" type="number" min="1" max="10000" placeholder="Leave empty for no per-key limit">
+      </div>
       <div class="form-group"><label class="form-label">Restrict to application</label><select class="select" id="create-app"><option value="">All applications</option></select></div>
       <div class="form-group"><label class="form-label">Allowed IPs/CIDRs</label><textarea class="input" id="create-ips" rows="3" placeholder="One per line, e.g. 203.0.113.10 or 10.0.0.0/24"></textarea><div style="font-size:12px;color:var(--text3);margin-top:6px">Leave empty to allow any source IP. Restrict production integrations whenever possible.</div></div>
     </div>
@@ -117,7 +121,7 @@
           <td>${escapeHtml(k.name)}</td>
           <td><code style="font-size:11px">${escapeHtml(k.scopes)}</code></td>
           <td>${escapeHtml(k.app_name||'All apps')}<div class="mono" style="font-size:10px;color:var(--text3)">${escapeHtml(k.allowed_ips||'Any IP')}</div></td>
-          <td>${Number(k.usage_count||0).toLocaleString()}<div class="mono" style="font-size:10px;color:var(--text3)">${escapeHtml(k.last_ip||'Never used')}</div></td>
+          <td>${Number(k.usage_count||0).toLocaleString()}<div class="mono" style="font-size:10px;color:var(--text3)">${escapeHtml(k.last_ip||'Never used')}</div><div style="font-size:10px;color:var(--text3)">${k.rate_limit_per_minute?`${Number(k.rate_limit_per_minute).toLocaleString()}/min`:'Unlimited'}</div></td>
           <td>
             <span class="badge ${k.is_active ? 'badge-green' : 'badge-red'}">
               ${k.is_active ? 'Active' : 'Inactive'}
@@ -141,6 +145,7 @@
     document.getElementById("create-name").value = "";
     document.getElementById("create-scopes").value = "read";
     document.getElementById("create-expires").value = "";
+    document.getElementById("create-rate-limit").value = "";
     document.getElementById("create-ips").value = "";
     openModal("create-modal");
   }
@@ -149,6 +154,7 @@
     const name = document.getElementById("create-name").value.trim();
     const scopes = document.getElementById("create-scopes").value;
     const expires = document.getElementById("create-expires").value;
+    const rateLimit = document.getElementById("create-rate-limit").value;
 
     if (!name) {
       alert("Please enter a name for the API key");
@@ -160,6 +166,7 @@
         name,
         scopes,
         expires_days: expires ? parseInt(expires) : null,
+        rate_limit_per_minute: rateLimit ? parseInt(rateLimit) : null,
         app_id: document.getElementById("create-app").value || null,
         allowed_ips: document.getElementById("create-ips").value.split(/[,\n]/).map(v=>v.trim()).filter(Boolean)
       });
