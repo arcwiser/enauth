@@ -808,24 +808,53 @@ async def integration_review_reset(app_id: str, request_id: str, decision: str,
     return {"ok": True, "status": "approved" if decision == "approve" else "rejected"}
 
 
-@router.get("/apps/{app_id}/licenses")
-async def licenses(app_id: str, search: Optional[str] = None, limit: int = 25,
-                   _key=Depends(require_scope("licenses.read")), db=Depends(get_db)):
-    await require_app(db, app_id)
-    limit = max(1, min(limit, 50))
-    can_reveal = has_scope(_key, "licenses.reveal")
-    fields = "id, key, status, expires_at, max_hwids, notes, created_at"
-    if can_reveal:
-        fields += ", key_ciphertext"
-    sql = f"SELECT {fields} FROM licenses WHERE app_id = ?"
+def license_filter_sql(app_id: str, search: Optional[str], status: Optional[str],
+                       product_level: Optional[str], expires_before: Optional[datetime],
+                       expires_after: Optional[datetime]) -> tuple[str, list]:
+    where = ["app_id=?"]
     args = [app_id]
     if search:
         digests = [digest for _, digest in license_lookup_hashes(search)]
         placeholders = ",".join("?" for _ in digests)
-        sql += f" AND (id = ? OR key_hash IN ({placeholders}) OR notes LIKE ?)"
+        where.append(f"(id=? OR key_hash IN ({placeholders}) OR notes LIKE ?)")
         args.extend([search, *digests, f"%{search}%"])
-    sql += " ORDER BY created_at DESC LIMIT ?"
-    args.append(limit)
+    if status:
+        if status not in {"active", "banned", "expired"}:
+            raise HTTPException(400, "Invalid license status")
+        where.append("status=?")
+        args.append(status)
+    if product_level:
+        where.append(
+            "EXISTS (SELECT 1 FROM license_products lp JOIN products p ON p.id=lp.product_id "
+            "WHERE lp.license_id=licenses.id AND p.app_id=licenses.app_id AND p.level=?)"
+        )
+        args.append(normalize_product_level(product_level))
+    if expires_before:
+        value = expires_before if expires_before.tzinfo else expires_before.replace(tzinfo=timezone.utc)
+        where.append("expires_at IS NOT NULL AND expires_at<?")
+        args.append(value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+    if expires_after:
+        value = expires_after if expires_after.tzinfo else expires_after.replace(tzinfo=timezone.utc)
+        where.append("expires_at IS NOT NULL AND expires_at>?")
+        args.append(value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+    return " AND ".join(where), args
+
+
+async def query_licenses(db: aiosqlite.Connection, app_id: str, key: dict,
+                         search: Optional[str], limit: int, offset: int,
+                         status: Optional[str], product_level: Optional[str],
+                         expires_before: Optional[datetime], expires_after: Optional[datetime]) -> list[dict]:
+    limit = max(1, min(limit, 50))
+    offset = max(0, min(offset, 1_000_000))
+    can_reveal = has_scope(key, "licenses.reveal")
+    fields = "id, key, status, expires_at, max_hwids, notes, created_at"
+    if can_reveal:
+        fields += ", key_ciphertext"
+    where, args = license_filter_sql(
+        app_id, search, status, product_level, expires_before, expires_after
+    )
+    sql = f"SELECT {fields} FROM licenses WHERE {where} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?"
+    args.extend([limit, offset])
     async with db.execute(sql, args) as cur:
         rows = [dict(row) for row in await cur.fetchall()]
     for row in rows:
@@ -834,6 +863,45 @@ async def licenses(app_id: str, search: Optional[str] = None, limit: int = 25,
         row.pop("key_ciphertext", None)
     await attach_license_products(db, rows)
     return rows
+
+
+@router.get("/apps/{app_id}/licenses")
+async def licenses(app_id: str, search: Optional[str] = None, limit: int = 25,
+                   _key=Depends(require_scope("licenses.read")), db=Depends(get_db),
+                   offset: int = 0, status: Optional[str] = None,
+                   product_level: Optional[str] = None,
+                   expires_before: Optional[datetime] = None,
+                   expires_after: Optional[datetime] = None):
+    await require_app(db, app_id)
+    return await query_licenses(
+        db, app_id, _key, search, limit, offset, status, product_level,
+        expires_before, expires_after,
+    )
+
+
+@router.get("/apps/{app_id}/licenses/page")
+async def license_page(app_id: str, search: Optional[str] = None, limit: int = 25,
+                       offset: int = 0, status: Optional[str] = None,
+                       product_level: Optional[str] = None,
+                       expires_before: Optional[datetime] = None,
+                       expires_after: Optional[datetime] = None,
+                       _key=Depends(require_scope("licenses.read")), db=Depends(get_db)):
+    await require_app(db, app_id)
+    limit = max(1, min(limit, 50))
+    offset = max(0, min(offset, 1_000_000))
+    where, args = license_filter_sql(
+        app_id, search, status, product_level, expires_before, expires_after
+    )
+    async with db.execute(f"SELECT COUNT(*) FROM licenses WHERE {where}", args) as cur:
+        total = (await cur.fetchone())[0]
+    items = await query_licenses(
+        db, app_id, _key, search, limit, offset, status, product_level,
+        expires_before, expires_after,
+    )
+    next_offset = offset + len(items) if offset + len(items) < total else None
+    return {"items": items, "pagination": {"total": total, "limit": limit, "offset": offset,
+                                             "next_offset": next_offset,
+                                             "has_more": next_offset is not None}}
 
 
 def generation_request_hash(app_id: str, body: GenerateBody) -> str:

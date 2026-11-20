@@ -314,6 +314,41 @@ class DiscordIntegrationControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(revealed["key_revealed"])
         self.assertEqual(revealed["key"], self.keys[0])
 
+    async def test_license_inventory_supports_stable_pagination_and_filters(self):
+        await self.db.execute("UPDATE licenses SET status='banned' WHERE id='license-2'")
+        await self.db.execute(
+            "INSERT INTO license_products(id,license_id,product_id) VALUES('ent-two-page','license-2','product-2')"
+        )
+        await self.db.commit()
+        read_key = {"id": "page-reader", "scopes": "licenses.read"}
+        first = await integrations.license_page(
+            "app-1", limit=1, offset=0, _key=read_key, db=self.db,
+        )
+        self.assertEqual(first["pagination"]["total"], 2)
+        self.assertTrue(first["pagination"]["has_more"])
+        self.assertEqual(first["pagination"]["next_offset"], 1)
+        second = await integrations.license_page(
+            "app-1", limit=1, offset=1, _key=read_key, db=self.db,
+        )
+        self.assertNotEqual(first["items"][0]["id"], second["items"][0]["id"])
+        self.assertFalse(second["pagination"]["has_more"])
+
+        banned = await integrations.license_page(
+            "app-1", status="banned", product_level="two", _key=read_key, db=self.db,
+        )
+        self.assertEqual(banned["pagination"]["total"], 1)
+        self.assertEqual(banned["items"][0]["id"], "license-2")
+        self.assertEqual(set(banned["items"][0]["levels"]), {"one", "two"})
+        legacy_page = await integrations.licenses(
+            "app-1", None, 1, read_key, self.db, offset=1,
+        )
+        self.assertEqual(legacy_page[0]["id"], second["items"][0]["id"])
+        with self.assertRaises(HTTPException) as invalid:
+            await integrations.license_page(
+                "app-1", status="unknown", _key=read_key, db=self.db,
+            )
+        self.assertEqual(invalid.exception.status_code, 400)
+
     async def test_blacklist_alias_revokes_and_restores_license(self):
         modified = await integrations.blacklist("app-1", "license-1", self.api_key, self.db)
         self.assertEqual(modified["status"], "banned")

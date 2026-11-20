@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS logs (
 
 CREATE INDEX IF NOT EXISTS idx_licenses_key        ON licenses(key);
 CREATE INDEX IF NOT EXISTS idx_licenses_app        ON licenses(app_id);
+CREATE INDEX IF NOT EXISTS idx_licenses_app_status_created ON licenses(app_id,status,created_at DESC,id DESC);
 CREATE INDEX IF NOT EXISTS idx_license_products_license ON license_products(license_id);
 CREATE INDEX IF NOT EXISTS idx_license_products_product ON license_products(product_id);
 CREATE INDEX IF NOT EXISTS idx_hwids_license       ON hwids(license_id);
@@ -326,6 +327,7 @@ CREATE INDEX IF NOT EXISTS idx_auth_users_username       ON auth_users(username)
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_token       ON auth_sessions(token);
 CREATE INDEX IF NOT EXISTS idx_products_app              ON products(app_id);
 CREATE INDEX IF NOT EXISTS idx_products_level            ON products(level);
+CREATE INDEX IF NOT EXISTS idx_products_app_level        ON products(app_id,level,id);
 CREATE INDEX IF NOT EXISTS idx_pricing_product           ON product_pricing_points(product_id);
 CREATE INDEX IF NOT EXISTS idx_resellers_username        ON resellers(username);
 CREATE INDEX IF NOT EXISTS idx_reseller_sessions_token   ON reseller_sessions(token);

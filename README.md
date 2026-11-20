@@ -470,6 +470,12 @@ Common license operations:
 | Remove a level from a key | `DELETE /apps/{app_id}/licenses/{id_or_key}/products/{product_id}` | `licenses.modify` |
 | Permanently delete a key | `DELETE /apps/{app_id}/licenses/{id_or_key}` | `licenses.delete` |
 
+Large inventories can use `GET /apps/{app_id}/licenses/page` for a structured
+response containing `items` plus `total`, `limit`, `offset`, `next_offset`, and
+`has_more`. Both the paginated endpoint and the backwards-compatible list route
+accept `search`, `status`, `product_level`, `expires_before`, and
+`expires_after` filters, with a stable `created_at,id` ordering.
+
 Bulk license automation accepts up to 100 IDs or raw keys per request. Inputs
 are fully resolved and deduplicated before the transaction starts, so an unknown
 identifier cannot leave a partially modified batch.
@@ -647,6 +653,8 @@ For issues and questions, please refer to the project documentation or contact t
   documented legacy `read`/`write` compatibility for non-destructive operations.
 - Marked all management API responses non-cacheable and rejected requests that
   ambiguously supply both supported integration credential types.
+- Added stable license pagination, totals, offsets, and server-side filtering by
+  status, product level, expiration window, identifier, key, or notes.
 - Added application-wide and per-product outage pause/resume controls.
 - Added automatic downtime restoration plus optional compensation for affected entitlements.
 - Added operational monitoring and production configuration checks to the dashboard.

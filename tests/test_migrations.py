@@ -129,6 +129,16 @@ class DatabaseMigrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue({"credential_id", "operation", "idempotency_key_hash", "request_hash",
                          "result_json", "expires_at"} <= columns)
 
+    async def test_license_query_indexes(self):
+        await self.database.init_db()
+        async with self.database.aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name IN "
+                "('idx_licenses_app_status_created','idx_products_app_level')"
+            ) as cur:
+                indexes = {row[0] for row in await cur.fetchall()}
+        self.assertEqual(indexes, {"idx_licenses_app_status_created", "idx_products_app_level"})
+
     async def test_status_portal_and_entitlement_schema(self):
         await self.database.init_db()
         async with self.database.aiosqlite.connect(self.db_path) as db:
