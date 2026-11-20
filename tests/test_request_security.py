@@ -94,6 +94,11 @@ class RequestSecurityTests(unittest.TestCase):
 
         async def exercise():
             async def handler(_request):
+                _request.state.rate_limit_headers = {
+                    "X-RateLimit-Limit": "60",
+                    "X-RateLimit-Remaining": "59",
+                    "X-RateLimit-Reset": "1800000000",
+                }
                 response = JSONResponse({"key": "sensitive"})
                 response.headers["Vary"] = "Origin"
                 return response
@@ -106,6 +111,9 @@ class RequestSecurityTests(unittest.TestCase):
         self.assertEqual(set(response.headers["vary"].split(", ")),
                          {"Origin", "X-API-Key", "X-Discord-Key"})
         self.assertEqual(response.headers["x-robots-tag"], "noindex, nofollow")
+        self.assertEqual(response.headers["x-ratelimit-limit"], "60")
+        self.assertEqual(response.headers["x-ratelimit-remaining"], "59")
+        self.assertEqual(response.headers["x-ratelimit-reset"], "1800000000")
 
 
 if __name__ == "__main__":

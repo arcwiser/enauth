@@ -114,7 +114,36 @@ def require_scope(required: Optional[str] = None):
         )
         if cursor.rowcount != 1:
             await db.rollback()
-            raise HTTPException(429, "API key rate limit exceeded")
+            reset_at = (current_minute + 1) * 60
+            retry_after = max(1, reset_at - int(datetime.now(timezone.utc).timestamp()))
+            raise HTTPException(
+                429, "API key rate limit exceeded",
+                headers={"Retry-After": str(retry_after),
+                         "X-RateLimit-Limit": str(key["rate_limit_per_minute"]),
+                         "X-RateLimit-Remaining": "0",
+                         "X-RateLimit-Reset": str(reset_at)},
+            )
+        rate_state = None
+        if key.get("rate_limit_per_minute") is not None:
+            async with db.execute(
+                """SELECT rate_limit_per_minute,rate_window_minute,rate_window_count
+                   FROM api_keys WHERE id=?""",
+                (key["id"],),
+            ) as cur:
+                rate_state = await cur.fetchone()
+        if rate_state:
+            limit = int(rate_state["rate_limit_per_minute"])
+            count = int(rate_state["rate_window_count"] or 0)
+            reset_at = (current_minute + 1) * 60
+            remaining = max(0, limit - count)
+            key["rate_window_count"] = count
+            key["rate_limit_remaining"] = remaining
+            key["rate_limit_reset"] = reset_at
+            request.state.rate_limit_headers = {
+                "X-RateLimit-Limit": str(limit),
+                "X-RateLimit-Remaining": str(remaining),
+                "X-RateLimit-Reset": str(reset_at),
+            }
         await db.commit()
         return key
 
@@ -318,6 +347,8 @@ def capability_document(key: dict, app_id: Optional[str] = None) -> dict:
             "allowed_ips": allowed_ips,
             "expires_at": key.get("expires_at"),
             "requests_per_minute": key.get("rate_limit_per_minute"),
+            "requests_remaining_current_window": key.get("rate_limit_remaining"),
+            "rate_limit_reset_epoch": key.get("rate_limit_reset"),
         },
         "limits": {
             "max_list_size": 50,

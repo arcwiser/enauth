@@ -196,6 +196,8 @@ async def security_middleware(request: Request, call_next):
         vary.update(("X-API-Key", "X-Discord-Key"))
         response.headers["Vary"] = ", ".join(sorted(vary))
         response.headers["X-Robots-Tag"] = "noindex, nofollow"
+        for name, value in getattr(request.state, "rate_limit_headers", {}).items():
+            response.headers[name] = value
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"

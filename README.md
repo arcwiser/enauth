@@ -448,6 +448,9 @@ stored in a canonical lowercase form.
 Each key may also have its own requests-per-minute ceiling. The counter is
 updated atomically in SQLite, so the limit is shared by all server workers and
 survives ordinary process concurrency rather than existing only in memory.
+Successful limited requests include `X-RateLimit-Limit`,
+`X-RateLimit-Remaining`, and `X-RateLimit-Reset`. HTTP 429 responses also carry
+an accurate `Retry-After` value so clients can back off safely.
 
 Every `/api/integrations` response is marked `no-store, private`, varies on the
 credential headers, and is excluded from indexing. Requests supplying both an
@@ -662,6 +665,8 @@ For issues and questions, please refer to the project documentation or contact t
   status, product level, expiration window, identifier, key, or notes.
 - Added scope-independent credential and capability introspection so narrowly
   scoped automation can safely discover its own effective permissions and limits.
+- Added per-response rate-limit budget/reset headers and standards-compatible
+  `Retry-After` guidance on HTTP 429 responses.
 - Added application-wide and per-product outage pause/resume controls.
 - Added automatic downtime restoration plus optional compensation for affected entitlements.
 - Added operational monitoring and production configuration checks to the dashboard.

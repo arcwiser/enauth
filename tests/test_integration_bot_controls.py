@@ -124,11 +124,17 @@ class DiscordIntegrationControlTests(unittest.IsolatedAsyncioTestCase):
         await self.db.commit()
         dependency = integrations.require_scope("apps.read")
         request = self._request("/api/integrations/apps/app-1", app_id="app-1")
-        await dependency(request, raw, None, self.db)
-        await dependency(request, raw, None, self.db)
+        first = await dependency(request, raw, None, self.db)
+        second = await dependency(request, raw, None, self.db)
+        self.assertEqual(first["rate_limit_remaining"], 1)
+        self.assertEqual(second["rate_limit_remaining"], 0)
         with self.assertRaises(HTTPException) as limited:
             await dependency(request, raw, None, self.db)
         self.assertEqual(limited.exception.status_code, 429)
+        self.assertEqual(limited.exception.headers["X-RateLimit-Remaining"], "0")
+        self.assertEqual(limited.exception.headers["X-RateLimit-Limit"], "2")
+        self.assertGreaterEqual(int(limited.exception.headers["Retry-After"]), 1)
+        self.assertLessEqual(int(limited.exception.headers["Retry-After"]), 60)
         async with self.db.execute(
             "SELECT usage_count,rate_window_count FROM api_keys WHERE id='api-test'"
         ) as cur:
