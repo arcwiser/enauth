@@ -42,7 +42,7 @@ def has_scope(key: dict, required: str) -> bool:
     return action not in {"reveal", "secrets", "delete"} and "write" in configured
 
 
-def require_scope(required: str):
+def require_scope(required: Optional[str] = None):
 
     async def dependency(request: Request,
                          x_api_key: Optional[str] = Header(None),
@@ -64,8 +64,9 @@ def require_scope(required: str):
             requested_app = request.path_params.get("app_id")
             if requested_app and requested_app != row["app_id"]:
                 raise HTTPException(403, "Discord integration key is bound to another application")
+            safe_global_gets = {"/api/integrations/apps", "/api/integrations/credential"}
             if not requested_app and not (
-                request.method == "GET" and request.url.path.rstrip("/") == "/api/integrations/apps"
+                request.method == "GET" and request.url.path.rstrip("/") in safe_global_gets
             ):
                 raise HTTPException(403, "Discord integrations cannot access global resources")
             await db.execute("UPDATE discord_integrations SET last_used=CURRENT_TIMESTAMP WHERE id=?", (row["id"],))
@@ -78,8 +79,9 @@ def require_scope(required: str):
         bound_app = key.get("app_id")
         if bound_app and requested_app and requested_app != bound_app:
             raise HTTPException(403, "API key is bound to another application")
+        safe_global_gets = {"/api/integrations/apps", "/api/integrations/credential"}
         if bound_app and not requested_app and not (
-            request.method == "GET" and request.url.path.rstrip("/") == "/api/integrations/apps"
+            request.method == "GET" and request.url.path.rstrip("/") in safe_global_gets
         ):
             raise HTTPException(403, "App-bound API keys cannot access global resources")
         source_ip = resolve_client_ip(request.client.host if request.client else "unknown",
@@ -96,7 +98,7 @@ def require_scope(required: str):
                 raise
             except (ValueError, TypeError, json.JSONDecodeError):
                 raise HTTPException(403, "API key IP policy is invalid")
-        if not has_scope(key, required):
+        if required and not has_scope(key, required):
             raise HTTPException(403, f"API key requires {required} scope")
         current_minute = int(datetime.now(timezone.utc).timestamp() // 60)
         cursor = await db.execute(
@@ -294,6 +296,46 @@ def serialize_product(row) -> dict:
     return product
 
 
+def capability_document(key: dict, app_id: Optional[str] = None) -> dict:
+    configured_scopes = [
+        item.strip() for item in str(key.get("scopes") or "read").split(",") if item.strip()
+    ]
+    allowed_ips = []
+    if key.get("allowed_ips"):
+        try:
+            parsed = json.loads(key["allowed_ips"])
+            allowed_ips = parsed if isinstance(parsed, list) else []
+        except (TypeError, json.JSONDecodeError):
+            allowed_ips = []
+    result = {
+        "credential_id": key["id"],
+        "credential_kind": key.get("kind", "api_key"),
+        "app_id": app_id if app_id is not None else key.get("app_id"),
+        "configured_scopes": configured_scopes,
+        "capabilities": {scope: has_scope(key, scope) for scope in MANAGEMENT_API_SCOPES},
+        "policy": {
+            "app_bound": bool(key.get("app_id")),
+            "allowed_ips": allowed_ips,
+            "expires_at": key.get("expires_at"),
+            "requests_per_minute": key.get("rate_limit_per_minute"),
+        },
+        "limits": {
+            "max_list_size": 50,
+            "max_bulk_generation": 500,
+            "max_bulk_mutation": 100,
+            "max_upload_bytes": int(os.getenv("MAX_BUILD_UPLOAD_BYTES", str(100 * 1024 * 1024))),
+            "credential_requests_per_minute": key.get("rate_limit_per_minute"),
+        },
+    }
+    return result
+
+
+@router.get("/credential")
+async def integration_credential(key=Depends(require_scope())):
+    """Describe the presented credential without requiring a business-data scope."""
+    return capability_document(key)
+
+
 @router.get("/apps")
 async def apps(_key=Depends(require_scope("apps.read")), db=Depends(get_db)):
     async with db.execute(
@@ -406,19 +448,10 @@ async def delete_app(app_id: str, force: bool = False,
 
 
 @router.get("/apps/{app_id}/capabilities")
-async def integration_capabilities(app_id: str, key=Depends(require_scope("apps.read")), db=Depends(get_db)):
+async def integration_capabilities(app_id: str, key=Depends(require_scope()), db=Depends(get_db)):
     """Describe what the presented credential may do without exposing the credential itself."""
     await require_app(db, app_id)
-    known = list(MANAGEMENT_API_SCOPES)
-    return {
-        "app_id": app_id,
-        "credential_kind": key.get("kind", "api_key"),
-        "configured_scopes": [item.strip() for item in str(key.get("scopes") or "read").split(",") if item.strip()],
-        "capabilities": {scope: has_scope(key, scope) for scope in known},
-        "limits": {"max_list_size": 50, "max_bulk_generation": 500,
-                   "max_upload_bytes": int(os.getenv("MAX_BUILD_UPLOAD_BYTES", str(100 * 1024 * 1024))),
-                   "credential_requests_per_minute": key.get("rate_limit_per_minute")},
-    }
+    return capability_document(key, app_id)
 
 
 @router.get("/apps/{app_id}/operations")

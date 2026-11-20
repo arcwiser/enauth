@@ -149,6 +149,27 @@ class DiscordIntegrationControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(integrations.has_scope({"scopes": "write"}, "news.delete"))
         self.assertFalse(integrations.has_scope({"scopes": "write"}, "variables.secrets"))
 
+    async def test_narrow_key_can_inspect_itself_without_apps_read(self):
+        raw = await self._owner_api_key("licenses.generate")
+        await self.db.execute("UPDATE api_keys SET app_id='app-1' WHERE id='api-test'")
+        await self.db.commit()
+        request = self._request("/api/integrations/credential")
+        key = await integrations.require_scope()(request, raw, None, self.db)
+        document = await integrations.integration_credential(key)
+        self.assertEqual(document["app_id"], "app-1")
+        self.assertTrue(document["policy"]["app_bound"])
+        self.assertTrue(document["capabilities"]["licenses.generate"])
+        self.assertFalse(document["capabilities"]["apps.read"])
+        self.assertNotIn("key_hash", str(document))
+        app_document = await integrations.integration_capabilities("app-1", key, self.db)
+        self.assertEqual(app_document["app_id"], "app-1")
+        with self.assertRaises(HTTPException) as foreign:
+            await integrations.require_scope()(
+                self._request("/api/integrations/apps/app-2/capabilities", app_id="app-2"),
+                raw, None, self.db,
+            )
+        self.assertEqual(foreign.exception.status_code, 403)
+
     async def test_discord_key_cannot_access_global_resources_or_other_apps(self):
         raw = await self._discord_key()
         await self.db.execute("INSERT INTO applications(id,name,secret_key) VALUES('app-2','Private','secret-2')")

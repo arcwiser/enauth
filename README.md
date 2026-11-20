@@ -546,6 +546,11 @@ Use `GET /apps/{app_id}/capabilities` to verify what the presented credential
 can do. An owner key with the `admin` scope can use every management operation,
 but narrowly scoped, app-bound keys are recommended for production automation.
 
+Any valid credential can call `GET /api/integrations/credential` or its bound
+app's `/capabilities` route even when it does not have `apps.read`. The response
+contains only its ID, kind, app binding, normalized scopes, effective
+capabilities, IP/expiry/rate policy, and API limits—never its hash or secret.
+
 Other least-privilege scopes include `logs.read`, `sessions.read`,
 `sessions.modify`, `builds.read`, `builds.upload`, `builds.delete`, `news.read`,
 `news.modify`, `news.delete`, `hwids.read`, and `hwids.modify`. Global variable
@@ -655,6 +660,8 @@ For issues and questions, please refer to the project documentation or contact t
   ambiguously supply both supported integration credential types.
 - Added stable license pagination, totals, offsets, and server-side filtering by
   status, product level, expiration window, identifier, key, or notes.
+- Added scope-independent credential and capability introspection so narrowly
+  scoped automation can safely discover its own effective permissions and limits.
 - Added application-wide and per-product outage pause/resume controls.
 - Added automatic downtime restoration plus optional compensation for affected entitlements.
 - Added operational monitoring and production configuration checks to the dashboard.
