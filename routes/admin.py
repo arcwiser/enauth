@@ -2320,7 +2320,10 @@ async def developer_overview(request: Request, user=Depends(require_admin),
         {"name": "hwids.read", "description": "List application HWID bans"},
         {"name": "hwids.modify", "description": "Ban or unban HWIDs"},
         {"name": "resellers.read", "description": "Read reseller account summaries"},
+        {"name": "resellers.create", "description": "Create reseller accounts"},
+        {"name": "resellers.modify", "description": "Rename, secure, activate, or deactivate resellers"},
         {"name": "resellers.credit", "description": "Credit reseller balances"},
+        {"name": "resellers.delete", "description": "Permanently delete reseller accounts"},
     ]
     return {
         "api_base": str(request.base_url).rstrip("/") + "/api/integrations",

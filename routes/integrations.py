@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import ipaddress
 import json
@@ -15,7 +16,8 @@ from database import get_db
 from routes.admin import require_api_key
 from utils.crypto import (generate_app_secret, generate_license_key, generate_uid, hash_license_key,
                           mask_license_key, encrypt_license_key, display_license_key,
-                          decrypt_license_key, license_lookup_hashes, current_license_lookup_key_id)
+                          decrypt_license_key, hash_password, license_lookup_hashes,
+                          current_license_lookup_key_id)
 from utils.logger import log_action
 from utils.api_scopes import MANAGEMENT_API_SCOPES
 from utils.uploads import read_build_upload, validate_release_name, validate_release_version
@@ -252,6 +254,22 @@ class CreditResellerBody(BaseModel):
     reason: Optional[str] = Field(default=None, max_length=500)
 
 
+class ResellerCreateBody(BaseModel):
+    username: str = Field(min_length=3, max_length=64)
+    password: str = Field(min_length=10, max_length=72)
+
+
+class ResellerUpdateBody(BaseModel):
+    username: Optional[str] = Field(default=None, min_length=3, max_length=64)
+    password: Optional[str] = Field(default=None, min_length=10, max_length=72)
+    is_active: Optional[bool] = None
+
+
+class ResellerDeleteBody(BaseModel):
+    confirm: Literal["DELETE"]
+    delete_issued_licenses: bool = False
+
+
 class NamedValueBody(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     value: str = Field(max_length=4000)
@@ -314,6 +332,19 @@ def normalize_client_version(value: Optional[str]) -> Optional[str]:
     if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._+\-]{0,63}", version):
         raise HTTPException(400, "Invalid client version")
     return version
+
+
+def validate_reseller_credentials(username: str, password: Optional[str] = None) -> str:
+    normalized = username.strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{2,63}", normalized):
+        raise HTTPException(400, "Reseller username must use letters, numbers, dots, dashes, or underscores")
+    if password is not None:
+        if len(password.encode("utf-8")) > 72:
+            raise HTTPException(400, "Password must be at most 72 UTF-8 bytes")
+        if (len(password) < 10 or not re.search(r"[A-Za-z]", password)
+                or not re.search(r"\d", password) or not re.search(r"[^A-Za-z0-9]", password)):
+            raise HTTPException(400, "Password must contain a letter, number, and special character")
+    return normalized
 
 
 def serialize_product(row) -> dict:
@@ -1768,6 +1799,77 @@ async def resellers(key=Depends(require_scope("resellers.read")), db=Depends(get
         return [dict(row) for row in await cur.fetchall()]
 
 
+@router.post("/resellers")
+async def create_reseller(body: ResellerCreateBody,
+                          key=Depends(require_scope("resellers.create")), db=Depends(get_db)):
+    if key.get("kind") == "discord":
+        raise HTTPException(403, "Discord integrations cannot access reseller accounts")
+    username = validate_reseller_credentials(body.username, body.password)
+    reseller_id = generate_uid()
+    password_hash = await asyncio.to_thread(hash_password, body.password)
+    try:
+        await db.execute(
+            "INSERT INTO resellers(id,username,password_hash) VALUES(?,?,?)",
+            (reseller_id, username, password_hash),
+        )
+    except aiosqlite.IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "Reseller username already exists")
+    await log_action(db, "integration_reseller_created",
+                     details=f"reseller={reseller_id}; username={username}; API key {key['id']}")
+    await db.commit()
+    return {"id": reseller_id, "username": username, "balance": 0, "is_active": True}
+
+
+@router.patch("/resellers/{reseller_id}")
+async def update_reseller(reseller_id: str, body: ResellerUpdateBody,
+                          key=Depends(require_scope("resellers.modify")), db=Depends(get_db)):
+    if key.get("kind") == "discord":
+        raise HTTPException(403, "Discord integrations cannot access reseller accounts")
+    async with db.execute(
+        "SELECT username FROM resellers WHERE id=?", (reseller_id,)
+    ) as cur:
+        existing = await cur.fetchone()
+    if not existing:
+        raise HTTPException(404, "Reseller not found")
+    fields = body.model_fields_set
+    updates, args = [], []
+    if "username" in fields:
+        if body.username is None:
+            raise HTTPException(400, "username cannot be null")
+        updates.append("username=?")
+        args.append(validate_reseller_credentials(body.username))
+    if "password" in fields:
+        if body.password is None:
+            raise HTTPException(400, "password cannot be null")
+        validate_reseller_credentials(existing["username"], body.password)
+        updates.append("password_hash=?")
+        args.append(await asyncio.to_thread(hash_password, body.password))
+    if "is_active" in fields:
+        if body.is_active is None:
+            raise HTTPException(400, "is_active cannot be null")
+        updates.append("is_active=?")
+        args.append(1 if body.is_active else 0)
+    if not updates:
+        raise HTTPException(400, "Nothing to update")
+    args.append(reseller_id)
+    try:
+        await db.execute(f"UPDATE resellers SET {', '.join(updates)} WHERE id=?", args)
+    except aiosqlite.IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "Reseller username already exists")
+    revoked_sessions = 0
+    if "password" in fields or ("is_active" in fields and body.is_active is False):
+        cursor = await db.execute("DELETE FROM reseller_sessions WHERE reseller_id=?", (reseller_id,))
+        revoked_sessions = cursor.rowcount
+    await log_action(db, "integration_reseller_updated",
+                     details=(f"reseller={reseller_id}; fields={','.join(sorted(fields))}; "
+                              f"sessions={revoked_sessions}; API key {key['id']}"))
+    await db.commit()
+    return {"ok": True, "reseller_id": reseller_id, "updated_fields": sorted(fields),
+            "revoked_sessions": revoked_sessions}
+
+
 @router.post("/resellers/{reseller_id}/credit")
 async def credit_reseller(reseller_id: str, body: CreditResellerBody,
                           key=Depends(require_scope("resellers.credit")), db=Depends(get_db)):
@@ -1775,8 +1877,9 @@ async def credit_reseller(reseller_id: str, body: CreditResellerBody,
         raise HTTPException(403, "Discord integrations cannot access reseller accounts")
     cursor = await db.execute("UPDATE resellers SET balance=balance+? WHERE id=?", (body.amount, reseller_id))
     if cursor.rowcount == 0:
+        await db.rollback()
         raise HTTPException(404, "Reseller not found")
-    reason = (body.reason or "Discord bot credit").strip()
+    reason = (body.reason or "API credit").strip() or "API credit"
     await db.execute(
         "INSERT INTO reseller_balance_ledger(id, reseller_id, amount, reason, created_by) VALUES(?, ?, ?, ?, ?)",
         (generate_uid(), reseller_id, body.amount, reason, f"api:{key['id']}"),
@@ -1787,6 +1890,48 @@ async def credit_reseller(reseller_id: str, body: CreditResellerBody,
                      details=f"reseller={reseller_id}; amount={body.amount}; API key {key['id']}")
     await db.commit()
     return {"ok": True, "balance": balance}
+
+
+@router.post("/resellers/{reseller_id}/delete")
+async def delete_reseller(reseller_id: str, body: ResellerDeleteBody,
+                          key=Depends(require_scope("resellers.delete")), db=Depends(get_db)):
+    if key.get("kind") == "discord":
+        raise HTTPException(403, "Discord integrations cannot access reseller accounts")
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        async with db.execute(
+            "SELECT username FROM resellers WHERE id=?", (reseller_id,)
+        ) as cur:
+            reseller = await cur.fetchone()
+        if not reseller:
+            raise HTTPException(404, "Reseller not found")
+        async with db.execute(
+            "SELECT COUNT(DISTINCT license_id) FROM key_orders WHERE reseller_id=?",
+            (reseller_id,),
+        ) as cur:
+            issued_licenses = (await cur.fetchone())[0]
+        if issued_licenses and not body.delete_issued_licenses:
+            raise HTTPException(
+                409,
+                f"Reseller issued {issued_licenses} license(s); set delete_issued_licenses=true to remove them",
+            )
+        deleted_licenses = 0
+        if body.delete_issued_licenses:
+            cursor = await db.execute(
+                "DELETE FROM licenses WHERE id IN (SELECT license_id FROM key_orders WHERE reseller_id=?)",
+                (reseller_id,),
+            )
+            deleted_licenses = cursor.rowcount
+        await log_action(db, "integration_reseller_deleted",
+                         details=(f"reseller={reseller_id}; username={reseller['username']}; "
+                                  f"licenses={deleted_licenses}; API key {key['id']}"))
+        await db.execute("DELETE FROM resellers WHERE id=?", (reseller_id,))
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    return {"ok": True, "reseller_id": reseller_id, "username": reseller["username"],
+            "deleted_licenses": deleted_licenses}
 
 
 @router.get("/apps/{app_id}/builds")

@@ -32,7 +32,10 @@ MANAGEMENT_API_SCOPES = (
     "hwids.read",
     "hwids.modify",
     "resellers.read",
+    "resellers.create",
+    "resellers.modify",
     "resellers.credit",
+    "resellers.delete",
 )
 
 API_SCOPE_RESOURCES = frozenset(scope.split(".", 1)[0] for scope in MANAGEMENT_API_SCOPES)

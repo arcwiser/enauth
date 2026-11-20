@@ -12,7 +12,7 @@ os.environ.setdefault("LICENSE_KEY_PEPPER", "test-license-pepper-that-is-long-en
 
 from database import SCHEMA
 from routes import integrations
-from utils.crypto import encrypt_license_key, hash_license_key, mask_license_key
+from utils.crypto import encrypt_license_key, hash_license_key, mask_license_key, verify_password
 
 
 class DiscordIntegrationControlTests(unittest.IsolatedAsyncioTestCase):
@@ -154,6 +154,7 @@ class DiscordIntegrationControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(integrations.has_scope({"scopes": "write"}, "news.modify"))
         self.assertFalse(integrations.has_scope({"scopes": "write"}, "news.delete"))
         self.assertFalse(integrations.has_scope({"scopes": "write"}, "variables.secrets"))
+        self.assertFalse(integrations.has_scope({"scopes": "write"}, "resellers.delete"))
 
     async def test_narrow_key_can_inspect_itself_without_apps_read(self):
         raw = await self._owner_api_key("licenses.generate")
@@ -609,6 +610,100 @@ class DiscordIntegrationControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(deleted["deleted"]["products"], 1)
         async with self.db.execute("SELECT COUNT(*) FROM applications WHERE id=?", (app_id,)) as cur:
             self.assertEqual((await cur.fetchone())[0], 0)
+
+    async def test_api_key_manages_reseller_lifecycle_and_revokes_sessions(self):
+        created = await integrations.create_reseller(
+            integrations.ResellerCreateBody(username="Partner.One", password="SecurePass1!"),
+            self.api_key, self.db,
+        )
+        reseller_id = created["id"]
+        self.assertEqual(created["username"], "partner.one")
+        async with self.db.execute(
+            "SELECT password_hash FROM resellers WHERE id=?", (reseller_id,)
+        ) as cur:
+            stored = await cur.fetchone()
+        self.assertTrue(verify_password("SecurePass1!", stored["password_hash"]))
+
+        with self.assertRaises(HTTPException) as duplicate:
+            await integrations.create_reseller(
+                integrations.ResellerCreateBody(username="PARTNER.ONE", password="AnotherPass2!"),
+                self.api_key, self.db,
+            )
+        self.assertEqual(duplicate.exception.status_code, 409)
+        with self.assertRaises(HTTPException) as weak:
+            await integrations.create_reseller(
+                integrations.ResellerCreateBody(username="another", password="nospecial1x"),
+                self.api_key, self.db,
+            )
+        self.assertEqual(weak.exception.status_code, 400)
+
+        await self.db.execute(
+            """INSERT INTO reseller_sessions(id,reseller_id,token,expires_at)
+               VALUES('reseller-session',?,'reseller-token',datetime('now','+1 hour'))""",
+            (reseller_id,),
+        )
+        await self.db.commit()
+        updated = await integrations.update_reseller(
+            reseller_id,
+            integrations.ResellerUpdateBody(
+                username="partner-renamed", password="RotatedPass2!", is_active=False,
+            ),
+            self.api_key, self.db,
+        )
+        self.assertEqual(updated["revoked_sessions"], 1)
+        async with self.db.execute(
+            "SELECT username,password_hash,is_active FROM resellers WHERE id=?", (reseller_id,)
+        ) as cur:
+            stored = await cur.fetchone()
+        self.assertEqual((stored["username"], stored["is_active"]), ("partner-renamed", 0))
+        self.assertTrue(verify_password("RotatedPass2!", stored["password_hash"]))
+        async with self.db.execute(
+            "SELECT COUNT(*) FROM reseller_sessions WHERE reseller_id=?", (reseller_id,)
+        ) as cur:
+            self.assertEqual((await cur.fetchone())[0], 0)
+
+    async def test_reseller_deletion_requires_issued_license_opt_in(self):
+        created = await integrations.create_reseller(
+            integrations.ResellerCreateBody(username="issuer", password="SecurePass1!"),
+            self.api_key, self.db,
+        )
+        reseller_id = created["id"]
+        raw_key = "MMMMMM-NNNNNN-OOOOOO-PPPPPP-QQQQQQ-RRRRRR"
+        await self.db.execute(
+            "INSERT INTO product_pricing_points(id,product_id,days,price) VALUES('price-1','product-1',30,5)",
+        )
+        await self.db.execute(
+            """INSERT INTO licenses(id,key,key_hash,key_ciphertext,app_id)
+               VALUES('issued-license',?,?,?,'app-1')""",
+            (mask_license_key(raw_key), hash_license_key(raw_key), encrypt_license_key(raw_key)),
+        )
+        await self.db.execute(
+            """INSERT INTO key_orders(id,reseller_id,license_id,product_id,pricing_point_id,amount_paid)
+               VALUES('order-1',?,'issued-license','product-1','price-1',5)""",
+            (reseller_id,),
+        )
+        await self.db.commit()
+
+        with self.assertRaises(HTTPException) as protected:
+            await integrations.delete_reseller(
+                reseller_id,
+                integrations.ResellerDeleteBody(confirm="DELETE", delete_issued_licenses=False),
+                self.api_key, self.db,
+            )
+        self.assertEqual(protected.exception.status_code, 409)
+        for table, item_id in (("resellers", reseller_id), ("licenses", "issued-license")):
+            async with self.db.execute(f"SELECT COUNT(*) FROM {table} WHERE id=?", (item_id,)) as cur:
+                self.assertEqual((await cur.fetchone())[0], 1)
+
+        deleted = await integrations.delete_reseller(
+            reseller_id,
+            integrations.ResellerDeleteBody(confirm="DELETE", delete_issued_licenses=True),
+            self.api_key, self.db,
+        )
+        self.assertEqual(deleted["deleted_licenses"], 1)
+        for table, item_id in (("resellers", reseller_id), ("licenses", "issued-license")):
+            async with self.db.execute(f"SELECT COUNT(*) FROM {table} WHERE id=?", (item_id,)) as cur:
+                self.assertEqual((await cur.fetchone())[0], 0)
 
     async def test_reseller_role_cannot_use_integration_api(self):
         raw = await self._owner_api_key("admin", role="reseller")

@@ -521,6 +521,23 @@ Initial and rotated application secrets are returned only by their respective
 calls. Secret rotation requires its own high-risk scope and is not granted by
 the legacy `write` scope. App-bound keys cannot create or access other apps.
 
+Unbound owner API keys can also manage reseller accounts:
+
+| Operation | Method and path | Required scope |
+| --- | --- | --- |
+| List reseller summaries | `GET /resellers` | `resellers.read` |
+| Create a reseller | `POST /resellers` | `resellers.create` |
+| Rename, rotate password, activate, or deactivate | `PATCH /resellers/{reseller_id}` | `resellers.modify` |
+| Credit a reseller balance | `POST /resellers/{reseller_id}/credit` | `resellers.credit` |
+| Delete a reseller | `POST /resellers/{reseller_id}/delete` | `resellers.delete` |
+
+Reseller passwords require at least 10 characters containing a letter, number,
+and special character, and are stored only as bcrypt hashes. Password rotation
+and deactivation revoke all reseller sessions. Deletion requires
+`{"confirm":"DELETE"}`; when the reseller has issued licenses, the request is
+rejected unless `delete_issued_licenses` is explicitly `true`. That opt-in
+removes the issued licenses and reseller atomically.
+
 `licenses.read` returns a masked key plus `products` and `levels`. Add the
 separate high-risk `licenses.reveal` scope only when the integration genuinely
 needs stored plaintext keys. Newly generated keys are returned once by the
@@ -631,6 +648,8 @@ For issues and questions, please refer to the project documentation or contact t
 
 ### Unreleased
 
+- Added scoped reseller creation, credential rotation, activation, crediting,
+  and confirmed deletion APIs, with session revocation and issued-license safeguards.
 - Allowed `licenses.read` API keys to inspect assigned product names and levels
   without granting access to plaintext license credentials.
 - Prevented internal lookup hashes, encrypted key material, and client password
