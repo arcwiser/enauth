@@ -500,6 +500,9 @@ Product-level administration is also available through API keys:
 | List levels and version policies | `GET /apps/{app_id}/products` | `products.read` |
 | Create a level | `POST /apps/{app_id}/products` | `products.modify` |
 | Rename, deactivate, or change version policy | `PATCH /apps/{app_id}/products/{product_id}` | `products.modify` |
+| List reseller pricing points | `GET /apps/{app_id}/products/{product_id}/pricing` | `products.read` |
+| Create a reseller pricing point | `POST /apps/{app_id}/products/{product_id}/pricing` | `products.modify` |
+| Delete an unused pricing point | `DELETE /apps/{app_id}/products/{product_id}/pricing/{pricing_id}` | `products.delete` |
 | Pause/resume a level-wide outage | `POST /apps/{app_id}/products/{product_id}/pause` or `/resume` | `products.modify` |
 | Preview outage restoration | `GET /apps/{app_id}/products/{product_id}/resume-preview` | `products.read` |
 | Delete a level | `DELETE /apps/{app_id}/products/{product_id}?force=true` | `products.delete` |
@@ -526,9 +529,14 @@ Unbound owner API keys can also manage reseller accounts:
 | Operation | Method and path | Required scope |
 | --- | --- | --- |
 | List reseller summaries | `GET /resellers` | `resellers.read` |
+| Read reseller details and sales totals | `GET /resellers/{reseller_id}` | `resellers.read` |
+| Read ledger, orders, and sales analytics | `GET /resellers/{reseller_id}/ledger`, `/orders`, or `/analytics` | `resellers.read` |
+| Read assigned products and pricing | `GET /resellers/{reseller_id}/products` or `/pricing` | `resellers.read` |
 | Create a reseller | `POST /resellers` | `resellers.create` |
 | Rename, rotate password, activate, or deactivate | `PATCH /resellers/{reseller_id}` | `resellers.modify` |
-| Credit a reseller balance | `POST /resellers/{reseller_id}/credit` | `resellers.credit` |
+| Grant/revoke a product or update its quota | `POST`/`DELETE /resellers/{reseller_id}/products...` | `resellers.modify` |
+| Grant/revoke an allowed pricing point | `POST`/`DELETE /resellers/{reseller_id}/pricing...` | `resellers.modify` |
+| Credit or debit a reseller balance | `POST /resellers/{reseller_id}/credit` | `resellers.credit` |
 | Delete a reseller | `POST /resellers/{reseller_id}/delete` | `resellers.delete` |
 
 Reseller passwords require at least 10 characters containing a letter, number,
@@ -537,6 +545,11 @@ and deactivation revoke all reseller sessions. Deletion requires
 `{"confirm":"DELETE"}`; when the reseller has issued licenses, the request is
 rejected unless `delete_issued_licenses` is explicitly `true`. That opt-in
 removes the issued licenses and reseller atomically.
+
+Pricing access can only be granted after the corresponding product is assigned.
+Revoking a product also removes its pricing permissions. Pricing points already
+referenced by completed reseller orders cannot be deleted, preserving the sales
+audit trail; order responses expose only masked license keys.
 
 `licenses.read` returns a masked key plus `products` and `levels`. Add the
 separate high-risk `licenses.reveal` scope only when the integration genuinely
@@ -648,6 +661,10 @@ For issues and questions, please refer to the project documentation or contact t
 
 ### Unreleased
 
+- Completed API-key reseller catalog management with product grants, quotas,
+  pricing permissions, ledger/order analytics, and masked license references.
+- Added scoped product-pricing management and protected completed reseller
+  order history from cascading pricing-point deletion.
 - Added scoped reseller creation, credential rotation, activation, crediting,
   and confirmed deletion APIs, with session revocation and issued-license safeguards.
 - Allowed `licenses.read` API keys to inspect assigned product names and levels

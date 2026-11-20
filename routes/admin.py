@@ -876,19 +876,30 @@ async def add_product_pricing(product_id: str, body: ProductPricingBody, user=De
 @router.delete("/products/{product_id}/pricing/{pricing_id}")
 async def delete_product_pricing(product_id: str, pricing_id: str, user=Depends(require_admin), db: aiosqlite.Connection = Depends(get_db)):
     owner_id = auth_owner_id(user)
-    if owner_id:
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        sql = """SELECT 1 FROM product_pricing_points pp JOIN products p ON p.id=pp.product_id
+                 JOIN applications a ON a.id=p.app_id WHERE pp.id=? AND pp.product_id=?"""
+        args = [pricing_id, product_id]
+        if owner_id:
+            sql += " AND a.owner_user_id=?"
+            args.append(owner_id)
+        async with db.execute(sql, args) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(404, "Pricing point not found")
+        async with db.execute(
+            "SELECT COUNT(*) FROM key_orders WHERE pricing_point_id=?", (pricing_id,)
+        ) as cur:
+            orders = (await cur.fetchone())[0]
+        if orders:
+            raise HTTPException(409, f"Pricing point is referenced by {orders} order(s) and cannot be deleted")
         await db.execute(
-            """DELETE FROM product_pricing_points
-               WHERE id = ? AND product_id = ? AND product_id IN (
-                 SELECT p.id FROM products p
-                 JOIN applications a ON a.id = p.app_id
-                 WHERE a.owner_user_id = ?
-               )""",
-            (pricing_id, product_id, owner_id),
+            "DELETE FROM product_pricing_points WHERE id=? AND product_id=?", (pricing_id, product_id)
         )
-    else:
-        await db.execute("DELETE FROM product_pricing_points WHERE id = ? AND product_id = ?", (pricing_id, product_id))
-    await db.commit()
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
     return {"ok": True}
 
 
@@ -2296,9 +2307,9 @@ async def developer_overview(request: Request, user=Depends(require_admin),
         {"name": "apps.modify", "description": "Pause apps and change product status"},
         {"name": "apps.secrets", "description": "Rotate and reveal application secrets"},
         {"name": "apps.delete", "description": "Permanently delete applications and dependent data"},
-        {"name": "products.read", "description": "Read product levels and client-version policy"},
-        {"name": "products.modify", "description": "Create or update product levels"},
-        {"name": "products.delete", "description": "Permanently delete product levels"},
+        {"name": "products.read", "description": "Read product levels, pricing, and client-version policy"},
+        {"name": "products.modify", "description": "Create or update product levels and pricing"},
+        {"name": "products.delete", "description": "Permanently delete product levels or unused pricing"},
         {"name": "licenses.read", "description": "List licenses and customer requests"},
         {"name": "licenses.generate", "description": "Generate new licenses"},
         {"name": "licenses.modify", "description": "Ban, extend, reset, or update licenses"},
@@ -2319,10 +2330,10 @@ async def developer_overview(request: Request, user=Depends(require_admin),
         {"name": "variables.delete", "description": "Delete global variables"},
         {"name": "hwids.read", "description": "List application HWID bans"},
         {"name": "hwids.modify", "description": "Ban or unban HWIDs"},
-        {"name": "resellers.read", "description": "Read reseller account summaries"},
+        {"name": "resellers.read", "description": "Read reseller accounts, access, ledgers, orders, and analytics"},
         {"name": "resellers.create", "description": "Create reseller accounts"},
-        {"name": "resellers.modify", "description": "Rename, secure, activate, or deactivate resellers"},
-        {"name": "resellers.credit", "description": "Credit reseller balances"},
+        {"name": "resellers.modify", "description": "Manage reseller identity, status, products, quotas, and pricing"},
+        {"name": "resellers.credit", "description": "Credit or debit reseller balances with ledger entries"},
         {"name": "resellers.delete", "description": "Permanently delete reseller accounts"},
     ]
     return {

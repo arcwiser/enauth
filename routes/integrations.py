@@ -250,7 +250,7 @@ class BulkLicenseDeleteBody(BulkLicenseBody):
 
 
 class CreditResellerBody(BaseModel):
-    amount: float = Field(gt=0, le=100000000)
+    amount: float = Field(ge=-100000000, le=100000000)
     reason: Optional[str] = Field(default=None, max_length=500)
 
 
@@ -316,6 +316,24 @@ class ProductUpdateBody(BaseModel):
     required_client_version: Optional[str] = Field(default=None, max_length=64)
     blocked_client_versions: Optional[list[str]] = Field(default=None, max_length=100)
     version_kill_switch: Optional[bool] = None
+
+
+class ProductPricingBody(BaseModel):
+    days: int = Field(ge=1, le=36500)
+    price: float = Field(gt=0, le=100000000)
+
+
+class ResellerProductAccessBody(BaseModel):
+    product_id: str = Field(min_length=1, max_length=100)
+    monthly_quota: Optional[int] = Field(default=None, ge=1, le=1000000)
+
+
+class ResellerQuotaBody(BaseModel):
+    monthly_quota: Optional[int] = Field(default=None, ge=1, le=1000000)
+
+
+class ResellerPricingAccessBody(BaseModel):
+    pricing_point_id: str = Field(min_length=1, max_length=100)
 
 
 def normalize_product_level(value: str) -> str:
@@ -602,6 +620,87 @@ async def integration_products(app_id: str, _key=Depends(require_scope("products
         (app_id,),
     ) as cur:
         return [serialize_product(row) for row in await cur.fetchall()]
+
+
+@router.get("/apps/{app_id}/products/{product_id}/pricing")
+async def product_pricing(app_id: str, product_id: str,
+                          _key=Depends(require_scope("products.read")), db=Depends(get_db)):
+    async with db.execute(
+        "SELECT 1 FROM products WHERE id=? AND app_id=?", (product_id, app_id)
+    ) as cur:
+        if not await cur.fetchone():
+            raise HTTPException(404, "Product not found for this application")
+    async with db.execute(
+        """SELECT id,product_id,days,price,created_at FROM product_pricing_points
+           WHERE product_id=? ORDER BY days,price,id""",
+        (product_id,),
+    ) as cur:
+        return [dict(row) for row in await cur.fetchall()]
+
+
+@router.post("/apps/{app_id}/products/{product_id}/pricing")
+async def create_product_pricing(app_id: str, product_id: str, body: ProductPricingBody,
+                                 key=Depends(require_scope("products.modify")), db=Depends(get_db)):
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        async with db.execute(
+            "SELECT name,level FROM products WHERE id=? AND app_id=?", (product_id, app_id)
+        ) as cur:
+            product = await cur.fetchone()
+        if not product:
+            raise HTTPException(404, "Product not found for this application")
+        async with db.execute(
+            "SELECT COUNT(*) FROM product_pricing_points WHERE product_id=?", (product_id,)
+        ) as cur:
+            if (await cur.fetchone())[0] >= 6:
+                raise HTTPException(409, "Product already has the maximum 6 pricing points")
+        async with db.execute(
+            "SELECT id FROM product_pricing_points WHERE product_id=? AND days=? AND price=?",
+            (product_id, body.days, body.price),
+        ) as cur:
+            if await cur.fetchone():
+                raise HTTPException(409, "An identical pricing point already exists")
+        pricing_id = generate_uid()
+        await db.execute(
+            "INSERT INTO product_pricing_points(id,product_id,days,price) VALUES(?,?,?,?)",
+            (pricing_id, product_id, body.days, body.price),
+        )
+        await log_action(db, "integration_product_pricing_created", app_id=app_id,
+                         details=(f"product={product_id}; pricing={pricing_id}; days={body.days}; "
+                                  f"price={body.price}; API key {key['id']}"))
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    return {"id": pricing_id, "product_id": product_id, "days": body.days, "price": body.price}
+
+
+@router.delete("/apps/{app_id}/products/{product_id}/pricing/{pricing_id}")
+async def delete_product_pricing(app_id: str, product_id: str, pricing_id: str,
+                                 key=Depends(require_scope("products.delete")), db=Depends(get_db)):
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        async with db.execute(
+            """SELECT pp.id FROM product_pricing_points pp JOIN products p ON p.id=pp.product_id
+               WHERE pp.id=? AND pp.product_id=? AND p.app_id=?""",
+            (pricing_id, product_id, app_id),
+        ) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(404, "Pricing point not found for this application")
+        async with db.execute(
+            "SELECT COUNT(*) FROM key_orders WHERE pricing_point_id=?", (pricing_id,)
+        ) as cur:
+            orders = (await cur.fetchone())[0]
+        if orders:
+            raise HTTPException(409, f"Pricing point is referenced by {orders} order(s) and cannot be deleted")
+        await db.execute("DELETE FROM product_pricing_points WHERE id=?", (pricing_id,))
+        await log_action(db, "integration_product_pricing_deleted", app_id=app_id,
+                         details=f"product={product_id}; pricing={pricing_id}; API key {key['id']}")
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    return {"ok": True, "product_id": product_id, "pricing_point_id": pricing_id}
 
 
 @router.post("/apps/{app_id}/products")
@@ -1799,6 +1898,274 @@ async def resellers(key=Depends(require_scope("resellers.read")), db=Depends(get
         return [dict(row) for row in await cur.fetchall()]
 
 
+@router.get("/resellers/{reseller_id}")
+async def reseller_details(reseller_id: str, key=Depends(require_scope("resellers.read")), db=Depends(get_db)):
+    if key.get("kind") == "discord":
+        raise HTTPException(403, "Discord integrations cannot access reseller accounts")
+    async with db.execute(
+        "SELECT id,username,balance,is_active,created_at FROM resellers WHERE id=?", (reseller_id,)
+    ) as cur:
+        reseller = await cur.fetchone()
+    if not reseller:
+        raise HTTPException(404, "Reseller not found")
+    result = dict(reseller)
+    async with db.execute(
+        """SELECT COUNT(*) AS total_orders,COALESCE(SUM(amount_paid),0) AS total_revenue
+           FROM key_orders WHERE reseller_id=?""",
+        (reseller_id,),
+    ) as cur:
+        result["sales"] = dict(await cur.fetchone())
+    return result
+
+
+@router.get("/resellers/{reseller_id}/ledger")
+async def reseller_ledger(reseller_id: str, limit: int = 50, offset: int = 0,
+                          key=Depends(require_scope("resellers.read")), db=Depends(get_db)):
+    if key.get("kind") == "discord":
+        raise HTTPException(403, "Discord integrations cannot access reseller accounts")
+    async with db.execute("SELECT 1 FROM resellers WHERE id=?", (reseller_id,)) as cur:
+        if not await cur.fetchone():
+            raise HTTPException(404, "Reseller not found")
+    limit, offset = max(1, min(limit, 100)), max(0, offset)
+    async with db.execute(
+        """SELECT id,amount,reason,created_by,created_at FROM reseller_balance_ledger
+           WHERE reseller_id=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?""",
+        (reseller_id, limit, offset),
+    ) as cur:
+        return [dict(row) for row in await cur.fetchall()]
+
+
+@router.get("/resellers/{reseller_id}/orders")
+async def reseller_orders(reseller_id: str, limit: int = 50, offset: int = 0,
+                          key=Depends(require_scope("resellers.read")), db=Depends(get_db)):
+    if key.get("kind") == "discord":
+        raise HTTPException(403, "Discord integrations cannot access reseller accounts")
+    async with db.execute("SELECT 1 FROM resellers WHERE id=?", (reseller_id,)) as cur:
+        if not await cur.fetchone():
+            raise HTTPException(404, "Reseller not found")
+    limit, offset = max(1, min(limit, 100)), max(0, offset)
+    async with db.execute(
+        """SELECT ko.id,ko.license_id,ko.product_id,ko.pricing_point_id,ko.amount_paid,ko.created_at,
+                  l.key AS license_key,l.status AS license_status,p.name AS product_name,p.level,
+                  pp.days,pp.price
+           FROM key_orders ko JOIN licenses l ON l.id=ko.license_id
+           JOIN products p ON p.id=ko.product_id
+           JOIN product_pricing_points pp ON pp.id=ko.pricing_point_id
+           WHERE ko.reseller_id=? ORDER BY ko.created_at DESC,ko.id DESC LIMIT ? OFFSET ?""",
+        (reseller_id, limit, offset),
+    ) as cur:
+        rows = [dict(row) for row in await cur.fetchall()]
+    for row in rows:
+        row["license_key"] = mask_license_key(row["license_key"])
+    return rows
+
+
+@router.get("/resellers/{reseller_id}/analytics")
+async def reseller_analytics(reseller_id: str, key=Depends(require_scope("resellers.read")), db=Depends(get_db)):
+    if key.get("kind") == "discord":
+        raise HTTPException(403, "Discord integrations cannot access reseller accounts")
+    async with db.execute("SELECT 1 FROM resellers WHERE id=?", (reseller_id,)) as cur:
+        if not await cur.fetchone():
+            raise HTTPException(404, "Reseller not found")
+    async with db.execute(
+        """SELECT COUNT(*) AS total_sales,COALESCE(SUM(amount_paid),0) AS total_revenue
+           FROM key_orders WHERE reseller_id=?""",
+        (reseller_id,),
+    ) as cur:
+        totals = dict(await cur.fetchone())
+    async with db.execute(
+        """SELECT DATE(created_at) AS date,COUNT(*) AS count,COALESCE(SUM(amount_paid),0) AS revenue
+           FROM key_orders WHERE reseller_id=? AND created_at>=datetime('now','-30 days')
+           GROUP BY DATE(created_at) ORDER BY date DESC""",
+        (reseller_id,),
+    ) as cur:
+        by_date = [dict(row) for row in await cur.fetchall()]
+    async with db.execute(
+        """SELECT ko.product_id,p.name,p.level,COUNT(*) AS count,COALESCE(SUM(ko.amount_paid),0) AS revenue
+           FROM key_orders ko JOIN products p ON p.id=ko.product_id WHERE ko.reseller_id=?
+           GROUP BY ko.product_id,p.name,p.level ORDER BY count DESC,ko.product_id LIMIT 10""",
+        (reseller_id,),
+    ) as cur:
+        top_products = [dict(row) for row in await cur.fetchall()]
+    return {**totals, "sales_by_date": by_date, "top_products": top_products}
+
+
+@router.get("/resellers/{reseller_id}/products")
+async def reseller_products(reseller_id: str, key=Depends(require_scope("resellers.read")), db=Depends(get_db)):
+    if key.get("kind") == "discord":
+        raise HTTPException(403, "Discord integrations cannot access reseller accounts")
+    async with db.execute("SELECT 1 FROM resellers WHERE id=?", (reseller_id,)) as cur:
+        if not await cur.fetchone():
+            raise HTTPException(404, "Reseller not found")
+    async with db.execute(
+        """SELECT p.id AS product_id,p.app_id,p.name,p.level,p.is_active,rpa.monthly_quota,
+                  rpa.monthly_used,rpa.quota_reset_at,rpa.created_at AS access_created_at
+           FROM reseller_product_access rpa JOIN products p ON p.id=rpa.product_id
+           WHERE rpa.reseller_id=? ORDER BY p.name,p.level,p.id""",
+        (reseller_id,),
+    ) as cur:
+        return [dict(row) for row in await cur.fetchall()]
+
+
+@router.post("/resellers/{reseller_id}/products")
+async def grant_reseller_product(reseller_id: str, body: ResellerProductAccessBody,
+                                 key=Depends(require_scope("resellers.modify")), db=Depends(get_db)):
+    if key.get("kind") == "discord":
+        raise HTTPException(403, "Discord integrations cannot access reseller accounts")
+    async with db.execute("SELECT 1 FROM resellers WHERE id=?", (reseller_id,)) as cur:
+        if not await cur.fetchone():
+            raise HTTPException(404, "Reseller not found")
+    async with db.execute("SELECT app_id FROM products WHERE id=?", (body.product_id,)) as cur:
+        product = await cur.fetchone()
+    if not product:
+        raise HTTPException(404, "Product not found")
+    try:
+        await db.execute(
+            """INSERT INTO reseller_product_access
+               (id,reseller_id,product_id,monthly_quota,quota_reset_at)
+               VALUES(?,?,?,?,datetime('now','start of month','+1 month'))""",
+            (generate_uid(), reseller_id, body.product_id, body.monthly_quota),
+        )
+    except aiosqlite.IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "Product already granted to reseller")
+    await log_action(db, "integration_reseller_product_granted", app_id=product["app_id"],
+                     details=(f"reseller={reseller_id}; product={body.product_id}; "
+                              f"quota={body.monthly_quota}; API key {key['id']}"))
+    await db.commit()
+    return {"ok": True, "reseller_id": reseller_id, "product_id": body.product_id,
+            "monthly_quota": body.monthly_quota}
+
+
+@router.put("/resellers/{reseller_id}/products/{product_id}/quota")
+async def set_reseller_product_quota(reseller_id: str, product_id: str, body: ResellerQuotaBody,
+                                     key=Depends(require_scope("resellers.modify")), db=Depends(get_db)):
+    if key.get("kind") == "discord":
+        raise HTTPException(403, "Discord integrations cannot access reseller accounts")
+    cursor = await db.execute(
+        "UPDATE reseller_product_access SET monthly_quota=? WHERE reseller_id=? AND product_id=?",
+        (body.monthly_quota, reseller_id, product_id),
+    )
+    if cursor.rowcount == 0:
+        await db.rollback()
+        raise HTTPException(404, "Reseller product access not found")
+    async with db.execute("SELECT app_id FROM products WHERE id=?", (product_id,)) as cur:
+        product = await cur.fetchone()
+    await log_action(db, "integration_reseller_quota_updated",
+                     app_id=product["app_id"] if product else None,
+                     details=(f"reseller={reseller_id}; product={product_id}; "
+                              f"quota={body.monthly_quota}; API key {key['id']}"))
+    await db.commit()
+    return {"ok": True, "reseller_id": reseller_id, "product_id": product_id,
+            "monthly_quota": body.monthly_quota}
+
+
+@router.delete("/resellers/{reseller_id}/products/{product_id}")
+async def revoke_reseller_product(reseller_id: str, product_id: str,
+                                  key=Depends(require_scope("resellers.modify")), db=Depends(get_db)):
+    if key.get("kind") == "discord":
+        raise HTTPException(403, "Discord integrations cannot access reseller accounts")
+    pricing_cursor = await db.execute(
+        """DELETE FROM reseller_pricing_access WHERE reseller_id=? AND pricing_point_id IN
+           (SELECT id FROM product_pricing_points WHERE product_id=?)""",
+        (reseller_id, product_id),
+    )
+    cursor = await db.execute(
+        "DELETE FROM reseller_product_access WHERE reseller_id=? AND product_id=?",
+        (reseller_id, product_id),
+    )
+    if cursor.rowcount == 0:
+        await db.rollback()
+        raise HTTPException(404, "Reseller product access not found")
+    async with db.execute("SELECT app_id FROM products WHERE id=?", (product_id,)) as cur:
+        product = await cur.fetchone()
+    await log_action(db, "integration_reseller_product_revoked",
+                     app_id=product["app_id"] if product else None,
+                     details=(f"reseller={reseller_id}; product={product_id}; "
+                              f"pricing={pricing_cursor.rowcount}; API key {key['id']}"))
+    await db.commit()
+    return {"ok": True, "reseller_id": reseller_id, "product_id": product_id,
+            "revoked_pricing_points": pricing_cursor.rowcount}
+
+
+@router.get("/resellers/{reseller_id}/pricing")
+async def reseller_pricing(reseller_id: str, key=Depends(require_scope("resellers.read")), db=Depends(get_db)):
+    if key.get("kind") == "discord":
+        raise HTTPException(403, "Discord integrations cannot access reseller accounts")
+    async with db.execute("SELECT 1 FROM resellers WHERE id=?", (reseller_id,)) as cur:
+        if not await cur.fetchone():
+            raise HTTPException(404, "Reseller not found")
+    async with db.execute(
+        """SELECT pp.id AS pricing_point_id,pp.product_id,p.app_id,p.name,p.level,pp.days,pp.price,
+                  rpa.created_at AS access_created_at FROM reseller_pricing_access rpa
+           JOIN product_pricing_points pp ON pp.id=rpa.pricing_point_id
+           JOIN products p ON p.id=pp.product_id WHERE rpa.reseller_id=?
+           ORDER BY p.name,p.level,pp.days,pp.price,pp.id""",
+        (reseller_id,),
+    ) as cur:
+        return [dict(row) for row in await cur.fetchall()]
+
+
+@router.post("/resellers/{reseller_id}/pricing")
+async def grant_reseller_pricing(reseller_id: str, body: ResellerPricingAccessBody,
+                                 key=Depends(require_scope("resellers.modify")), db=Depends(get_db)):
+    if key.get("kind") == "discord":
+        raise HTTPException(403, "Discord integrations cannot access reseller accounts")
+    async with db.execute(
+        """SELECT pp.product_id,p.app_id FROM product_pricing_points pp
+           JOIN products p ON p.id=pp.product_id WHERE pp.id=?""",
+        (body.pricing_point_id,),
+    ) as cur:
+        pricing = await cur.fetchone()
+    if not pricing:
+        raise HTTPException(404, "Pricing point not found")
+    async with db.execute(
+        "SELECT 1 FROM reseller_product_access WHERE reseller_id=? AND product_id=?",
+        (reseller_id, pricing["product_id"]),
+    ) as cur:
+        if not await cur.fetchone():
+            raise HTTPException(409, "Grant the product to the reseller before granting its pricing")
+    try:
+        await db.execute(
+            "INSERT INTO reseller_pricing_access(id,reseller_id,pricing_point_id) VALUES(?,?,?)",
+            (generate_uid(), reseller_id, body.pricing_point_id),
+        )
+    except aiosqlite.IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "Pricing point already granted to reseller")
+    await log_action(db, "integration_reseller_pricing_granted", app_id=pricing["app_id"],
+                     details=(f"reseller={reseller_id}; pricing={body.pricing_point_id}; "
+                              f"API key {key['id']}"))
+    await db.commit()
+    return {"ok": True, "reseller_id": reseller_id, "pricing_point_id": body.pricing_point_id}
+
+
+@router.delete("/resellers/{reseller_id}/pricing/{pricing_point_id}")
+async def revoke_reseller_pricing(reseller_id: str, pricing_point_id: str,
+                                  key=Depends(require_scope("resellers.modify")), db=Depends(get_db)):
+    if key.get("kind") == "discord":
+        raise HTTPException(403, "Discord integrations cannot access reseller accounts")
+    async with db.execute(
+        """SELECT p.app_id FROM product_pricing_points pp JOIN products p ON p.id=pp.product_id
+           WHERE pp.id=?""",
+        (pricing_point_id,),
+    ) as cur:
+        pricing = await cur.fetchone()
+    cursor = await db.execute(
+        "DELETE FROM reseller_pricing_access WHERE reseller_id=? AND pricing_point_id=?",
+        (reseller_id, pricing_point_id),
+    )
+    if cursor.rowcount == 0:
+        await db.rollback()
+        raise HTTPException(404, "Reseller pricing access not found")
+    await log_action(db, "integration_reseller_pricing_revoked",
+                     app_id=pricing["app_id"] if pricing else None,
+                     details=(f"reseller={reseller_id}; pricing={pricing_point_id}; "
+                              f"API key {key['id']}"))
+    await db.commit()
+    return {"ok": True, "reseller_id": reseller_id, "pricing_point_id": pricing_point_id}
+
+
 @router.post("/resellers")
 async def create_reseller(body: ResellerCreateBody,
                           key=Depends(require_scope("resellers.create")), db=Depends(get_db)):
@@ -1875,6 +2242,8 @@ async def credit_reseller(reseller_id: str, body: CreditResellerBody,
                           key=Depends(require_scope("resellers.credit")), db=Depends(get_db)):
     if key.get("kind") == "discord":
         raise HTTPException(403, "Discord integrations cannot access reseller accounts")
+    if body.amount == 0:
+        raise HTTPException(400, "Amount cannot be zero")
     cursor = await db.execute("UPDATE resellers SET balance=balance+? WHERE id=?", (body.amount, reseller_id))
     if cursor.rowcount == 0:
         await db.rollback()
@@ -1886,7 +2255,7 @@ async def credit_reseller(reseller_id: str, body: CreditResellerBody,
     )
     async with db.execute("SELECT balance FROM resellers WHERE id=?", (reseller_id,)) as cur:
         balance = (await cur.fetchone())["balance"]
-    await log_action(db, "integration_reseller_credit",
+    await log_action(db, "integration_reseller_balance_adjusted",
                      details=f"reseller={reseller_id}; amount={body.amount}; API key {key['id']}")
     await db.commit()
     return {"ok": True, "balance": balance}

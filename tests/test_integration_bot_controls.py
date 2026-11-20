@@ -11,6 +11,7 @@ from starlette.requests import Request
 os.environ.setdefault("LICENSE_KEY_PEPPER", "test-license-pepper-that-is-long-enough")
 
 from database import SCHEMA
+from routes import admin as admin_routes
 from routes import integrations
 from utils.crypto import encrypt_license_key, hash_license_key, mask_license_key, verify_password
 
@@ -704,6 +705,101 @@ class DiscordIntegrationControlTests(unittest.IsolatedAsyncioTestCase):
         for table, item_id in (("resellers", reseller_id), ("licenses", "issued-license")):
             async with self.db.execute(f"SELECT COUNT(*) FROM {table} WHERE id=?", (item_id,)) as cur:
                 self.assertEqual((await cur.fetchone())[0], 0)
+
+    async def test_api_key_manages_reseller_catalog_and_reads_sales_history(self):
+        created = await integrations.create_reseller(
+            integrations.ResellerCreateBody(username="catalog-partner", password="SecurePass1!"),
+            self.api_key, self.db,
+        )
+        reseller_id = created["id"]
+        pricing = await integrations.create_product_pricing(
+            "app-1", "product-1", integrations.ProductPricingBody(days=30, price=12.5),
+            self.api_key, self.db,
+        )
+        pricing_id = pricing["id"]
+        listed_pricing = await integrations.product_pricing(
+            "app-1", "product-1", self.api_key, self.db,
+        )
+        self.assertEqual(listed_pricing[0]["id"], pricing_id)
+
+        with self.assertRaises(HTTPException) as missing_product:
+            await integrations.grant_reseller_pricing(
+                reseller_id,
+                integrations.ResellerPricingAccessBody(pricing_point_id=pricing_id),
+                self.api_key, self.db,
+            )
+        self.assertEqual(missing_product.exception.status_code, 409)
+        granted_product = await integrations.grant_reseller_product(
+            reseller_id,
+            integrations.ResellerProductAccessBody(product_id="product-1", monthly_quota=10),
+            self.api_key, self.db,
+        )
+        self.assertEqual(granted_product["monthly_quota"], 10)
+        await integrations.grant_reseller_pricing(
+            reseller_id,
+            integrations.ResellerPricingAccessBody(pricing_point_id=pricing_id),
+            self.api_key, self.db,
+        )
+        quota = await integrations.set_reseller_product_quota(
+            reseller_id, "product-1", integrations.ResellerQuotaBody(monthly_quota=None),
+            self.api_key, self.db,
+        )
+        self.assertIsNone(quota["monthly_quota"])
+        self.assertEqual(len(await integrations.reseller_products(reseller_id, self.api_key, self.db)), 1)
+        self.assertEqual(len(await integrations.reseller_pricing(reseller_id, self.api_key, self.db)), 1)
+
+        credited = await integrations.credit_reseller(
+            reseller_id, integrations.CreditResellerBody(amount=25, reason="API funding"),
+            self.api_key, self.db,
+        )
+        self.assertEqual(credited["balance"], 25)
+        debited = await integrations.credit_reseller(
+            reseller_id, integrations.CreditResellerBody(amount=-5, reason="API correction"),
+            self.api_key, self.db,
+        )
+        self.assertEqual(debited["balance"], 20)
+        raw_key = "SSSSSS-TTTTTT-UUUUUU-VVVVVV-WWWWWW-XXXXXX"
+        await self.db.execute(
+            """INSERT INTO licenses(id,key,key_hash,key_ciphertext,app_id)
+               VALUES('catalog-license',?,?,?,'app-1')""",
+            (mask_license_key(raw_key), hash_license_key(raw_key), encrypt_license_key(raw_key)),
+        )
+        await self.db.execute(
+            """INSERT INTO key_orders(id,reseller_id,license_id,product_id,pricing_point_id,amount_paid)
+               VALUES('catalog-order',?,'catalog-license','product-1',?,12.5)""",
+            (reseller_id, pricing_id),
+        )
+        await self.db.commit()
+
+        details = await integrations.reseller_details(reseller_id, self.api_key, self.db)
+        self.assertEqual(details["sales"]["total_orders"], 1)
+        ledger = await integrations.reseller_ledger(reseller_id, 50, 0, self.api_key, self.db)
+        self.assertEqual([entry["reason"] for entry in ledger[:2]], ["API correction", "API funding"])
+        orders = await integrations.reseller_orders(reseller_id, 50, 0, self.api_key, self.db)
+        self.assertEqual(orders[0]["level"], "one")
+        self.assertNotIn(raw_key, str(orders))
+        analytics = await integrations.reseller_analytics(reseller_id, self.api_key, self.db)
+        self.assertEqual(analytics["total_sales"], 1)
+        self.assertEqual(analytics["top_products"][0]["product_id"], "product-1")
+
+        with self.assertRaises(HTTPException) as protected:
+            await integrations.delete_product_pricing(
+                "app-1", "product-1", pricing_id, self.api_key, self.db,
+            )
+        self.assertEqual(protected.exception.status_code, 409)
+        with self.assertRaises(HTTPException) as panel_protected:
+            await admin_routes.delete_product_pricing(
+                "product-1", pricing_id,
+                {"id": "owner", "role": "owner", "_source": "admin_users"}, self.db,
+            )
+        self.assertEqual(panel_protected.exception.status_code, 409)
+
+        revoked = await integrations.revoke_reseller_product(
+            reseller_id, "product-1", self.api_key, self.db,
+        )
+        self.assertEqual(revoked["revoked_pricing_points"], 1)
+        self.assertEqual(await integrations.reseller_products(reseller_id, self.api_key, self.db), [])
+        self.assertEqual(await integrations.reseller_pricing(reseller_id, self.api_key, self.db), [])
 
     async def test_reseller_role_cannot_use_integration_api(self):
         raw = await self._owner_api_key("admin", role="reseller")
